@@ -2,9 +2,9 @@
 //  ContentView.swift
 //  Recaptr
 //
-//  Phase 2 (2026-05-09): minimal preview + camera picker + Start/Stop.
-//  Phase 3 (2026-05-09): added Record / Stop Recording controls and
-//    a "Show in Finder" affordance for the last recorded file.
+//  Phase 2: preview + camera picker + Start/Stop.
+//  Phase 3: Record + Stop Recording + Show in Finder.
+//  Phase 4 (2026-05-09): audio source picker (None or any AudioSource).
 //
 
 import SwiftUI
@@ -16,7 +16,6 @@ struct ContentView: View {
     var body: some View {
         VStack(spacing: 12) {
 
-            // ── Live preview surface
             SampleBufferPreviewRepresentable(vm: vm)
                 .background(Color.black)
                 .frame(minWidth: 640, minHeight: 360)
@@ -24,7 +23,6 @@ struct ContentView: View {
                 .padding(.horizontal)
                 .padding(.top)
 
-            // ── Source row
             VStack(spacing: 10) {
                 HStack {
                     Text("Camera:").font(.callout)
@@ -37,13 +35,22 @@ struct ContentView: View {
                     .pickerStyle(.menu)
                     .labelsHidden()
 
+                    Text("Audio:").font(.callout).padding(.leading, 12)
+                    Picker("Audio", selection: $vm.selectedAudioSource) {
+                        Text("None").tag(AudioSource?.none)
+                        ForEach(vm.availableAudioSources) { src in
+                            Text(src.name).tag(AudioSource?.some(src))
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .labelsHidden()
+
                     Button("Refresh") {
                         Task { await vm.refreshCatalog() }
                     }
                     .buttonStyle(.bordered)
                 }
 
-                // ── Preview controls
                 HStack(spacing: 12) {
                     if vm.isPreviewing {
                         Button(role: .destructive) {
@@ -62,7 +69,6 @@ struct ContentView: View {
                         .disabled(vm.selectedMainSource == nil)
                     }
 
-                    // ── Record controls (only meaningful while previewing)
                     if vm.isPreviewing {
                         if vm.isRecording {
                             Button {
@@ -83,7 +89,6 @@ struct ContentView: View {
                         }
                     }
 
-                    // ── Show last recording in Finder
                     if let url = vm.lastRecordedFile, !vm.isRecording {
                         Button {
                             NSWorkspace.shared.activateFileViewerSelecting([url])
@@ -106,7 +111,7 @@ struct ContentView: View {
             .padding(.horizontal)
         }
         .padding(.bottom)
-        .frame(minWidth: 800, minHeight: 520)
+        .frame(minWidth: 900, minHeight: 540)
     }
 }
 

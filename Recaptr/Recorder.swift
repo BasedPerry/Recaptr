@@ -154,21 +154,32 @@ final class Recorder: @unchecked Sendable {
         }
     }
 
-    /// Sandbox-safe output path. NSHomeDirectory() inside an app
-    /// sandbox returns the container root (e.g.
-    /// ~/Library/Containers/com.OvertonForge.Recaptr/Data), which is
-    /// always writable. Phase 7 polish adds the user-selected save
-    /// location via NSOpenPanel + the user-selected files entitlement.
+    /// Sandbox-safe output path. Earlier iteration tried
+    /// NSHomeDirectory()/Movies, which still fails — the container's
+    /// Movies subdir appears to be aliased to the user's real ~/Movies
+    /// (sandbox blocks writes without the assets.movies entitlement).
+    /// Application Support has no such aliasing — always writable in
+    /// any sandbox configuration. Phase 7 polish adds proper user-
+    /// selected save location via NSOpenPanel + readwrite entitlement.
     private static func makeOutputURL() throws -> URL {
-        let containerHome = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
-        let recaptrDir = containerHome
-            .appendingPathComponent("Movies", isDirectory: true)
-            .appendingPathComponent("Recaptr", isDirectory: true)
         let fm = FileManager.default
-        if !fm.fileExists(atPath: recaptrDir.path) {
-            try fm.createDirectory(at: recaptrDir, withIntermediateDirectories: true)
+        let appSupport = try fm.url(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: true
+        )
+        let recordingsDir = appSupport
+            .appendingPathComponent("Recaptr", isDirectory: true)
+            .appendingPathComponent("Recordings", isDirectory: true)
+        if !fm.fileExists(atPath: recordingsDir.path) {
+            try fm.createDirectory(at: recordingsDir, withIntermediateDirectories: true)
         }
+        // Surface the resolved path so it's discoverable in console
+        // (Show in Finder will still navigate to it directly).
+        print("Recaptr recordings dir: \(recordingsDir.path)")
+
         let stamp = Date().ISO8601Format().replacingOccurrences(of: ":", with: "-")
-        return recaptrDir.appendingPathComponent("Recaptr_\(stamp).mov")
+        return recordingsDir.appendingPathComponent("Recaptr_\(stamp).mov")
     }
 }
