@@ -1,0 +1,84 @@
+# Recaptr — gitignore
+# Standard Swift / Xcode / macOS exclusions. Keep this file in version
+# control; everything it lists below is local-only junk that should
+# never be pushed.
+
+# ─── macOS ───────────────────────────────────────────────────────────
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+
+# ─── Xcode ───────────────────────────────────────────────────────────
+build/
+DerivedData/
+
+# Per-user Xcode state — never commit
+xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+*.xccheckout
+
+# Old-format Xcode user files
+*.pbxuser
+!default.pbxuser
+*.mode1v3
+!default.mode1v3
+*.mode2v3
+!default.mode2v3
+*.perspectivev3
+!default.perspectivev3
+
+# Misc Xcode
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+timeline.xctimeline
+playground.xcworkspace
+
+# ─── Swift Package Manager ───────────────────────────────────────────
+.build/
+.swiftpm/
+Packages/
+Package.pins
+Package.resolved
+*.xcodeproj/project.xcworkspace/xcuserdata/
+*.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
+
+# ─── CocoaPods (if ever added) ───────────────────────────────────────
+Pods/
+
+# ─── Carthage (if ever added) ────────────────────────────────────────
+Carthage/Build/
+Carthage/Checkouts
+
+# ─── fastlane (if ever added) ────────────────────────────────────────
+fastlane/report.xml
+fastlane/Preview.html
+fastlane/screenshots/**/*.png
+fastlane/test_output
+
+# ─── IDE / Editors ───────────────────────────────────────────────────
+.idea/
+.vscode/
+*.sublime-project
+*.sublime-workspace
+
+# ─── Misc ────────────────────────────────────────────────────────────
+*.log
+*.bak
+*.tmp
+*.swp
+.env
+.env.local
+secrets.plist
