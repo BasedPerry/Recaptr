@@ -2,54 +2,38 @@
 //  MainViewModel.swift
 //  Recaptr
 //
-//  Phase 2 (2026-05-09): fresh build, scoped to camera-source preview.
-//  Owns the DeviceCatalog (single source of truth for device discovery)
-//  and the SampleBufferPreviewLayer (single preview surface). Holds a
-//  CameraCaptureService while previewing.
-//
-//  Per locked decision 1 (per-source main + facecam), this model's
-//  selection state will grow in later phases:
-//  - Phase 5 widens main-source filter to include `.screenDisplay` /
-//    `.screenWindow` and gains a `ScreenCaptureService`.
-//  - Phase 6 adds `selectedFacecam: VideoSource?` and an optional
-//    second CameraCaptureService for the facecam track.
-//
-//  Phase 2 keeps it minimal: a single `selectedMainSource` filtered
-//  to `.camera`, a single CameraCaptureService while previewing.
+//  Phase 2: camera-source preview, owns DeviceCatalog + preview layer.
+//  Phase 3: Recorder + recording state.
+//  Phase 4 (2026-05-09): added selectedAudioSource. When set, audio is
+//    captured + included in the recording. When nil, recording is video-only.
 //
 
 import Foundation
 import Combine
 import SwiftUI
 import AVFoundation
+import CoreMedia
 
 @MainActor
 final class MainViewModel: ObservableObject {
 
-    /// Single source of truth for device discovery. Refreshed on init
-    /// and on demand from the UI.
     @Published var catalog = DeviceCatalog()
-
-    /// The user's chosen main video source. Phase 2 only honors
-    /// `.camera` kind; Phase 5 widens this to include screen sources.
     @Published var selectedMainSource: VideoSource?
+    @Published var selectedAudioSource: AudioSource?
 
-    /// True iff the camera service is running.
     @Published var isPreviewing = false
-
-    /// User-facing status string surfaced in the UI.
+    @Published var isRecording = false
     @Published var status: String = "Idle"
+    @Published var lastRecordedFile: URL?
 
-    /// Single preview surface owned by the model. Capture services
-    /// push CMSampleBuffers to this layer directly.
     let previewSinkLayer = SampleBufferPreviewLayer(frame: .zero)
 
     private var cameraService: CameraCaptureService?
+    private let recorder = Recorder()
+    private var activeDims: CMVideoDimensions = .init(width: 0, height: 0)
+    private var hasAudio = false  // Snapshot at preview-start; locked until stopPreview
 
     init() {
-        // Discovery on init so the picker has options as soon as
-        // the window appears. .task on the WindowGroup is no longer
-        // needed — this replaces it.
         Task { await self.refreshCatalog() }
     }
 
@@ -57,13 +41,15 @@ final class MainViewModel: ObservableObject {
         await catalog.refresh()
     }
 
-    /// Cameras only for Phase 2. Phase 5 widens this filter.
     var availableMainSources: [VideoSource] {
         catalog.videoSources.filter { $0.kind == .camera }
     }
 
+    var availableAudioSources: [AudioSource] {
+        catalog.audioSources
+    }
+
     func startPreview() async {
-        // Idempotent — stop any prior session before starting a new one.
         stopPreview()
 
         guard let src = selectedMainSource else {
@@ -71,27 +57,71 @@ final class MainViewModel: ObservableObject {
             return
         }
         guard src.kind == .camera, let cameraID = src.cameraUniqueID else {
-            // Phase 2 only handles cameras. Other source kinds light up later.
             status = "Selected source is not a camera (Phase 5+)"
             return
         }
 
         let svc = CameraCaptureService()
+        svc.onRecordBuffer = { [weak self] sb in self?.recorder.appendVideo(sb) }
+        svc.onAudioBuffer  = { [weak self] sb in self?.recorder.appendAudio(sb) }
+
+        let audioID = selectedAudioSource?.id
+
         do {
-            try await svc.start(cameraUniqueID: cameraID, previewSink: previewSinkLayer)
+            let dims = try await svc.start(
+                cameraUniqueID: cameraID,
+                audioUniqueID: audioID,
+                previewSink: previewSinkLayer
+            )
             cameraService = svc
+            activeDims = dims
+            hasAudio = (audioID != nil)
             isPreviewing = true
-            status = "Previewing — \(src.name)"
+            let audioLabel = hasAudio ? " + audio" : ""
+            status = "Previewing — \(src.name) (\(dims.width)×\(dims.height))\(audioLabel)"
         } catch {
-            status = "Camera error: \(error.localizedDescription)"
+            status = "Camera/audio error: \(error.localizedDescription)"
         }
     }
 
     func stopPreview() {
+        if isRecording {
+            Task { await self.stopRecording() }
+        }
         cameraService?.stop()
         cameraService = nil
         previewSinkLayer.flush()
         isPreviewing = false
         if status.hasPrefix("Previewing") { status = "Idle" }
+    }
+
+    func startRecording() async {
+        guard isPreviewing else { status = "Start preview first"; return }
+        guard activeDims.width > 0, activeDims.height > 0 else {
+            status = "No active video dimensions"
+            return
+        }
+        guard !isRecording else { return }
+
+        do {
+            let url = try await recorder.start(
+                width: activeDims.width,
+                height: activeDims.height,
+                withAudio: hasAudio
+            )
+            isRecording = true
+            lastRecordedFile = nil
+            status = "Recording → \(url.lastPathComponent)"
+        } catch {
+            status = "Recorder error: \(error.localizedDescription)"
+        }
+    }
+
+    func stopRecording() async {
+        guard isRecording else { return }
+        let url = await recorder.stop()
+        isRecording = false
+        lastRecordedFile = url
+        status = url.map { "Saved → \($0.lastPathComponent)" } ?? "Recording stopped (no file)"
     }
 }
