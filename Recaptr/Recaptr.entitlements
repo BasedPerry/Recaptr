@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+		Phase 4.6.3 (2026-05-09 night) — explicit entitlements file.
+		We were relying on Xcode's ENABLE_RESOURCE_ACCESS_MICROPHONE
+		and friends to auto-synthesize entitlements. On macOS Tahoe
+		with hardened runtime + sandbox, that shorthand silently
+		omits keys often enough to be unreliable — symptom: the app
+		never appears in System Settings → Privacy & Security →
+		Microphone, AVCaptureDevice.requestAccess(for:.audio) returns
+		granted=false with no prompt, and AVCaptureSession audio
+		delivers all-zero samples (so recording counters increment
+		but the file plays silent).
+
+		This file is the source of truth. CODE_SIGN_ENTITLEMENTS in
+		the pbxproj points here.
+	-->
+
+	<key>com.apple.security.app-sandbox</key>
+	<true/>
+
+	<!-- AVCaptureSession audio input + AVAudioEngine input capture.
+	     This is the single mic-related entitlement on macOS — there
+	     is no separate "microphone" entitlement; audio-input covers
+	     both AVFoundation paths. -->
+	<key>com.apple.security.device.audio-input</key>
+	<true/>
+
+	<!-- AVCaptureDevice video — built-in cam, Continuity Camera,
+	     external capture cards (Elgato 4K X). -->
+	<key>com.apple.security.device.camera</key>
+	<true/>
+
+	<!-- Phase 7 will swap this for read-write once we add the user-
+	     selected save-location flow via NSOpenPanel. Read-only is
+	     enough for now (recordings land in Application Support
+	     inside the sandbox container). -->
+	<key>com.apple.security.files.user-selected.read-only</key>
+	<true/>
+
+	<!--
+		Phase 4.6.5 (2026-05-09 night) — Mach lookup exception for
+		the Audio Analytics daemon. CoreAudio on macOS Tahoe (and
+		later 14.x) requires sandboxed apps using AVAudioEngine for
+		input to be able to look up `com.apple.audioanalyticsd`.
+		Without this exception, AVAudioEngine.start() prints
+
+		    PRECONDITION FAILURE: Process is sandboxed but
+		    'com.apple.security.exception.mach-lookup.global-name'
+		    doesn't contain 'com.apple.audioanalyticsd'.
+		    throwing -10877  (kAudioUnitErr_FailedInitialization)
+
+		four times, then reports the engine as "started" — but the
+		input audio unit is in a degraded state and the tap callback
+		fires with silent / zero buffers (or doesn't fire at all on
+		some routes). That was the proximate cause of the "audio:
+		NONE" probe result we hit in Phase 4.6.4 testing.
+
+		`temporary-exception` is the version available without
+		special Apple approval; sufficient for development and
+		signed Mac App Store submissions when justified.
+	-->
+	<key>com.apple.security.temporary-exception.mach-lookup.global-name</key>
+	<array>
+		<string>com.apple.audioanalyticsd</string>
+	</array>
+</dict>
+</plist>

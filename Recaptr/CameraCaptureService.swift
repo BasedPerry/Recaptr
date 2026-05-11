@@ -5,41 +5,39 @@
 //  Phase 2: two-output video capture pattern (decision 5).
 //  Phase 3: 1080p60 format lock + currentVideoDimensions return.
 //  Phase 4 (2026-05-09): added optional audio input + AVCaptureAudioDataOutput.
-//    Phase 4.5 will swap this single-source audio for an AVAudioEngine
-//    mixer (decision 2: per-source pre-record volume).
+//  Phase 4.5 (2026-05-09 evening): REMOVED the audio path. The new
+//    AudioMixer (AVAudioEngine-based, multi-source, per-source gain)
+//    owns all audio capture now. CameraCaptureService is back to
+//    single-responsibility video.
 //
 
 import Foundation
 import AVFoundation
 
-final class CameraCaptureService: NSObject, @unchecked Sendable, AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureAudioDataOutputSampleBufferDelegate {
+final class CameraCaptureService: NSObject, @unchecked Sendable, AVCaptureVideoDataOutputSampleBufferDelegate {
 
     private let session = AVCaptureSession()
     private let sessionQueue = DispatchQueue(label: "recaptr.camera.session", qos: .userInitiated)
     private let previewQueue = DispatchQueue(label: "recaptr.camera.preview", qos: .userInteractive)
     private let recordQueue  = DispatchQueue(label: "recaptr.camera.record",  qos: .userInitiated)
-    private let audioQueue   = DispatchQueue(label: "recaptr.camera.audio",   qos: .userInitiated)
 
     private let previewOutput = AVCaptureVideoDataOutput()
     private let recordOutput  = AVCaptureVideoDataOutput()
-    private let audioOutput   = AVCaptureAudioDataOutput()
 
     private weak var previewSinkLayer: SampleBufferPreviewLayer?
     private var activeDimensions: CMVideoDimensions = .init(width: 0, height: 0)
 
     var onRecordBuffer: ((CMSampleBuffer) -> Void)?
-    var onAudioBuffer:  ((CMSampleBuffer) -> Void)?
 
-    /// Configures + starts session. `audioUniqueID` optional — pass nil
-    /// for video-only capture.
+    /// Configures + starts session for video only. Audio is handled
+    /// by the separate AudioMixer (Phase 4.5).
     func start(cameraUniqueID: String,
-               audioUniqueID: String?,
                previewSink: SampleBufferPreviewLayer) async throws -> CMVideoDimensions {
         self.previewSinkLayer = previewSink
         return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<CMVideoDimensions, Error>) in
             sessionQueue.async {
                 do {
-                    try self.configureSession(cameraUniqueID: cameraUniqueID, audioUniqueID: audioUniqueID)
+                    try self.configureSession(cameraUniqueID: cameraUniqueID)
                     self.session.startRunning()
                     cont.resume(returning: self.activeDimensions)
                 } catch {
@@ -57,7 +55,7 @@ final class CameraCaptureService: NSObject, @unchecked Sendable, AVCaptureVideoD
         }
     }
 
-    private func configureSession(cameraUniqueID: String, audioUniqueID: String?) throws {
+    private func configureSession(cameraUniqueID: String) throws {
         session.beginConfiguration()
         defer { session.commitConfiguration() }
 
@@ -75,18 +73,6 @@ final class CameraCaptureService: NSObject, @unchecked Sendable, AVCaptureVideoD
         }
         session.addInput(videoInput)
         activeDimensions = CMVideoFormatDescriptionGetDimensions(videoDevice.activeFormat.formatDescription)
-
-        // ── Audio device (optional)
-        if let audioID = audioUniqueID {
-            guard let audioDevice = AVCaptureDevice(uniqueID: audioID) else {
-                throw CaptureError.configurationFailed("Audio device not found: \(audioID)")
-            }
-            let audioInput = try AVCaptureDeviceInput(device: audioDevice)
-            guard session.canAddInput(audioInput) else {
-                throw CaptureError.configurationFailed("Cannot add audio input")
-            }
-            session.addInput(audioInput)
-        }
 
         // ── Output A — preview
         previewOutput.alwaysDiscardsLateVideoFrames = true
@@ -109,15 +95,6 @@ final class CameraCaptureService: NSObject, @unchecked Sendable, AVCaptureVideoD
             throw CaptureError.configurationFailed("Cannot add record output")
         }
         session.addOutput(recordOutput)
-
-        // ── Output C — audio (only if audio input added)
-        if audioUniqueID != nil {
-            audioOutput.setSampleBufferDelegate(self, queue: audioQueue)
-            guard session.canAddOutput(audioOutput) else {
-                throw CaptureError.configurationFailed("Cannot add audio output")
-            }
-            session.addOutput(audioOutput)
-        }
     }
 
     private static func tryLockFormat(for device: AVCaptureDevice) {
@@ -148,8 +125,6 @@ final class CameraCaptureService: NSObject, @unchecked Sendable, AVCaptureVideoD
             previewSinkLayer?.enqueue(sampleBuffer)
         } else if output === recordOutput {
             onRecordBuffer?(sampleBuffer)
-        } else if output === audioOutput {
-            onAudioBuffer?(sampleBuffer)
         }
     }
 }

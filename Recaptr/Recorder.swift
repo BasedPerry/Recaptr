@@ -8,11 +8,42 @@
 //    NSHomeDirectory()/Movies — sandbox blocks the user's real ~/Movies
 //    without the assets.movies entitlement, container Movies is always
 //    writable. Phase 7 polish adds the user-selected save location flow.
+//  Phase 4 hardening (2026-05-09 evening):
+//    - Session now anchors on the FIRST arriving sample of any media
+//      type (video or audio), eliminating the 50–200ms of audio that
+//      was silently dropped at the start of every recording while we
+//      waited for the first video frame.
+//    - Explicit PTS check on audio: buffers older than the anchor are
+//      dropped with a counter so the failure surfaces instead of
+//      bouncing silently inside AVAssetWriter.
+//    - Recorder exposes a thread-safe RecorderStats snapshot
+//      (writer status, anchored, accepted/dropped counts, first-sample
+//      timestamp, writer.error). MainViewModel polls this on a 1s
+//      timer during recording so a long session shows live evidence
+//      that audio is actually landing.
 //
 
 import Foundation
 import AVFoundation
 import CoreMedia
+
+/// Live recorder telemetry for the UI. Published from MainViewModel.
+struct RecorderStats: Equatable {
+    var isWriting: Bool = false
+    var writerStatus: AVAssetWriter.Status = .unknown
+    var sessionAnchored: Bool = false
+    var videoAccepted: Int = 0
+    var audioAccepted: Int = 0
+    var audioDroppedPreAnchor: Int = 0
+    var audioDroppedNotReady: Int = 0
+    var videoDroppedNotReady: Int = 0
+    /// Phase 4.6.4 — buffers that passed all our guards but got
+    /// rejected by AVAssetWriterInput.append() returning false.
+    /// If this climbs while audioAccepted stays at 0, the writer
+    /// is rejecting our buffers (format mismatch, PTS issue, etc.).
+    var audioAppendRejected: Int = 0
+    var writerErrorDescription: String?
+}
 
 final class Recorder: @unchecked Sendable {
 
@@ -23,6 +54,14 @@ final class Recorder: @unchecked Sendable {
     private var audioInput: AVAssetWriterInput?
     private var sessionStartTime: CMTime = .invalid
     private var isWriting = false
+
+    // Telemetry — only mutated on writerQueue, snapshotted via stats().
+    private var videoAccepted: Int = 0
+    private var audioAccepted: Int = 0
+    private var audioDroppedPreAnchor: Int = 0
+    private var audioDroppedNotReady: Int = 0
+    private var videoDroppedNotReady: Int = 0
+    private var audioAppendRejected: Int = 0
 
     /// Configures + starts the writer. Pass `withAudio: true` to add
     /// the AAC audio writer input (must be decided before startWriting
@@ -94,7 +133,24 @@ final class Recorder: @unchecked Sendable {
         self.sessionStartTime = .invalid
         self.isWriting = true
 
+        // Reset counters for this session.
+        self.videoAccepted = 0
+        self.audioAccepted = 0
+        self.audioDroppedPreAnchor = 0
+        self.audioDroppedNotReady = 0
+        self.videoDroppedNotReady = 0
+        self.audioAppendRejected = 0
+
         return url
+    }
+
+    /// Anchor the writing session on whichever sample type arrives
+    /// first — video OR audio. Must be called on writerQueue while
+    /// holding `writer`.
+    private func anchorSessionIfNeeded(at pts: CMTime, writer: AVAssetWriter) {
+        guard self.sessionStartTime == .invalid else { return }
+        writer.startSession(atSourceTime: pts)
+        self.sessionStartTime = pts
     }
 
     func appendVideo(_ sampleBuffer: CMSampleBuffer) {
@@ -103,16 +159,22 @@ final class Recorder: @unchecked Sendable {
                   self.isWriting,
                   let writer = self.writer,
                   let input = self.videoInput else { return }
-            guard writer.status == .writing else { self.isWriting = false; return }
-
-            let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-            if self.sessionStartTime == .invalid {
-                writer.startSession(atSourceTime: pts)
-                self.sessionStartTime = pts
+            guard writer.status == .writing else {
+                // Writer transitioned to .failed/.cancelled — stop accepting.
+                self.isWriting = false
+                return
             }
 
-            guard input.isReadyForMoreMediaData else { return }
-            input.append(sampleBuffer)
+            let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+            self.anchorSessionIfNeeded(at: pts, writer: writer)
+
+            guard input.isReadyForMoreMediaData else {
+                self.videoDroppedNotReady &+= 1
+                return
+            }
+            if input.append(sampleBuffer) {
+                self.videoAccepted &+= 1
+            }
         }
     }
 
@@ -120,12 +182,59 @@ final class Recorder: @unchecked Sendable {
         writerQueue.async { [weak self] in
             guard let self,
                   self.isWriting,
-                  self.sessionStartTime != .invalid,   // Wait for video to anchor session
                   let writer = self.writer,
                   let input = self.audioInput else { return }
-            guard writer.status == .writing else { return }
-            guard input.isReadyForMoreMediaData else { return }
-            input.append(sampleBuffer)
+            guard writer.status == .writing else {
+                self.isWriting = false
+                return
+            }
+
+            let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+            // First sample of any kind anchors the session — eliminates
+            // the historical loss of pre-video audio.
+            self.anchorSessionIfNeeded(at: pts, writer: writer)
+
+            // Defensive: if for any reason the anchor was set by a
+            // later video frame and an older audio buffer is in flight
+            // behind it, AVAssetWriter rejects it. Drop explicitly so
+            // the counter shows what's happening.
+            if CMTimeCompare(pts, self.sessionStartTime) < 0 {
+                self.audioDroppedPreAnchor &+= 1
+                return
+            }
+
+            guard input.isReadyForMoreMediaData else {
+                self.audioDroppedNotReady &+= 1
+                return
+            }
+            if input.append(sampleBuffer) {
+                self.audioAccepted &+= 1
+            } else {
+                // Phase 4.6.4 — surface silent rejection. If
+                // audioAccepted stays at 0 while this climbs, the
+                // writer is rejecting our buffers — most likely a
+                // format mismatch with the AAC output settings.
+                self.audioAppendRejected &+= 1
+            }
+        }
+    }
+
+    /// Snapshot of recorder state for UI polling. Safe to call from
+    /// any thread — hops onto writerQueue synchronously to read.
+    func stats() -> RecorderStats {
+        writerQueue.sync {
+            RecorderStats(
+                isWriting: self.isWriting,
+                writerStatus: self.writer?.status ?? .unknown,
+                sessionAnchored: self.sessionStartTime != .invalid,
+                videoAccepted: self.videoAccepted,
+                audioAccepted: self.audioAccepted,
+                audioDroppedPreAnchor: self.audioDroppedPreAnchor,
+                audioDroppedNotReady: self.audioDroppedNotReady,
+                videoDroppedNotReady: self.videoDroppedNotReady,
+                audioAppendRejected: self.audioAppendRejected,
+                writerErrorDescription: self.writer?.error?.localizedDescription
+            )
         }
     }
 
