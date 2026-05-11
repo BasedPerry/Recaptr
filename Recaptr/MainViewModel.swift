@@ -73,12 +73,20 @@ import SwiftUI
 import AppKit
 import AVFoundation
 import CoreMedia
+import CoreGraphics
+import ScreenCaptureKit
 
 @MainActor
 final class MainViewModel: ObservableObject {
 
     @Published var catalog = DeviceCatalog()
     @Published var selectedMainSource: VideoSource?
+
+    // Phase 7 sneak — owns the user-selected save location (security-
+    // scoped bookmark in UserDefaults + sandbox fallback). UI surfaces
+    // displayLabel/displayPath/hasUserLocation; startRecording resolves
+    // the actual directory via resolveSaveDirectory().
+    @Published var recordingStorage = RecordingStorage()
 
     // Phase 4.9 — single-source channel state. (ch2* properties
     // removed. AudioMixer is still N-channel internally so Phase 4.8
@@ -105,6 +113,15 @@ final class MainViewModel: ObservableObject {
     @Published var audioPermissionStatus: AVAuthorizationStatus = .notDetermined
     @Published var lastFileProbeSummary: String?
 
+    // Phase 5.4 — screen recording TCC. Unlike AVAuthorizationStatus
+    // (4-state enum), CoreGraphics exposes screen-capture permission
+    // as a bare Bool via CGPreflightScreenCaptureAccess(). True =
+    // bundle is in System Settings → Privacy & Security → Screen
+    // Recording with the box ticked. Note the TCC-quirk: granting
+    // screen recording often only takes effect after the app is
+    // relaunched.
+    @Published var screenCapturePermissionGranted: Bool = false
+
     // Phase 4.6.4 — preserve the recorder/mixer counters past the
     // probe completion. Without this, the probe's status update
     // overwrites the only place we surfaced them, and we lose the
@@ -120,10 +137,19 @@ final class MainViewModel: ObservableObject {
     let previewSinkLayer = SampleBufferPreviewLayer(frame: .zero)
 
     private var cameraService: CameraCaptureService?
+    private var screenService: ScreenCaptureService?
     private let recorder = Recorder()
     private let audioMixer: AudioMixer
     private var activeDims: CMVideoDimensions = .init(width: 0, height: 0)
     private var hasAudio = false  // Snapshot at startRecording — locked until stopRecording
+
+    /// Phase 5b — true when the active preview is a screen source with
+    /// SCStream system audio wired (audio comes from the SCStream's
+    /// .audio output, not the AudioMixer). Set in startPreview, cleared
+    /// in stopPreview. Read by startRecording to populate `hasAudio` and
+    /// surfaced in status text so it's obvious which audio pipeline is
+    /// in play.
+    @Published var hasScreenAudio: Bool = false
 
     private var recordingStartedAt: Date?
     private var recorderStatsTimer: Timer?
@@ -172,7 +198,9 @@ final class MainViewModel: ObservableObject {
         // tccutil reset is targeting the right bundle.
         let bundleID = Bundle.main.bundleIdentifier ?? "<unknown>"
         let initialMic = AVCaptureDevice.authorizationStatus(for: .audio)
-        print("Recaptr launched — bundle=\(bundleID), mic permission=\(Self.permissionLabel(initialMic))")
+        let initialScreen = CGPreflightScreenCaptureAccess()
+        screenCapturePermissionGranted = initialScreen
+        print("Recaptr launched — bundle=\(bundleID), mic permission=\(Self.permissionLabel(initialMic)), screen recording=\(initialScreen ? "granted" : "not granted")")
 
         // Phase 4.6.1 — recheck whenever the app comes back to
         // front (user toggles Privacy & Security → Microphone, then
@@ -189,11 +217,19 @@ final class MainViewModel: ObservableObject {
             guard let strongSelf = self else { return }
             Task { @MainActor in
                 strongSelf.recheckAudioPermission(reason: "app activated")
+                // Phase 5.4 — also recheck screen recording. The user
+                // might have toggled it in Settings → Privacy & Security
+                // → Screen Recording while we were backgrounded.
+                strongSelf.recheckScreenCapturePermission(reason: "app activated")
             }
         }
 
         Task { await self.refreshCatalog() }
         Task { await self.requestAudioPermissionIfNeeded() }
+        // Phase 5.4 — fire the screen recording TCC prompt at launch
+        // so the user sees it once, like the mic prompt, instead of
+        // hitting it the first time they pick a display source.
+        Task { @MainActor in self.requestScreenCapturePermissionIfNeeded() }
     }
 
     deinit {
@@ -277,6 +313,68 @@ final class MainViewModel: ObservableObject {
         }
     }
 
+    // MARK: - Phase 5.4 — Screen recording permission (TCC)
+
+    /// Phase 5.4 — fire the macOS screen recording TCC prompt when
+    /// needed. Mirrors requestAudioPermissionIfNeeded but routes through
+    /// CGRequestScreenCaptureAccess, which is the canonical entry point
+    /// for screen-capture permission. CGPreflightScreenCaptureAccess
+    /// reports current state without prompting; CGRequest fires the
+    /// prompt on first call and returns the user's decision.
+    ///
+    /// TCC quirk: even after the user grants Screen Recording in
+    /// Settings, the calling process often needs to be relaunched
+    /// before the grant takes effect for SCStream. The status message
+    /// surfaces this so the user knows quitting is part of the recipe.
+    func requestScreenCapturePermissionIfNeeded() {
+        if CGPreflightScreenCaptureAccess() {
+            screenCapturePermissionGranted = true
+            print("requestScreenCapturePermissionIfNeeded: already granted")
+            return
+        }
+        print("requestScreenCapturePermissionIfNeeded: not granted, calling CGRequestScreenCaptureAccess…")
+        let granted = CGRequestScreenCaptureAccess()
+        screenCapturePermissionGranted = granted
+        print("requestScreenCapturePermissionIfNeeded: CGRequestScreenCaptureAccess returned \(granted)")
+        if !granted {
+            status = "Screen recording permission denied — open System Settings → Privacy & Security → Screen Recording to enable, then quit and relaunch Recaptr."
+        }
+    }
+
+    /// Phase 5.4 — re-poll screen recording permission. Called from
+    /// the NSApplication.didBecomeActive observer (and can be called
+    /// from a UI button). Does not trigger a prompt — only reads the
+    /// current state.
+    func recheckScreenCapturePermission(reason: String) {
+        let current = CGPreflightScreenCaptureAccess()
+        let was = screenCapturePermissionGranted
+        screenCapturePermissionGranted = current
+        if current != was {
+            print("recheckScreenCapturePermission(\(reason)): \(was) → \(current)")
+        }
+        if current, status.hasPrefix("Screen recording permission denied") {
+            status = "Idle"
+        }
+    }
+
+    /// Phase 5.4 — open System Settings directly to the Screen Recording
+    /// privacy panel. Same pattern as openMicrophonePrivacyPane.
+    func openScreenCapturePrivacyPane() {
+        let urls = [
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
+            "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_ScreenCapture",
+            "x-apple.systempreferences:com.apple.preference.security?Privacy"
+        ]
+        for raw in urls {
+            if let url = URL(string: raw), NSWorkspace.shared.open(url) {
+                return
+            }
+        }
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
     private static func permissionLabel(_ s: AVAuthorizationStatus) -> String {
         switch s {
         case .notDetermined: return "notDetermined"
@@ -291,8 +389,11 @@ final class MainViewModel: ObservableObject {
         await catalog.refresh()
     }
 
+    /// Phase 5.3 — expose ALL video sources (cameras + displays +
+    /// windows) to the picker. The startPreview() switch routes each
+    /// kind to the right service. Previously camera-only (Phase 2–4).
     var availableMainSources: [VideoSource] {
-        catalog.videoSources.filter { $0.kind == .camera }
+        catalog.videoSources
     }
 
     var availableAudioSources: [AudioSource] {
@@ -315,50 +416,151 @@ final class MainViewModel: ObservableObject {
         recheckAudioPermission(reason: "startPreview")
 
         guard let src = selectedMainSource else {
-            status = "Select a camera source"
-            return
-        }
-        guard src.kind == .camera, let cameraID = src.cameraUniqueID else {
-            status = "Selected source is not a camera (Phase 5+)"
+            status = "Select a source"
             return
         }
 
-        let svc = CameraCaptureService()
-        svc.onRecordBuffer = { [weak self] sb in self?.recorder.appendVideo(sb) }
+        // Phase 5.4 — screen sources need TCC Screen Recording. Surface
+        // the missing-permission state before SCStream errors out
+        // (it would, but with a less-readable message).
+        if src.kind != .camera {
+            recheckScreenCapturePermission(reason: "startPreview")
+            guard screenCapturePermissionGranted else {
+                status = "Screen recording permission denied — open System Settings → Privacy & Security → Screen Recording to enable, then quit and relaunch Recaptr."
+                return
+            }
+        }
 
         do {
-            let dims = try await svc.start(
-                cameraUniqueID: cameraID,
-                previewSink: previewSinkLayer
-            )
-            cameraService = svc
+            let dims: CMVideoDimensions
+            switch src.kind {
+
+            case .camera:
+                guard let cameraID = src.cameraUniqueID else {
+                    status = "Camera source missing cameraUniqueID"
+                    return
+                }
+                let svc = CameraCaptureService()
+                svc.onRecordBuffer = { [weak self] sb in self?.recorder.appendVideo(sb) }
+                dims = try await svc.start(cameraUniqueID: cameraID,
+                                           previewSink: previewSinkLayer)
+                cameraService = svc
+
+            case .screenDisplay:
+                guard let targetID = src.displayID else {
+                    status = "Display source missing displayID"
+                    return
+                }
+                // Re-fetch SCShareableContent so we get fresh SCDisplay/
+                // SCWindow objects (VideoSource only carries the IDs).
+                // Cheap call — SCShareableContent caches internally.
+                let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+                guard let display = content.displays.first(where: { $0.displayID == targetID }) else {
+                    status = "Display \(targetID) no longer available — hit Refresh and reselect."
+                    return
+                }
+                // Phase 5.5 — exclude Recaptr's own windows from the
+                // captured frame. Without this, capturing the same
+                // display Recaptr is running on creates an infinite-
+                // mirror artifact (preview shows itself showing itself…).
+                let myBundleID = Bundle.main.bundleIdentifier
+                let myWindows = content.windows.filter {
+                    $0.owningApplication?.bundleIdentifier == myBundleID
+                }
+                let filter = SCContentFilter(display: display, excludingWindows: myWindows)
+                let svc = makeScreenService()
+                dims = try await svc.start(filter: filter, previewSink: previewSinkLayer)
+                screenService = svc
+
+            case .screenWindow:
+                guard let targetID = src.windowID else {
+                    status = "Window source missing windowID"
+                    return
+                }
+                let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+                guard let window = content.windows.first(where: { $0.windowID == targetID }) else {
+                    status = "Window \(targetID) no longer available — hit Refresh and reselect."
+                    return
+                }
+                // SCContentFilter has a desktop-independent window
+                // initializer specifically for the single-window case.
+                // No exclusion needed — only the chosen window is in
+                // the capture.
+                let filter = SCContentFilter(desktopIndependentWindow: window)
+                let svc = makeScreenService()
+                dims = try await svc.start(filter: filter, previewSink: previewSinkLayer)
+                screenService = svc
+            }
+
             activeDims = dims
             isPreviewing = true
 
-            // Phase 4.7 — start the audio mixer so VU meters work
-            // pre-record. Mixer keeps running through Record / Stop;
-            // it only stops when preview ends. If audio start fails
-            // (e.g., a channel's TCC denied for one device), continue
-            // with video-only preview — recording still works, just
-            // without audio monitoring or capture.
-            configureMixerFromUIState()
-            var monitorLabel = ""
-            if audioMixer.hasAnyEnabledChannel {
-                do {
-                    try audioMixer.start()
-                    monitorLabel = " · audio monitor ON"
-                    startStatsTimer()
-                } catch {
-                    monitorLabel = " · audio monitor failed: \(error.localizedDescription)"
+            // Phase 5b — audio pipeline depends on source kind.
+            //   .camera  → AudioMixer (mic capture, Phase 4.x path)
+            //   .screen* → SCStream .audio output (system loopback)
+            //
+            // The mixer is bypassed entirely for screen sources so we
+            // don't end up with two competing audio inputs at the
+            // recorder. Mic-narration-on-top-of-system-audio is Phase 6
+            // (will mix SCStream audio + mic via AudioMixer with per-
+            // source levels).
+            let audioLabel: String
+            switch src.kind {
+            case .camera:
+                hasScreenAudio = false
+                // Phase 4.7 — start the audio mixer so VU meters work
+                // pre-record. Mixer keeps running through Record / Stop;
+                // it only stops when preview ends.
+                configureMixerFromUIState()
+                if audioMixer.hasAnyEnabledChannel {
+                    do {
+                        try audioMixer.start()
+                        audioLabel = " · audio: mixer ON"
+                        startStatsTimer()
+                    } catch {
+                        audioLabel = " · audio mixer failed: \(error.localizedDescription)"
+                    }
+                } else {
+                    audioLabel = " · no audio channels armed"
                 }
-            } else {
-                monitorLabel = " · no audio channels armed"
+
+            case .screenDisplay, .screenWindow:
+                hasScreenAudio = true
+                // SCStream's .audio output is already wired via
+                // onAudioBuffer → recorder.appendAudio. The mixer
+                // stays off. Start the stats timer so recorder
+                // telemetry still ticks (audio frame counter, PTS
+                // regression counter).
+                audioLabel = " · audio: SCStream system loopback"
+                startStatsTimer()
             }
 
-            status = "Previewing — \(src.name) (\(dims.width)×\(dims.height))\(monitorLabel)"
+            status = "Previewing — \(src.name) (\(dims.width)×\(dims.height))\(audioLabel)"
         } catch {
-            status = "Camera error: \(error.localizedDescription)"
+            status = "Capture error: \(error.localizedDescription)"
         }
+    }
+
+    /// Phase 5.3 — factor screen-service construction so display and
+    /// window cases share the same callback wiring. Stream-stopped
+    /// callback tears down preview cleanly when the stream dies
+    /// (display disconnected, window closed mid-capture, permission
+    /// revoked while running).
+    /// Phase 5b — onAudioBuffer wires SCStream system audio directly
+    /// into the recorder, bypassing the AudioMixer (mic-only path).
+    private func makeScreenService() -> ScreenCaptureService {
+        let svc = ScreenCaptureService()
+        svc.onRecordBuffer = { [weak self] sb in self?.recorder.appendVideo(sb) }
+        svc.onAudioBuffer  = { [weak self] sb in self?.recorder.appendAudio(sb) }
+        svc.onStreamStopped = { [weak self] error in
+            Task { @MainActor in
+                guard let self else { return }
+                let reason = error?.localizedDescription ?? "unknown reason"
+                self.status = "Screen capture stopped: \(reason)"
+                self.stopPreview()
+            }
+        }
+        return svc
     }
 
     func stopPreview() {
@@ -376,6 +578,19 @@ final class MainViewModel: ObservableObject {
 
         cameraService?.stop()
         cameraService = nil
+
+        // Phase 5.3 — tear down the screen service if one is active.
+        // SCStream.stopCapture is async; we hand it off to a Task so
+        // stopPreview() stays sync. Nil the reference immediately so
+        // any new startPreview() doesn't see the old one.
+        if let svc = screenService {
+            screenService = nil
+            Task { await svc.stop() }
+        }
+        // Phase 5b — clear the screen-audio flag so the next preview
+        // doesn't accidentally inherit it.
+        hasScreenAudio = false
+
         previewSinkLayer.flush()
         isPreviewing = false
         if status.hasPrefix("Previewing") { status = "Idle" }
@@ -391,16 +606,31 @@ final class MainViewModel: ObservableObject {
         }
         guard !isRecording else { return }
 
-        // Phase 4.7 — mixer is already running from preview. We just
-        // need to determine whether audio will be muxed (true if any
-        // channel is enabled and actually running, false otherwise).
-        hasAudio = audioMixer.running && audioMixer.hasAnyEnabledChannel
+        // Phase 5b — audio path forks on source kind. Screen sources
+        // use SCStream's .audio output (hasScreenAudio); camera sources
+        // use the AudioMixer (already running from preview). Either
+        // path produces an audio track in the file.
+        hasAudio = hasScreenAudio || (audioMixer.running && audioMixer.hasAnyEnabledChannel)
+
+        // Phase 7 sneak — resolve the save directory before starting
+        // the writer. User-selected folder if set + accessible,
+        // sandbox container otherwise. Resolution is fast (just an
+        // FS-existence check) and worth doing per-recording so a
+        // newly-attached external drive picks up without a restart.
+        let saveDir: URL
+        do {
+            saveDir = try recordingStorage.resolveSaveDirectory()
+        } catch {
+            status = "Save directory error: \(error.localizedDescription)"
+            return
+        }
 
         do {
             let url = try await recorder.start(
                 width: activeDims.width,
                 height: activeDims.height,
-                withAudio: hasAudio
+                withAudio: hasAudio,
+                saveDirectory: saveDir
             )
             isRecording = true
             recordingStartedAt = Date()

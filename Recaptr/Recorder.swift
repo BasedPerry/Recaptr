@@ -42,6 +42,14 @@ struct RecorderStats: Equatable {
     /// If this climbs while audioAccepted stays at 0, the writer
     /// is rejecting our buffers (format mismatch, PTS issue, etc.).
     var audioAppendRejected: Int = 0
+    /// Phase 5b — video buffers dropped because their PTS was less
+    /// than or equal to the previously accepted video buffer's PTS.
+    /// SCStream occasionally delivers consecutive samples with equal
+    /// PTS, which AVAssetWriter accepts but the muxer warns about
+    /// (non-monotonic DTS). AVCaptureSession (camera path) doesn't
+    /// have this issue, so this counter should stay at 0 for camera
+    /// recordings and climb modestly during screen captures.
+    var videoDroppedPtsRegression: Int = 0
     var writerErrorDescription: String?
 }
 
@@ -62,15 +70,22 @@ final class Recorder: @unchecked Sendable {
     private var audioDroppedNotReady: Int = 0
     private var videoDroppedNotReady: Int = 0
     private var audioAppendRejected: Int = 0
+    private var videoDroppedPtsRegression: Int = 0
+    /// Phase 5b — last accepted video PTS, used for the strict-monotonic
+    /// guard. Reset to .invalid in _startSync.
+    private var lastVideoPTS: CMTime = .invalid
 
     /// Configures + starts the writer. Pass `withAudio: true` to add
     /// the AAC audio writer input (must be decided before startWriting
     /// — AVAssetWriter doesn't allow inputs added after).
-    func start(width: Int32, height: Int32, withAudio: Bool) async throws -> URL {
+    /// `saveDirectory` is the resolved folder (Phase 7 sneak — user-
+    /// selected via RecordingStorage, with sandbox fallback). Caller
+    /// must hold security scope on it for the duration of the write.
+    func start(width: Int32, height: Int32, withAudio: Bool, saveDirectory: URL) async throws -> URL {
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<URL, Error>) in
             writerQueue.async {
                 do {
-                    let url = try self._startSync(width: width, height: height, withAudio: withAudio)
+                    let url = try self._startSync(width: width, height: height, withAudio: withAudio, saveDirectory: saveDirectory)
                     cont.resume(returning: url)
                 } catch {
                     cont.resume(throwing: error)
@@ -79,12 +94,12 @@ final class Recorder: @unchecked Sendable {
         }
     }
 
-    private func _startSync(width: Int32, height: Int32, withAudio: Bool) throws -> URL {
+    private func _startSync(width: Int32, height: Int32, withAudio: Bool, saveDirectory: URL) throws -> URL {
         guard !isWriting else {
             throw CaptureError.writerFailed("Recorder is already running")
         }
 
-        let url = try Self.makeOutputURL()
+        let url = try Self.makeOutputURL(in: saveDirectory)
         let writer = try AVAssetWriter(outputURL: url, fileType: .mov)
 
         // Video — H.264 SDR (decision 3)
@@ -140,6 +155,8 @@ final class Recorder: @unchecked Sendable {
         self.audioDroppedNotReady = 0
         self.videoDroppedNotReady = 0
         self.audioAppendRejected = 0
+        self.videoDroppedPtsRegression = 0
+        self.lastVideoPTS = .invalid
 
         return url
     }
@@ -168,12 +185,28 @@ final class Recorder: @unchecked Sendable {
             let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
             self.anchorSessionIfNeeded(at: pts, writer: writer)
 
+            // Phase 5b — strict-monotonic PTS guard. SCStream
+            // occasionally delivers consecutive sample buffers with
+            // equal (or earlier) PTS; AVAssetWriter accepts them but
+            // the muxer emits non-monotonic-DTS warnings and the
+            // resulting file's frame-timing analysis is unreliable.
+            // Drop the offending buffer with a counter so the failure
+            // surfaces rather than bouncing silently inside ffmpeg.
+            // AVCaptureSession (camera path) is monotonic by contract,
+            // so this counter should stay at 0 for camera recordings.
+            if self.lastVideoPTS != .invalid,
+               CMTimeCompare(pts, self.lastVideoPTS) <= 0 {
+                self.videoDroppedPtsRegression &+= 1
+                return
+            }
+
             guard input.isReadyForMoreMediaData else {
                 self.videoDroppedNotReady &+= 1
                 return
             }
             if input.append(sampleBuffer) {
                 self.videoAccepted &+= 1
+                self.lastVideoPTS = pts
             }
         }
     }
@@ -233,6 +266,7 @@ final class Recorder: @unchecked Sendable {
                 audioDroppedNotReady: self.audioDroppedNotReady,
                 videoDroppedNotReady: self.videoDroppedNotReady,
                 audioAppendRejected: self.audioAppendRejected,
+                videoDroppedPtsRegression: self.videoDroppedPtsRegression,
                 writerErrorDescription: self.writer?.error?.localizedDescription
             )
         }
@@ -263,32 +297,24 @@ final class Recorder: @unchecked Sendable {
         }
     }
 
-    /// Sandbox-safe output path. Earlier iteration tried
-    /// NSHomeDirectory()/Movies, which still fails — the container's
-    /// Movies subdir appears to be aliased to the user's real ~/Movies
-    /// (sandbox blocks writes without the assets.movies entitlement).
-    /// Application Support has no such aliasing — always writable in
-    /// any sandbox configuration. Phase 7 polish adds proper user-
-    /// selected save location via NSOpenPanel + readwrite entitlement.
-    private static func makeOutputURL() throws -> URL {
+    /// Build the output URL inside the caller-provided save directory.
+    /// RecordingStorage handles user-selected vs sandbox fallback +
+    /// security-scoped access; we just write into whatever URL we're
+    /// given. The directory is expected to exist already (Recording-
+    /// Storage's resolveSaveDirectory ensures the sandbox fallback is
+    /// created; user-picked folders exist by construction). We still
+    /// create it defensively in case it was removed between resolve
+    /// and write.
+    private static func makeOutputURL(in directory: URL) throws -> URL {
         let fm = FileManager.default
-        let appSupport = try fm.url(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask,
-            appropriateFor: nil,
-            create: true
-        )
-        let recordingsDir = appSupport
-            .appendingPathComponent("Recaptr", isDirectory: true)
-            .appendingPathComponent("Recordings", isDirectory: true)
-        if !fm.fileExists(atPath: recordingsDir.path) {
-            try fm.createDirectory(at: recordingsDir, withIntermediateDirectories: true)
+        if !fm.fileExists(atPath: directory.path) {
+            try fm.createDirectory(at: directory, withIntermediateDirectories: true)
         }
         // Surface the resolved path so it's discoverable in console
         // (Show in Finder will still navigate to it directly).
-        print("Recaptr recordings dir: \(recordingsDir.path)")
+        print("Recaptr recordings dir: \(directory.path)")
 
         let stamp = Date().ISO8601Format().replacingOccurrences(of: ":", with: "-")
-        return recordingsDir.appendingPathComponent("Recaptr_\(stamp).mov")
+        return directory.appendingPathComponent("Recaptr_\(stamp).mov")
     }
 }

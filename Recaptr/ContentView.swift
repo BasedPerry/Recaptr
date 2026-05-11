@@ -67,8 +67,12 @@ struct ContentView: View {
 
             VStack(spacing: 10) {
                 HStack {
-                    Text("Camera:").font(.callout)
-                    Picker("Camera", selection: $vm.selectedMainSource) {
+                    // Phase 5.3 — "Source" now covers cameras + displays
+                    // + windows. availableMainSources stopped filtering
+                    // to .camera; MainViewModel.startPreview() switches
+                    // on src.kind to route to the right service.
+                    Text("Source:").font(.callout)
+                    Picker("Source", selection: $vm.selectedMainSource) {
                         Text("— Select —").tag(VideoSource?.none)
                         ForEach(vm.availableMainSources) { src in
                             Text(src.name).tag(VideoSource?.some(src))
@@ -84,6 +88,15 @@ struct ContentView: View {
 
                     Spacer()
                 }
+
+                // Phase 7 sneak — user-selected save location row.
+                // Shows current destination + Change…/Reset actions.
+                // Disabled while recording so the destination can't
+                // change mid-take.
+                SaveLocationRow(
+                    storage: vm.recordingStorage,
+                    locked: vm.isRecording
+                )
 
                 AudioChannelRow(
                     label: "Audio",
@@ -170,6 +183,19 @@ struct ContentView: View {
                     )
                 }
 
+                // Phase 5.4 — screen recording permission banner. Mirrors
+                // the mic banner pattern. Surfaces only when the user
+                // doesn't have screen recording authorized AND has
+                // selected a screen source (or hasn't selected yet —
+                // we show it on first launch so it's discoverable).
+                if !vm.screenCapturePermissionGranted &&
+                    (vm.selectedMainSource?.kind != .camera) {
+                    ScreenRecordingPermissionBanner(
+                        onRecheck: { vm.recheckScreenCapturePermission(reason: "manual") },
+                        onOpenSettings: { vm.openScreenCapturePrivacyPane() }
+                    )
+                }
+
                 // Phase 4.6.1 — status on its own row, wrappable,
                 // with the full content available on hover. The
                 // probe + permission lines are too long for one
@@ -228,6 +254,88 @@ private struct PermissionBanner: View {
         case .authorized:    return "Authorized"
         @unknown default:    return "Unknown"
         }
+    }
+}
+
+/// Phase 7 sneak — save-location row. Shows the active save directory
+/// (last path component, full path on hover) and lets the user pick a
+/// new folder or reset to sandbox default. Disabled while recording so
+/// the destination can't change mid-take.
+private struct SaveLocationRow: View {
+    @ObservedObject var storage: RecordingStorage
+    let locked: Bool
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "folder")
+                .foregroundColor(.secondary)
+                .frame(width: 18)
+
+            Text("Save:")
+                .font(.callout)
+                .frame(width: 70, alignment: .leading)
+
+            Text(storage.displayLabel)
+                .font(.callout.monospaced())
+                .foregroundColor(storage.hasUserLocation ? .primary : .secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(maxWidth: 300, alignment: .leading)
+                .help(storage.hasUserLocation ? storage.displayPath : "Sandbox container — files written inside Recaptr's app data folder. Click Change… to pick a folder you can actually reach.")
+
+            Button("Change…") {
+                storage.pickFolder()
+            }
+            .buttonStyle(.bordered)
+            .disabled(locked)
+
+            if storage.hasUserLocation {
+                Button("Reset") {
+                    storage.resetToDefault()
+                }
+                .buttonStyle(.bordered)
+                .disabled(locked)
+                .help("Revert to the sandbox container default. Existing recordings stay where they are.")
+            }
+
+            Spacer()
+        }
+    }
+}
+
+/// Phase 5.4 — screen recording TCC banner. Surfaces "open Settings"
+/// and "recheck" so the user can grant Screen Recording, quit + relaunch
+/// (the TCC quirk), and recheck without quitting Recaptr blindly.
+private struct ScreenRecordingPermissionBanner: View {
+    let onRecheck: () -> Void
+    let onOpenSettings: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "rectangle.dashed.badge.record")
+                .foregroundColor(.orange)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Screen Recording access: not granted")
+                    .font(.callout)
+                Text("Required to capture displays or windows. Grant in Settings, then quit + relaunch Recaptr.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            Spacer()
+            Button("Recheck", action: onRecheck)
+                .buttonStyle(.bordered)
+            Button("Open Settings", action: onOpenSettings)
+                .buttonStyle(.borderedProminent)
+        }
+        .padding(8)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(Color.orange.opacity(0.12))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .stroke(Color.orange.opacity(0.5), lineWidth: 0.5)
+        )
     }
 }
 

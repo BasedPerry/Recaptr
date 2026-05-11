@@ -33,11 +33,16 @@
 	<key>com.apple.security.device.camera</key>
 	<true/>
 
-	<!-- Phase 7 will swap this for read-write once we add the user-
-	     selected save-location flow via NSOpenPanel. Read-only is
-	     enough for now (recordings land in Application Support
-	     inside the sandbox container). -->
-	<key>com.apple.security.files.user-selected.read-only</key>
+	<!-- Phase 7 sneak (2026-05-11) — bumped from read-only to read-write
+	     for the user-selected save-location flow. The user picks a
+	     folder via NSOpenPanel (RecordingStorage.pickFolder), we
+	     persist a security-scoped bookmark, and recordings land
+	     directly in their chosen folder. Read-write is a superset of
+	     read-only, so the previous capability is preserved.
+	     Sandbox container path remains the fallback when the user
+	     hasn't picked anything or the picked folder is unavailable
+	     (volume unmounted, etc.). -->
+	<key>com.apple.security.files.user-selected.read-write</key>
 	<true/>
 
 	<!--
