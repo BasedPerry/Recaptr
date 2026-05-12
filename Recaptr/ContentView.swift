@@ -213,7 +213,7 @@ struct ContentView: View {
 
 // MARK: - Permission banner + status bar
 
-private struct PermissionBanner: View {
+struct PermissionBanner: View {
     let statusEnum: AVAuthorizationStatus
     let onRecheck: () -> Void
     let onOpenSettings: () -> Void
@@ -261,7 +261,7 @@ private struct PermissionBanner: View {
 /// (last path component, full path on hover) and lets the user pick a
 /// new folder or reset to sandbox default. Disabled while recording so
 /// the destination can't change mid-take.
-private struct SaveLocationRow: View {
+struct SaveLocationRow: View {
     @ObservedObject var storage: RecordingStorage
     let locked: Bool
 
@@ -306,7 +306,7 @@ private struct SaveLocationRow: View {
 /// Phase 5.4 — screen recording TCC banner. Surfaces "open Settings"
 /// and "recheck" so the user can grant Screen Recording, quit + relaunch
 /// (the TCC quirk), and recheck without quitting Recaptr blindly.
-private struct ScreenRecordingPermissionBanner: View {
+struct ScreenRecordingPermissionBanner: View {
     let onRecheck: () -> Void
     let onOpenSettings: () -> Void
 
@@ -339,7 +339,7 @@ private struct ScreenRecordingPermissionBanner: View {
     }
 }
 
-private struct StatusBar: View {
+struct StatusBar: View {
     let text: String
 
     var body: some View {
@@ -365,7 +365,7 @@ private struct StatusBar: View {
 
 // MARK: - Audio channel row
 
-private struct AudioChannelRow: View {
+struct AudioChannelRow: View {
     let label: String
     let sources: [AudioSource]
     @Binding var deviceID: String?
@@ -533,7 +533,7 @@ private struct VUMeterView: View {
 
 /// Compact live readout shown only while a recording is running.
 /// Format: "● 00:34  v=2040 a=1632 drop=0/0  mix=24576f zf=0/0"
-private struct RecordingTelemetryView: View {
+struct RecordingTelemetryView: View {
     let elapsed: TimeInterval
     let stats: RecorderStats
     let mixerStats: AudioMixerStats

@@ -72,9 +72,44 @@ import Combine
 import SwiftUI
 import AppKit
 import AVFoundation
+import CoreImage          // Phase 6.5 — CIImage → CGImage for PNG screenshots
 import CoreMedia
 import CoreGraphics
 import ScreenCaptureKit
+
+// MARK: - Frame cache (Phase 6.5)
+//
+// Tiny thread-safe holder for the most recent preview CVPixelBuffer.
+// Camera + screen services write to it on their capture queues (not
+// main); the @MainActor screenshot path reads it on demand. CVPixelBuffer
+// is a CFType — assignment is reference-counted and atomic at the
+// storage level, but the read-then-act pattern still needs a lock.
+//
+// Not @MainActor so the capture-queue writers can store without
+// hopping; marked @unchecked Sendable since we serialize all access
+// through the NSLock.
+final class PreviewFrameCache: @unchecked Sendable {
+    private let lock = NSLock()
+    private var pixelBuffer: CVPixelBuffer?
+
+    func store(_ buffer: CVPixelBuffer) {
+        lock.lock()
+        pixelBuffer = buffer
+        lock.unlock()
+    }
+
+    func latest() -> CVPixelBuffer? {
+        lock.lock()
+        defer { lock.unlock() }
+        return pixelBuffer
+    }
+
+    func clear() {
+        lock.lock()
+        pixelBuffer = nil
+        lock.unlock()
+    }
+}
 
 @MainActor
 final class MainViewModel: ObservableObject {
@@ -131,10 +166,36 @@ final class MainViewModel: ObservableObject {
     // Phase 4.6.1 — observers retained so they can be removed.
     private var didBecomeActiveObserver: NSObjectProtocol?
 
+    // Phase 6.6.1 — camera disconnect observer. Fires when ANY
+    // AVCaptureDevice is unplugged; the handler checks whether it
+    // was the active source and stops cleanly if so.
+    private var deviceDisconnectObserver: NSObjectProtocol?
+
+    // Phase 6.6.1.1 — camera connect observer. Fires when a new
+    // AVCaptureDevice appears (replug). Refreshes the catalog so
+    // the device shows up in the source dropdown, and auto-prefers
+    // the capture card when current source is nil or a Continuity
+    // Camera fallback.
+    private var deviceConnectObserver: NSObjectProtocol?
+
     // Phase 4.7 — Combine subscriptions for live gain.
     private var cancellables = Set<AnyCancellable>()
 
     let previewSinkLayer = SampleBufferPreviewLayer(frame: .zero)
+
+    // Phase 6.5 — most recent preview frame, cached on every video
+    // sample from camera or screen services. Read on demand by
+    // captureScreenshot(). Survives across previews; cleared in
+    // stopPreview() so a stale frame from a previous source can't
+    // accidentally be saved as a screenshot.
+    let frameCache = PreviewFrameCache()
+
+    // Phase 6.5 — clip markers dropped during a recording session.
+    // Each value is a recordingElapsed timestamp (seconds). Cleared
+    // at startRecording, surfaced by the Phase 7 sidebar's markers
+    // list. UI hits this via dropMarker() — same call from in-app
+    // button and menu bar.
+    @Published var markers: [TimeInterval] = []
 
     private var cameraService: CameraCaptureService?
     private var screenService: ScreenCaptureService?
@@ -194,6 +255,35 @@ final class MainViewModel: ObservableObject {
             }
             .store(in: &cancellables)
 
+        // Phase 6.6.2 — permission revocation watchers. Both audio
+        // and screen-recording permission status flow through their
+        // own @Published properties (updated via recheckAudioPermission
+        // / recheckScreenCapturePermission, which fire on app activation
+        // among other places). Subscribing here catches the case where
+        // the user revokes permission mid-session — in System Settings,
+        // then comes back — and stops the active preview/recording
+        // cleanly instead of letting it stream silence / black frames.
+        $audioPermissionStatus
+            .removeDuplicates()
+            .dropFirst()    // skip the initial-state emission
+            .sink { [weak self] status in
+                guard let self else { return }
+                Task { @MainActor in
+                    await self.handleAudioPermissionChange(status)
+                }
+            }
+            .store(in: &cancellables)
+        $screenCapturePermissionGranted
+            .removeDuplicates()
+            .dropFirst()    // skip the initial-state emission
+            .sink { [weak self] granted in
+                guard let self else { return }
+                Task { @MainActor in
+                    await self.handleScreenPermissionChange(granted)
+                }
+            }
+            .store(in: &cancellables)
+
         // Phase 4.6.1 — log identity at startup so we can verify
         // tccutil reset is targeting the right bundle.
         let bundleID = Bundle.main.bundleIdentifier ?? "<unknown>"
@@ -224,7 +314,44 @@ final class MainViewModel: ObservableObject {
             }
         }
 
-        Task { await self.refreshCatalog() }
+        // Phase 6.6.1 — camera disconnect observer. Routes any
+        // wasDisconnectedNotification through handleDeviceDisconnect,
+        // which decides whether the disconnected device was the
+        // active source and stops cleanly if so.
+        deviceDisconnectObserver = center.addObserver(
+            forName: AVCaptureDevice.wasDisconnectedNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            guard let strongSelf = self else { return }
+            Task { @MainActor in
+                await strongSelf.handleDeviceDisconnect(note)
+            }
+        }
+
+        // Phase 6.6.1.1 — camera connect observer. Refreshes the
+        // catalog when a new device appears, and auto-prefers a
+        // capture card if the current source is nil or a Continuity
+        // Camera fallback (creator just replugged their Elgato after
+        // the iPhone Camera took over — switch back automatically).
+        deviceConnectObserver = center.addObserver(
+            forName: AVCaptureDevice.wasConnectedNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            guard let strongSelf = self else { return }
+            Task { @MainActor in
+                await strongSelf.handleDeviceConnect(note)
+            }
+        }
+
+        // Phase 6.6.1 — refresh catalog, then auto-pick a startup
+        // source (capture card preferred). Both happen inside the
+        // same Task so the auto-pick sees a populated catalog.
+        Task {
+            await self.refreshCatalog()
+            await MainActor.run { self.autoSelectStartupSource() }
+        }
         Task { await self.requestAudioPermissionIfNeeded() }
         // Phase 5.4 — fire the screen recording TCC prompt at launch
         // so the user sees it once, like the mic prompt, instead of
@@ -235,6 +362,12 @@ final class MainViewModel: ObservableObject {
     deinit {
         if let didBecomeActiveObserver {
             NotificationCenter.default.removeObserver(didBecomeActiveObserver)
+        }
+        if let deviceDisconnectObserver {
+            NotificationCenter.default.removeObserver(deviceDisconnectObserver)
+        }
+        if let deviceConnectObserver {
+            NotificationCenter.default.removeObserver(deviceConnectObserver)
         }
     }
 
@@ -405,6 +538,374 @@ final class MainViewModel: ObservableObject {
         ch1Enabled && ch1DeviceID != nil
     }
 
+    // MARK: - Auto audio selection
+
+    /// Phase 6.2 / Task #16 — auto-pick Channel 1 to match the
+    /// current video source.
+    ///
+    /// Behavior:
+    ///   - Camera mode: find an audio source whose name matches the
+    ///     camera (exact → camera-contains-audio → audio-contains-camera,
+    ///     all case-insensitive). Elgato devices expose a mic with the
+    ///     same name; built-in cameras pair with "Built-in Microphone"
+    ///     etc. Setting `ch1DeviceID` flows through the existing mixer
+    ///     plumbing, so anything that re-reads it (preview, recording,
+    ///     UI) picks up the change.
+    ///   - Screen / Window mode: do NOT touch Ch1. The user's
+    ///     commentary mic stays as-configured, and system audio comes
+    ///     through SCStream loopback (Phase 5b) on a separate path.
+    ///
+    /// Idempotent — if the chosen audio source is already selected,
+    /// this method is a no-op (won't churn `status`).
+    func autoSelectAudioForCurrentSource() {
+        guard let src = selectedMainSource else { return }
+        switch src.kind {
+        case .camera:
+            let match =
+                availableAudioSources.first(where: { $0.name.caseInsensitiveCompare(src.name) == .orderedSame })
+                ?? availableAudioSources.first(where: { src.name.localizedCaseInsensitiveContains($0.name) })
+                ?? availableAudioSources.first(where: { $0.name.localizedCaseInsensitiveContains(src.name) })
+            if let m = match, m.id != ch1DeviceID {
+                ch1DeviceID = m.id
+                status = "Audio auto-selected: \(m.name)"
+            }
+        case .screenDisplay, .screenWindow:
+            // Leave Ch1 alone. Commentary mic stays; system audio is
+            // handled by SCStream's .audio output, not Ch1.
+            break
+        }
+    }
+
+    // MARK: - Fast audio level polling (for VU meter)
+    //
+    // The general `mixerStats` publisher updates on a 1Hz timer — fine
+    // for telemetry, way too slow for a VU meter (which should feel
+    // continuous, ~30fps). `currentAudioLevels()` lets a view subscribe
+    // at whatever cadence it wants without us bumping the global stats
+    // tick rate. AudioMixer.snapshot() is cheap (just reads atomics
+    // computed per-buffer in handleTap), so polling at 30Hz is fine.
+
+    /// Channel 1 audio levels in dBFS. Returns nil when the mixer
+    /// isn't running. Both values are smoothed inside the mixer.
+    func currentAudioLevels() -> (rms: Float, peak: Float)? {
+        guard audioMixer.running else { return nil }
+        let snap = audioMixer.snapshot()
+        guard let ch0 = snap.channels.first else { return nil }
+        return (ch0.rmsDbfs, ch0.peakDbfs)
+    }
+
+    // MARK: - Screenshot + Marker (Phase 6.5)
+
+    /// Errors surfaced from the screenshot path. Status line picks
+    /// up the localizedDescription so users see what went wrong.
+    enum ScreenshotError: LocalizedError {
+        case noFrame
+        case conversionFailed
+        case writeFailed(Error)
+
+        var errorDescription: String? {
+            switch self {
+            case .noFrame:            return "No preview frame available — start a preview first."
+            case .conversionFailed:   return "Couldn't render the preview frame to PNG."
+            case .writeFailed(let e): return "Couldn't write screenshot file: \(e.localizedDescription)"
+            }
+        }
+    }
+
+    /// Capture the most recent preview frame as PNG and write it to
+    /// the user-picked save folder. Filename includes a UTC timestamp
+    /// (matches the recording filename convention). Returns the URL
+    /// of the file that was written.
+    ///
+    /// Why pull from frameCache instead of re-rendering the preview
+    /// layer: the cache holds the raw CVPixelBuffer at source resolution
+    /// (1080p, 4K, whatever the device is producing), independent of
+    /// the on-screen preview's display size. The user gets a full-quality
+    /// PNG, not a downscaled screenshot of a SwiftUI view.
+    func captureScreenshot() async throws -> URL {
+        guard let pixelBuffer = frameCache.latest() else {
+            throw ScreenshotError.noFrame
+        }
+
+        // CVPixelBuffer → CIImage → CGImage → NSBitmapImageRep → PNG Data.
+        // CIContext.createCGImage is the part that touches the GPU /
+        // does the colorspace conversion; everything else is light.
+        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+        let context = CIContext()
+        guard let cgImage = context.createCGImage(ciImage, from: ciImage.extent) else {
+            throw ScreenshotError.conversionFailed
+        }
+        let bitmap = NSBitmapImageRep(cgImage: cgImage)
+        guard let pngData = bitmap.representation(using: .png, properties: [:]) else {
+            throw ScreenshotError.conversionFailed
+        }
+
+        // Filename: Recaptr_Screenshot_2026-05-12T20-15-43Z.png
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        let stamp = formatter.string(from: Date())
+            .replacingOccurrences(of: ":", with: "-")
+            .replacingOccurrences(of: "+0000", with: "Z")
+        let filename = "Recaptr_Screenshot_\(stamp).png"
+
+        let saveDir: URL
+        do {
+            saveDir = try recordingStorage.resolveSaveDirectory()
+        } catch {
+            throw ScreenshotError.writeFailed(error)
+        }
+        let url = saveDir.appendingPathComponent(filename)
+
+        do {
+            try pngData.write(to: url)
+        } catch {
+            throw ScreenshotError.writeFailed(error)
+        }
+
+        status = "Screenshot saved: \(filename)"
+        return url
+    }
+
+    /// Append the current recording elapsed time to markers. No-op
+    /// when not recording. Phase 7c's right sidebar will surface
+    /// these as a scrollable list; for now they live in memory and
+    /// disappear when the next recording starts.
+    func dropMarker() {
+        guard isRecording else { return }
+        let t = recordingElapsed
+        markers.append(t)
+        status = String(format: "Marker dropped at %02d:%02d", Int(t) / 60, Int(t) % 60)
+    }
+
+    // MARK: - Auto startup source (Phase 6.6.1)
+
+    /// Picks a sensible default source on first launch (or any time
+    /// the user lands at the "Select a source" hint). Preference:
+    ///
+    ///   1. Capture card (Elgato / Magewell / AverMedia / etc.)
+    ///   2. Non-Continuity camera (built-in FaceTime HD, USB webcam)
+    ///   3. Any camera at all (last resort — Continuity iPhone Camera)
+    ///
+    /// Screens and windows are never auto-picked — those require
+    /// user intent (you wouldn't want Recaptr to silently grab a
+    /// random display the moment it launches).
+    func autoSelectStartupSource() {
+        guard selectedMainSource == nil else { return }
+        let cameras = catalog.videoSources.filter { $0.kind == .camera }
+        guard !cameras.isEmpty else { return }
+
+        let pick = cameras.first(where: { $0.isCameraCaptureCard })
+            ?? cameras.first(where: { !$0.isContinuityCamera })
+            ?? cameras.first
+
+        if let chosen = pick {
+            selectedMainSource = chosen
+            status = "Source: \(chosen.name)"
+            // Trigger the existing audio auto-select so Ch1 also
+            // lands on the matching mic.
+            autoSelectAudioForCurrentSource()
+        }
+    }
+
+    // MARK: - Device disconnect handler (Phase 6.6.1)
+
+    /// Posted by AVCaptureDevice when any capture device is unplugged.
+    /// We only care when the disconnected device matches our active
+    /// camera source — at which point we stop the recording cleanly
+    /// (writer finalizes, partial file is preserved), stop preview,
+    /// clear the selection, refresh the catalog so the gone-device
+    /// drops out of the list, and surface an honest status message.
+    @MainActor
+    private func handleDeviceDisconnect(_ note: Notification) async {
+        guard let device = note.object as? AVCaptureDevice else { return }
+        // Only react if the unplugged device is the one currently in use.
+        // Screen / window paths are handled separately by SCStream's
+        // onStreamStopped delegate.
+        guard let activeID = selectedMainSource?.cameraUniqueID,
+              activeID == device.uniqueID else { return }
+
+        let deviceName = device.localizedName
+        let wasRecording = isRecording
+
+        if wasRecording {
+            // stopRecording finalizes the writer so the partial file
+            // is playable. Without this the user loses everything.
+            await stopRecording()
+        }
+        if isPreviewing {
+            stopPreview()
+        }
+
+        // Clear the dead source — UI returns to the "Select a source"
+        // hint state until the user picks another or replugs.
+        selectedMainSource = nil
+
+        status = wasRecording
+            ? "Device disconnected: \(deviceName) — recording saved."
+            : "Device disconnected: \(deviceName)"
+
+        // Refresh so the unplugged device drops out of the catalog;
+        // if a replacement is now available (different capture card,
+        // built-in camera), the user can pick it from the pill.
+        await catalog.refresh()
+
+        // Phase 6.6.1.1 — capture cards often expose a paired audio
+        // device with the same name. When the Elgato 4K X is yanked,
+        // both its camera AND its mic disappear. If ch1DeviceID is now
+        // pointing at a gone audio source, clear it so the Audio
+        // picker doesn't carry an orphan selection (Apple's Picker
+        // warns "selection invalid and does not have an associated tag").
+        if let currentCh1 = ch1DeviceID,
+           !availableAudioSources.contains(where: { $0.id == currentCh1 }) {
+            ch1DeviceID = availableAudioSources.first?.id
+        }
+    }
+
+    /// Posted by AVCaptureDevice when a new capture device is plugged
+    /// in. Refreshes the catalog so the new device appears in the
+    /// dropdown, then optionally auto-switches to it.
+    ///
+    /// Auto-switch policy: only override the current selection when
+    /// (a) nothing is selected, or (b) the user is currently on a
+    /// Continuity Camera and a capture card just appeared (creator
+    /// replugged their Elgato after their iPhone took over the slot).
+    /// Doesn't override an explicit user choice of a built-in camera
+    /// or non-Continuity USB webcam.
+    @MainActor
+    private func handleDeviceConnect(_ note: Notification) async {
+        guard let device = note.object as? AVCaptureDevice else { return }
+
+        await catalog.refresh()
+
+        // Find the catalog entry for the newly-connected device.
+        // DeviceCatalog ids use the "camera:<uniqueID>" prefix; if
+        // the catalog refresh hasn't yet seen the device, bail out
+        // (the next launch / manual refresh will catch it).
+        let newSourceID = "camera:\(device.uniqueID)"
+        guard let newSource = catalog.videoSources.first(where: { $0.id == newSourceID }) else {
+            return
+        }
+
+        let shouldAutoSwitch: Bool
+        if selectedMainSource == nil {
+            shouldAutoSwitch = newSource.isCameraCaptureCard
+        } else if let current = selectedMainSource,
+                  current.isContinuityCamera,
+                  newSource.isCameraCaptureCard {
+            shouldAutoSwitch = true
+        } else {
+            shouldAutoSwitch = false
+        }
+
+        if shouldAutoSwitch {
+            // Phase 6.6.2 — wait for the paired audio device to also
+            // appear in CoreAudio HAL before flipping the source. The
+            // camera notification fires before CoreAudio has registered
+            // the audio counterpart; switching too early leaves the
+            // AudioMixer unable to resolve the UID and the recording
+            // ends up video-only. Poll for the matching audio in the
+            // catalog with a short timeout — most capture cards (Elgato,
+            // Magewell) settle within 300–600ms.
+            await waitForPairedAudio(matching: newSource, timeout: 1.2)
+
+            if isPreviewing {
+                stopPreview()
+            }
+            selectedMainSource = newSource
+            status = "Capture card connected: \(newSource.name)"
+            // Audio auto-select will run via the .onChange(of: selectedMainSource)
+            // observer in ContentViewNext; same path used at launch.
+        }
+    }
+
+    // MARK: - Permission revocation handlers (Phase 6.6.2)
+
+    /// Microphone permission changed. Only react to "no longer
+    /// authorized" while we're actively previewing or recording —
+    /// initial state transitions during startup are handled by the
+    /// .dropFirst() on the publisher. Stops cleanly so the file is
+    /// preserved up to the moment of revocation; surfaces a status
+    /// message so the user knows why.
+    @MainActor
+    private func handleAudioPermissionChange(_ status: AVAuthorizationStatus) async {
+        guard status != .authorized else { return }
+        guard isPreviewing || isRecording else { return }
+
+        let wasRecording = isRecording
+        if wasRecording {
+            await stopRecording()
+        }
+        if isPreviewing {
+            stopPreview()
+        }
+        status_setRevoked(
+            wasRecording: wasRecording,
+            label: "Microphone",
+            settingsHint: "System Settings → Privacy & Security → Microphone"
+        )
+    }
+
+    /// Screen recording permission changed. Only react when the
+    /// active source is screen / window — revoking screen recording
+    /// while previewing a camera shouldn't tear anything down.
+    @MainActor
+    private func handleScreenPermissionChange(_ granted: Bool) async {
+        guard !granted else { return }
+        // Only stop if we're on a screen / window path. Cameras don't
+        // use TCC screen recording.
+        let activeKind = selectedMainSource?.kind
+        let onScreenSource = activeKind == .screenDisplay || activeKind == .screenWindow
+        guard onScreenSource, isPreviewing || isRecording else { return }
+
+        let wasRecording = isRecording
+        if wasRecording {
+            await stopRecording()
+        }
+        if isPreviewing {
+            stopPreview()
+        }
+        status_setRevoked(
+            wasRecording: wasRecording,
+            label: "Screen recording",
+            settingsHint: "System Settings → Privacy & Security → Screen Recording"
+        )
+    }
+
+    /// Shared status-line composer for both permission handlers.
+    /// Keeps the phrasing consistent.
+    private func status_setRevoked(wasRecording: Bool, label: String, settingsHint: String) {
+        if wasRecording {
+            status = "\(label) permission revoked — recording stopped and saved. Re-enable in \(settingsHint), then restart preview."
+        } else {
+            status = "\(label) permission revoked — preview stopped. Re-enable in \(settingsHint), then restart."
+        }
+    }
+
+    /// Poll `availableAudioSources` for an audio device whose name
+    /// matches the given video source (same heuristic as the audio
+    /// auto-select). Returns as soon as a match appears, or after
+    /// `timeout` seconds. Refreshes the catalog on each poll tick.
+    /// No-op if a match is already present.
+    @MainActor
+    private func waitForPairedAudio(matching source: VideoSource, timeout: TimeInterval) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            await catalog.refresh()
+            let match = availableAudioSources.first(where: {
+                $0.name.caseInsensitiveCompare(source.name) == .orderedSame ||
+                source.name.localizedCaseInsensitiveContains($0.name) ||
+                $0.name.localizedCaseInsensitiveContains(source.name)
+            })
+            if match != nil { return }
+            // 150ms between polls — quick enough to feel responsive,
+            // long enough that we're not hammering AVFoundation.
+            try? await Task.sleep(for: .milliseconds(150))
+        }
+        // Timed out — proceed anyway. The AudioMixer will log a
+        // "No Core Audio device matches UID" warning and continue
+        // without that channel; better than blocking indefinitely.
+    }
+
     // MARK: - Preview
 
     func startPreview() async {
@@ -441,7 +942,16 @@ final class MainViewModel: ObservableObject {
                     return
                 }
                 let svc = CameraCaptureService()
-                svc.onRecordBuffer = { [weak self] sb in self?.recorder.appendVideo(sb) }
+                svc.onRecordBuffer = { [weak self] sb in
+                    // Phase 6.5 — also stash the latest frame so the
+                    // Screenshot button can write it as PNG. Cheap
+                    // pointer copy; CIImage conversion only happens
+                    // when the user actually triggers a screenshot.
+                    if let pb = CMSampleBufferGetImageBuffer(sb) {
+                        self?.frameCache.store(pb)
+                    }
+                    self?.recorder.appendVideo(sb)
+                }
                 dims = try await svc.start(cameraUniqueID: cameraID,
                                            previewSink: previewSinkLayer)
                 cameraService = svc
@@ -550,7 +1060,14 @@ final class MainViewModel: ObservableObject {
     /// into the recorder, bypassing the AudioMixer (mic-only path).
     private func makeScreenService() -> ScreenCaptureService {
         let svc = ScreenCaptureService()
-        svc.onRecordBuffer = { [weak self] sb in self?.recorder.appendVideo(sb) }
+        svc.onRecordBuffer = { [weak self] sb in
+            // Phase 6.5 — cache the latest pixel buffer for the
+            // Screenshot button. Same pattern as the camera path.
+            if let pb = CMSampleBufferGetImageBuffer(sb) {
+                self?.frameCache.store(pb)
+            }
+            self?.recorder.appendVideo(sb)
+        }
         svc.onAudioBuffer  = { [weak self] sb in self?.recorder.appendAudio(sb) }
         svc.onStreamStopped = { [weak self] error in
             Task { @MainActor in
@@ -592,6 +1109,10 @@ final class MainViewModel: ObservableObject {
         hasScreenAudio = false
 
         previewSinkLayer.flush()
+        // Phase 6.5 — clear cached preview frame so a stale frame
+        // from this source can't be saved as a "screenshot" after
+        // preview has ended.
+        frameCache.clear()
         isPreviewing = false
         if status.hasPrefix("Previewing") { status = "Idle" }
     }
@@ -605,6 +1126,9 @@ final class MainViewModel: ObservableObject {
             return
         }
         guard !isRecording else { return }
+
+        // Phase 6.5 — fresh markers list for the new session.
+        markers = []
 
         // Phase 5b — audio path forks on source kind. Screen sources
         // use SCStream's .audio output (hasScreenAudio); camera sources
@@ -623,6 +1147,35 @@ final class MainViewModel: ObservableObject {
         } catch {
             status = "Save directory error: \(error.localizedDescription)"
             return
+        }
+
+        // Phase 6.6.3 — disk space pre-check. 1080p60 H.264 sits around
+        // 12–18 Mbps which is ~135 MB/min; 4K60 closer to 400 MB/min.
+        // Aborting under 2GB free prevents the user from starting a
+        // recording that's going to fail 5–15 minutes in when the
+        // writer can't extend the file. Uses the
+        // .volumeAvailableCapacityForImportantUsageKey so iCloud /
+        // Time Machine / Spotlight indexing reserved space is excluded
+        // from the calculation.
+        let minFreeBytes: Int64 = 2_000_000_000
+        do {
+            let values = try saveDir.resourceValues(
+                forKeys: [.volumeAvailableCapacityForImportantUsageKey]
+            )
+            if let free = values.volumeAvailableCapacityForImportantUsage, free < minFreeBytes {
+                let freeGB = Double(free) / 1_000_000_000
+                status = String(
+                    format: "Low disk space: %.1f GB free on save volume. Free up space before recording (need at least 2 GB).",
+                    freeGB
+                )
+                return
+            }
+        } catch {
+            // Probe failed — don't block the recording on this. The
+            // user might be on a volume that doesn't report capacity
+            // (network mount with bad responder, etc.). Better to let
+            // the recorder try and fail honestly than to block here.
+            print("Recaptr: disk space probe failed (continuing): \(error.localizedDescription)")
         }
 
         do {

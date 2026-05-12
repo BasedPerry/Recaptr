@@ -33,6 +33,51 @@ struct VideoSource: Identifiable, Hashable {
     let cameraUniqueID: String?
 }
 
+// MARK: - Camera classification (Phase 6.6.1)
+//
+// Heuristic helpers used by autoSelectStartupSource() to prefer a
+// capture card on first launch. AVFoundation doesn't expose a clean
+// "this is a capture card" flag (the underlying AVCaptureDevice.deviceType
+// is `.external` for both capture cards and most USB webcams), so we
+// match on common manufacturer / product name patterns. False positives
+// here just mean a regular webcam gets auto-picked — still a better
+// default than the previous "Select a source" empty state.
+
+extension VideoSource {
+
+    /// True if the camera's name looks like a video capture card —
+    /// the kind of device a creator plugs a console / camera /
+    /// switcher into. Names checked are common manufacturers and
+    /// product lines.
+    var isCameraCaptureCard: Bool {
+        guard kind == .camera else { return false }
+        let needles = [
+            "elgato",          // 4K X, Cam Link, HD60, etc.
+            "magewell",        // USB Capture HDMI, Pro Capture
+            "avermedia",       // Live Gamer, Capture
+            "blackmagic",      // ATEM Mini, UltraStudio, etc.
+            "aja",             // U-TAP, Kona
+            "live gamer",      // AverMedia GC range
+            "usb capture",     // generic OEM
+            "hdmi capture",    // generic OEM
+            "video capture"    // generic OEM
+        ]
+        let lower = name.lowercased()
+        return needles.contains { lower.contains($0) }
+    }
+
+    /// True if the camera is a Continuity Camera (iPhone / iPad acting
+    /// as a macOS webcam). Useful but generally not what a creator
+    /// wants auto-selected at launch — those are per-session by nature.
+    var isContinuityCamera: Bool {
+        guard kind == .camera else { return false }
+        let lower = name.lowercased()
+        return lower.contains("iphone camera") ||
+               lower.contains("ipad camera") ||
+               lower.contains("continuity camera")
+    }
+}
+
 struct AudioSource: Identifiable, Hashable {
     let id: String
     let name: String
