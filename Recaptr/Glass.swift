@@ -1,6 +1,12 @@
 import SwiftUI
 import AppKit
 
+/// Generic Liquid Glass background container clipped to any Shape.
+///
+/// Uses `.glassEffect()` on macOS 26+, falls back to
+/// `NSVisualEffectView` with the `.hudWindow` material on earlier
+/// systems. Both paths render a translucent surface with a hairline
+/// white edge.
 struct GlassCard<S: Shape>: View {
     let shape: S
     init(_ shape: S) { self.shape = shape }
@@ -20,6 +26,8 @@ struct GlassCard<S: Shape>: View {
     }
 }
 
+/// AppKit `NSVisualEffectView` wrapper for SwiftUI. Used as the
+/// pre-macOS-26 fallback for Liquid Glass surfaces.
 struct VisualEffectView: NSViewRepresentable {
     let material: NSVisualEffectView.Material
     let blending: NSVisualEffectView.BlendingMode
@@ -33,18 +41,14 @@ struct VisualEffectView: NSViewRepresentable {
 }
 
 // MARK: - Brand Liquid Glass capsule
-//
-// True Liquid Glass background for the three floating pills.
-// macOS 26 path uses the system .glassEffect() — same material as
-// the Tahoe menu bar, Control Center, and the QuickTime HUD.
-// Older systems fall back to NSVisualEffectView (.hudWindow) which
-// is the closest pre-Tahoe approximation.
-//
-// We do NOT stack a solid Color.recaptrSurface overlay on top — that
-// is what made the v1 pills read as graphite panels rather than glass.
-// Instead, an optional `topTint` adds a very faint hero-glow ramp
-// from the top, keeping the surface obviously translucent.
 
+/// Capsule-shaped Liquid Glass background used by the floating chrome
+/// pills (source switcher, audio module, recording controls, telemetry).
+///
+/// Renders translucent — no solid color overlay — so the preview
+/// behind the pill remains visible. An optional `topTint` paints a
+/// faint top-down gradient in the supplied color for brand hinting
+/// without compromising translucency.
 struct BrandGlassCapsule: ViewModifier {
     let topTint: Color?
 
@@ -52,7 +56,7 @@ struct BrandGlassCapsule: ViewModifier {
         content
             .background(
                 ZStack {
-                    // Layer 1 — true glass (transparent + blur)
+                    // Translucent glass surface.
                     Group {
                         if #available(macOS 26.0, *) {
                             Color.clear.glassEffect()
@@ -63,9 +67,8 @@ struct BrandGlassCapsule: ViewModifier {
                     }
                     .clipShape(Capsule())
 
-                    // Layer 2 — optional faint hero-glow tint at top.
-                    // Kept low alpha (0.14) so the underlying preview
-                    // still shows through; this is brand tint, not a fill.
+                    // Optional top-down tint gradient. Low alpha so the
+                    // preview behind the pill still shows through.
                     if let tint = topTint {
                         Capsule().fill(
                             LinearGradient(
@@ -80,8 +83,7 @@ struct BrandGlassCapsule: ViewModifier {
                     }
                 }
             )
-            // Soft hairline edge — half-alpha brand border so the pill
-            // has a contour without becoming a hard-edged panel.
+            // Hairline edge defines the pill's contour at low alpha.
             .overlay(
                 Capsule()
                     .strokeBorder(Color.white.opacity(0.10), lineWidth: 0.5)
@@ -91,9 +93,9 @@ struct BrandGlassCapsule: ViewModifier {
 }
 
 extension View {
-    /// Recaptr's true Liquid Glass capsule background. Pass an
-    /// optional `topTint` (e.g. `.violet`) for a brand-flavored
-    /// hero-glow hint at the top edge of the pill.
+    /// Apply the Liquid Glass capsule background to this view. Pass
+    /// an optional `topTint` color (e.g. `.violet`) to add a faint
+    /// gradient hint at the top edge.
     func brandGlassCapsule(topTint: Color? = nil) -> some View {
         modifier(BrandGlassCapsule(topTint: topTint))
     }
