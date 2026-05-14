@@ -2,27 +2,15 @@
 //  Brand.swift
 //  Recaptr
 //
-//  Phase 6 design system tokens (2026-05-11).
-//
-//  Source of truth: the cool/streaming-era palette preserved in
-//  OvertonForge/OvertonForge.github.io → styles.recaptr-palette.css
-//  (commit 72637bc). The umbrella brand moved to warm heritage;
-//  Recaptr keeps the cool palette because server-room/streaming
-//  vocabulary fits the product surface better.
-//
-//  Edit Brand.swift to update the whole app: every component
+//  Design system tokens: palette, semantic color aliases, gradients,
+//  typography, spacing rhythm, corner radii. Every component
 //  references the semantic aliases (recaptrAccent, recaptrSurface,
 //  etc.), so a single change here cascades through the UI.
-//
-//  See Cerebro: 4-Dev/Recaptr/Plans/2026-05-11_UI_Component_System_Swift_Translation_v1.md
-//  for the Figma-to-Swift translation guide and iteration playbook.
 //
 
 import SwiftUI
 
 // MARK: - Brand palette
-// Mirror of styles.recaptr-palette.css. If a value here changes,
-// update the corresponding CSS variable too.
 
 extension Color {
     static let graphite     = Color(red: 0x1B/255, green: 0x1F/255, blue: 0x23/255)
@@ -34,16 +22,13 @@ extension Color {
     static let beige        = Color(red: 0xCF/255, green: 0xCA/255, blue: 0xC2/255)
     static let beigeBright  = Color(red: 0xF4/255, green: 0xF0/255, blue: 0xE8/255)
 
-    /// Warm amber, borrowed from the Overton Forge heritage palette
-    /// for "off / warning" semantics (mute, no-signal, error states).
-    /// Lives here so it's discoverable; not part of the cool palette
-    /// proper but used for state communication.
+    /// Warm amber used for "off / warning" semantics (mute, no-signal,
+    /// error states). Not part of the cool palette proper but kept
+    /// alongside it for discoverability.
     static let warningAmber = Color(red: 0xE8/255, green: 0x9A/255, blue: 0x3F/255)
 }
 
 // MARK: - Semantic aliases
-// Use these in components, not raw palette names. That way a brand
-// re-tint changes one line per role, not every component.
 
 extension Color {
     static let recaptrBackground    = Color.graphite
@@ -64,10 +49,8 @@ extension Color {
 // MARK: - Gradients
 
 extension LinearGradient {
-    /// Signal gradient — 135° restore → violet → signal.
-    /// For hero accents and one-off brand moments. Don't use as
-    /// segment fill (too busy); reserve for moments that need to
-    /// feel like a "Recaptr signature."
+    /// 135° restore → violet → signal. Reserved for hero accents and
+    /// brand-signature moments; not for routine segment fills.
     static let recaptrSignal = LinearGradient(
         stops: [
             .init(color: .restore, location: 0.0),
@@ -80,8 +63,8 @@ extension LinearGradient {
 }
 
 extension RadialGradient {
-    /// Hero glow — soft radial spotlight from the top center.
-    /// Used behind hero sections / preview when the app first opens.
+    /// Soft radial spotlight from top center. Used behind hero
+    /// sections and the preview surface on first open.
     static let recaptrHeroGlow = RadialGradient(
         stops: [
             .init(color: Color.restore.opacity(0.18), location: 0.0),
@@ -95,17 +78,11 @@ extension RadialGradient {
 }
 
 // MARK: - Typography
+//
 // Space Grotesk (heading) + Inter (body) + IBM Plex Mono (telemetry).
-// All three families use Font.custom; PostScript names map per weight.
-//
-// Fonts ship in Recaptr/Fonts/ and get auto-registered via
-// INFOPLIST_KEY_ATSApplicationFontsPath = "Fonts" (set in
-// project.pbxproj for both Debug and Release configs).
-//
-// If a .ttf isn't bundled, Font.custom silently falls back to the
-// system font (SF Pro / SF Mono). No crash, just slightly different
-// typography. See Recaptr/Fonts/README.md for the list of files and
-// the PostScript name conventions.
+// All three families ship in Recaptr/Fonts/ and auto-register via the
+// INFOPLIST_KEY_ATSApplicationFontsPath build setting. If a .ttf is
+// missing, Font.custom silently falls back to the system font.
 
 enum BrandFont {
     case heading(weight: Font.Weight, size: CGFloat)
@@ -115,9 +92,6 @@ enum BrandFont {
     var swiftUI: Font {
         switch self {
         case .heading(let w, let s):
-            // Variable-font safe: pass the family weight name AND
-            // `.weight(w)` modifier. Static fonts ignore the modifier;
-            // variable fonts use it to set the wght axis.
             return Font.custom(BrandFont.spaceGroteskName(for: w), size: s)
                 .weight(w)
         case .body(let w, let s):
@@ -129,9 +103,9 @@ enum BrandFont {
         }
     }
 
-    // PostScript-name resolvers per weight. Edit these if you swap in
-    // different .ttf files later (e.g. a variable font with a single
-    // PostScript name) — match Font Book's "PostScript name" field.
+    // PostScript-name resolvers per weight. Match the names in
+    // Font Book's "PostScript name" field if swapping in different
+    // .ttf files.
 
     private static func spaceGroteskName(for w: Font.Weight) -> String {
         switch w {
@@ -162,8 +136,8 @@ enum BrandFont {
 }
 
 // MARK: - Spacing rhythm
-// Strict 4 / 8 / 12 / 16 / 24 / 32 pt grid. Don't introduce
-// other values without updating the Cerebro doc.
+//
+// Strict 4 / 8 / 12 / 16 / 24 / 32 pt grid.
 
 enum Spacing {
     static let xxs:  CGFloat = 4
@@ -177,7 +151,7 @@ enum Spacing {
 // MARK: - Corner radii
 
 enum Radius {
-    static let pill:    CGFloat = 999  // full capsule
+    static let pill:    CGFloat = 999
     static let card:    CGFloat = 16
     static let button:  CGFloat = 12
     static let inset:   CGFloat = 8

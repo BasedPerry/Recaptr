@@ -2,13 +2,10 @@
 //  DeviceCatalog.swift
 //  Recaptr
 //
-//  Phase 1 (2026-05-09): lifted from Dev/BackupCapture/Sources/DeviceCatalog.swift.
-//  Already includes the SCDisplay.localizedName → NSScreen mapping fix
-//  applied earlier on 2026-05-09 against shipping macOS Tahoe.
-//
-//  Diagnostic printf added at end of refresh() to preserve the visibility
-//  the Phase 0 CaptureDeviceManager.refreshDevices() printf provided
-//  (which retired in Phase 1 in favor of this catalog).
+//  Enumerates available capture sources: ScreenCaptureKit displays
+//  and windows for screen sources, AVCaptureDevice for cameras
+//  and microphones. The catalog is the single source of truth used
+//  by the MainViewModel + UI source switcher.
 //
 
 import Foundation
@@ -22,16 +19,14 @@ final class DeviceCatalog: ObservableObject {
     @Published var videoSources: [VideoSource] = []
     @Published var audioSources: [AudioSource] = []
 
+    /// Refresh both video and audio source lists. Safe to call
+    /// repeatedly (e.g. on device hotplug or app activation).
     func refresh() async {
         await withTaskGroup(of: Void.self) { group in
             group.addTask { await self.loadShareableContent() }
             group.addTask { await self.loadCamerasAndMics() }
         }
 
-        // Phase 0 → Phase 1 visibility: print what the catalog sees.
-        // Format-catalog detail (the "20 formats" line from Phase 0) is
-        // intentionally omitted here — it returns in Phase 3 when the
-        // encoder needs it.
         print("DeviceCatalog: \(videoSources.count) video source(s), \(audioSources.count) audio source(s)")
         for s in videoSources {
             print("  · [\(s.kind.rawValue)] \(s.name)  (id=\(s.id))")
@@ -42,10 +37,6 @@ final class DeviceCatalog: ObservableObject {
     }
 
     private func loadCamerasAndMics() async {
-        // Phase 2 (2026-05-09): patched from deprecated `devices(for:)`
-        // to the AVCaptureDevice.DiscoverySession pattern (the same
-        // shape Phase 0's CaptureDeviceManager used). Resolves the
-        // macOS 10.15 deprecation warnings that surfaced in Phase 1.
         let camDiscovery = AVCaptureDevice.DiscoverySession(
             deviceTypes: [.external, .builtInWideAngleCamera, .continuityCamera],
             mediaType: .video,
@@ -113,20 +104,16 @@ final class DeviceCatalog: ObservableObject {
                 self.videoSources.append(contentsOf: screenSources.sorted(by: { $0.name < $1.name }))
             }
         } catch {
-            // Permission not granted yet; ignore.
-            // Phase 5 will surface a proper error path when ScreenCaptureKit
-            // becomes load-bearing for the main source.
+            // Screen Recording permission not yet granted; the
+            // viewmodel surfaces a permission banner from
+            // CGPreflightScreenCaptureAccess on its own path.
         }
     }
 
-    /// Resolve a human-readable name for a `CGDirectDisplayID`.
-    ///
-    /// `SCDisplay` no longer exposes `localizedName` in shipping
-    /// ScreenCaptureKit (it was deprecated/removed at some point
-    /// between Aug 2025 and shipping macOS Tahoe). The canonical
-    /// path is to match the display ID against `NSScreen.screens`
-    /// and pull `NSScreen.localizedName`, which has existed since
-    /// macOS 10.15.
+    /// Resolve a human-readable name for a `CGDirectDisplayID` by
+    /// matching against `NSScreen.screens`. `SCDisplay.localizedName`
+    /// was deprecated/removed in shipping ScreenCaptureKit; this is
+    /// the canonical workaround.
     private static func displayName(for displayID: CGDirectDisplayID) -> String {
         let key = NSDeviceDescriptionKey("NSScreenNumber")
         if let screen = NSScreen.screens.first(where: {

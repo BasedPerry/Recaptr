@@ -2,21 +2,17 @@
 //  RecordingControlsPill.swift
 //  Recaptr
 //
-//  Phase 6 — three-button capture controls pill, modeled on
-//  Apple-native record-button conventions (iOS Camera app +
-//  Voice Memos pattern: red circle that morphs to red rounded
-//  square when recording, white outline ring around it).
+//  Three-button capture controls pill following the Apple-native
+//  record-button convention (iOS Camera, Voice Memos): red circle
+//  that morphs to a red rounded square while recording, with an
+//  outline ring framing it.
 //
 //  Layout: [Screenshot]   [● Record/Stop]   [Marker]
 //
-//  Brand-tinted glass capsule background to match the source
-//  pill + volume bar. Side buttons are compact icon buttons;
-//  the center record button is intentionally larger and louder
-//  — it's the primary CTA.
-//
-//  Screenshot and Marker actions are wired as closure props so
-//  the parent view (ContentViewNext) controls behavior. v1 stubs
-//  them (print to console); Phase 6 polish implements them.
+//  Side buttons are compact icon buttons; the center record button
+//  is intentionally larger and louder as the primary action. The
+//  Screenshot, Record, and Marker actions are wired as closures so
+//  the parent view owns their behavior.
 //
 
 import SwiftUI
@@ -46,11 +42,8 @@ struct RecordingControlsPill: View {
         }
         .padding(.horizontal, 22)
         .padding(.vertical, 12)
-        // Phase 6.2 — neutral glass. v2 of this pill had a violet
-        // hero-tint at top, which made it compete with the source
-        // pill for attention. The pill is now visually quiet so the
-        // record button (the actual CTA) is the loudest element on
-        // screen.
+        // Neutral glass background — keeps the record button as the
+        // loudest element rather than competing with the source pill.
         .brandGlassCapsule(topTint: nil)
     }
 
@@ -75,18 +68,14 @@ struct RecordingControlsPill: View {
         .help(label)
     }
 
-    // MARK: Record button (center, primary CTA)
+    // MARK: Record button
 
     private var recordButton: some View {
         Button(action: onToggleRecord) {
             ZStack {
-                // Outer ring — Apple's recording-button signature.
-                // Phase 6.2: bumped from 48→60, stroke 2→2.5.
-                // Phase 6.3: while recording, the ring fills with the
-                // app-icon signal gradient (restore→violet→signal at
-                // 135°) so the active state visually echoes the icon.
-                // Idle stays neutral so red disk = "ready", gradient
-                // ring = "live".
+                // Outer ring. While recording, fills with the brand
+                // gradient so the active state visually echoes the
+                // app icon. Idle stays neutral.
                 Group {
                     if isRecording {
                         Circle()
@@ -109,10 +98,8 @@ struct RecordingControlsPill: View {
                 .frame(width: 60, height: 60)
                 .animation(.easeInOut(duration: 0.25), value: isRecording)
 
-                // Inner indicator — morphs between circle (idle)
-                // and rounded square (recording). Phase 6.2: idle disk
-                // bumped 36→44, recording square 18→22. Same Apple
-                // pattern, just louder.
+                // Inner indicator morphs between circle (idle) and
+                // rounded square (recording).
                 Group {
                     if isRecording {
                         RoundedRectangle(cornerRadius: 6, style: .continuous)
@@ -152,18 +139,18 @@ private struct PreviewWrapper: View {
                 RecordingControlsPill(
                     isRecording: recA,
                     canRecord: true,
-                    onScreenshot: { print("screenshot A") },
+                    onScreenshot: { },
                     onToggleRecord: { recA.toggle() },
-                    onMark: { print("mark A") }
+                    onMark: { }
                 )
             }
             stateBlock("RECORDING IN PROGRESS") {
                 RecordingControlsPill(
                     isRecording: recB,
                     canRecord: true,
-                    onScreenshot: { print("screenshot B") },
+                    onScreenshot: { },
                     onToggleRecord: { recB.toggle() },
-                    onMark: { print("mark B") }
+                    onMark: { }
                 )
             }
         }

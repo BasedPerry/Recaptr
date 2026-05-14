@@ -2,80 +2,45 @@
 //  AudioModule.swift
 //  Recaptr
 //
-//  Phase 6.3.2 — replaces VolumeBar on the right edge of the QuickTime
-//  chrome. Two dynamic concerns + one read-only telemetry:
+//  Right-edge floating audio pill. Surfaces the three audio
+//  concerns that need to be reachable mid-session:
 //
-//    1. MONITOR toggle  — am I hearing the input in my headphones
-//                         (constantly toggled mid-session, especially
-//                         when switching screens / answering things)
-//    2. MONITOR volume  — how loud the monitor is (varies per game /
-//                         per conversation — RDR2 quieter, Marathon
-//                         100%, podcast guest somewhere in between)
-//    3. INPUT VU        — visual "is my mic hot" — read-only, stays
-//                         visible regardless of monitor state so you
-//                         can glance and confirm mic is being captured
-//                         even with monitor muted
+//    1. Monitor toggle — am I hearing the input in my headphones
+//    2. Monitor volume — how loud the monitor is
+//    3. Input VU       — read-only level meter confirming mic is hot
 //
-//  Why monitor here, gain in Settings. For a gameplay/streaming
-//  creator, mic gain is set once per session and forgotten (same
-//  mic, same room, same voice). Monitor volume changes constantly
-//  with the game audio level. The pill is the always-visible knob
-//  for the dynamic concern; gain lives behind the gear because it's
-//  a set-and-forget calibration.
+//  Mic gain lives in the Settings popover (set-and-forget). The
+//  pill carries the dynamic controls.
 //
-//  Layout (vertical capsule, ~64pt wide × ~280pt tall):
-//    ┌───────────┐
-//    │   AUDIO   │
-//    │           │
-//    │    🎧     │   ← monitor toggle (click or ⌘K to mute)
-//    │           │
-//    │   ▮ ▮     │   ← left col = monitor volume (draggable)
-//    │   ▮ ▮     │     right col = VU meter (read-only)
-//    │   ●▮▮     │
-//    │   ▮ ▮     │
-//    │           │
-//    │   82%     │   ← monitor volume readout
-//    │  -18 dB   │   ← live peak readout (always visible)
-//    └───────────┘
-//
-//  Keyboard shortcut. The monitor toggle is wired to `toggleMonitor()`
-//  — Phase 6.4 will bind this to ⌘K (or whatever the eventual shortcut
-//  is) at the window level so monitor mute works from anywhere in
-//  the app.
-//
-//  VU update rate. AudioMixer computes rms+peak per buffer (~21ms
-//  cadence). The mixerStats @Published updates at 1Hz which is too
-//  slow for a meter. This view runs its own 30Hz Timer that calls
-//  vm.currentAudioLevels() and stores the result in local @State,
-//  so the meter feels continuous without bumping global re-render
-//  cost.
+//  VU update rate: the AudioMixer computes RMS + peak per buffer
+//  (~21ms cadence) and the mixerStats @Published value updates at
+//  1Hz. This view polls the mixer at 30Hz via a Timer publisher
+//  and stores levels in local @State so the meter feels continuous
+//  without triggering global re-renders.
 //
 
 import SwiftUI
-import Combine    // for Timer.publish(...).autoconnect()
+import Combine
 
 struct AudioModule: View {
 
     @EnvironmentObject var vm: MainViewModel
 
-    // ── Live VU state, updated by .onReceive of a 30Hz timer ────────
     @State private var rmsDbfs: Float = -120
     @State private var peakDbfs: Float = -120
-
-    // ── Drag-stretch state (matches the v1 VolumeBar feel) ──────────
     @State private var isDraggingVolume: Bool = false
 
-    // ── 30Hz timer publisher for VU updates ─────────────────────────
-    // Auto-connected, runs while the view is mounted, fires on main.
+    /// 30Hz timer publisher driving VU updates. Auto-connected so
+    /// it runs while the view is mounted, fires on main.
     private let vuTimer = Timer.publish(every: 1.0 / 30.0, on: .main, in: .common).autoconnect()
 
-    // ── Dimensions ──────────────────────────────────────────────────
+    // Dimensions
     private let baseWidth: CGFloat = 64
     private let totalHeight: CGFloat = 280
     private let trackHeight: CGFloat = 160
-    private let trackColumnWidth: CGFloat = 8     // volume + VU column widths
+    private let trackColumnWidth: CGFloat = 8
 
-    /// Monitor volume range — matches MainViewModel.monitorVolume (0…1.5).
+    /// Monitor volume range. Matches `MainViewModel.monitorVolume` (0…1.5).
     private let volumeMin: Double = 0
     private let volumeMax: Double = 1.5
 
@@ -101,12 +66,7 @@ struct AudioModule: View {
         .accessibilityLabel("Audio")
     }
 
-    // MARK: - Body: monitor toggle + monitor volume + VU
-    //
-    // Stack: AUDIO label → headphone toggle → parallel tracks
-    // (monitor volume on left, VU on right) → percentage + peak
-    // readouts. Headphone toggle is the always-reachable mute, VU
-    // is read-only and stays visible regardless of monitor state.
+    // MARK: - Body layout
 
     private var audioBody: some View {
         VStack(spacing: 8) {
@@ -132,10 +92,8 @@ struct AudioModule: View {
         .padding(.horizontal, 8)
     }
 
-    // Headphone toggle. Click = mute / unmute monitor. Designed to
-    // bind to a window-level keyboard shortcut (Phase 6.4 — e.g. ⌘K)
-    // so the same toggle works from anywhere in the app, including
-    // when the chrome is faded out.
+    /// Click to toggle monitor on/off. Also bound to a window-level
+    /// keyboard shortcut in `ContentViewNext`.
     private var monitorToggle: some View {
         Button(action: toggleMonitor) {
             Image(systemName: vm.monitorEnabled ? "headphones" : "headphones.slash")
@@ -152,22 +110,20 @@ struct AudioModule: View {
         .help(vm.monitorEnabled ? "Mute monitor" : "Unmute monitor")
     }
 
+    /// Draggable monitor volume column. Dims (but stays draggable)
+    /// when monitor is muted so the user can pre-position the level
+    /// for when monitor comes back on.
     private var volumeTrack: some View {
         GeometryReader { geo in
             let h = geo.size.height
             let fill = CGFloat(clamp01(volumeFraction))
-            // When monitor is muted, the volume column visually dims
-            // but stays draggable — adjusting it pre-positions the
-            // volume for when monitor comes back on.
             let isLive = vm.monitorEnabled
 
             ZStack(alignment: .bottom) {
-                // Resting track
                 Capsule()
                     .fill(Color.beige.opacity(0.10))
                     .frame(width: trackColumnWidth)
 
-                // Active fill — restore→violet→signal bottom-up.
                 Capsule()
                     .fill(
                         LinearGradient(
@@ -185,7 +141,6 @@ struct AudioModule: View {
                     .animation(.linear(duration: 0.06), value: vm.monitorVolume)
                     .animation(.easeOut(duration: 0.2), value: isLive)
 
-                // Thumb dot at the fill terminus
                 Circle()
                     .fill(Color.beigeBright)
                     .frame(width: 10, height: 10)
@@ -197,7 +152,8 @@ struct AudioModule: View {
                     .shadow(color: .black.opacity(0.4), radius: 2)
                     .allowsHitTesting(false)
 
-                // Hit target — drag anywhere in the column to set value
+                // Wider invisible hit target so the user doesn't have
+                // to land exactly on the 8pt-wide track.
                 Color.clear
                     .contentShape(Rectangle())
                     .gesture(
@@ -215,6 +171,8 @@ struct AudioModule: View {
         .frame(maxWidth: .infinity)
     }
 
+    /// Read-only VU column. RMS fills bottom-up; a thin peak tick
+    /// floats above the RMS fill.
     private var vuTrack: some View {
         GeometryReader { geo in
             let h = geo.size.height
@@ -222,15 +180,12 @@ struct AudioModule: View {
             let peakFill = CGFloat(normalize(peakDbfs))
 
             ZStack(alignment: .bottom) {
-                // Resting VU rail
                 Capsule()
                     .fill(Color.beige.opacity(0.08))
                     .frame(width: trackColumnWidth)
 
-                // RMS fill — main "loudness" body. Different gradient
-                // from gain so it reads as a different concept:
-                // signal-green at quiet (good headroom), violet mid,
-                // red at clipping danger zone (>-3 dBFS).
+                // Signal-green at quiet (good headroom), violet mid,
+                // red at the clipping danger zone (>-3 dBFS).
                 Capsule()
                     .fill(
                         LinearGradient(
@@ -246,9 +201,8 @@ struct AudioModule: View {
                     .frame(width: trackColumnWidth, height: h * rmsFill)
                     .animation(.linear(duration: 0.05), value: rmsDbfs)
 
-                // Peak tick — thin horizontal line above the RMS fill,
-                // marks the most recent peak. Decays via the mixer's
-                // built-in smoothing on peakDbfs.
+                // Peak tick floats above the RMS body. Decays via the
+                // mixer's built-in smoothing on peakDbfs.
                 Rectangle()
                     .fill(Color.beigeBright)
                     .frame(width: trackColumnWidth + 2, height: 1.5)
@@ -264,17 +218,7 @@ struct AudioModule: View {
         .frame(maxWidth: .infinity)
     }
 
-    // MARK: - Bits and bobs
-
-    private var separator: some View {
-        // Phase 6.3.1: separator preserved for potential reuse; no
-        // longer drawn since the monitor section was removed.
-        Rectangle()
-            .fill(Color.white.opacity(0.10))
-            .frame(height: 0.5)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
-    }
+    // MARK: - Helpers
 
     private func sectionLabel(_ text: String) -> some View {
         Text(text)
@@ -282,8 +226,6 @@ struct AudioModule: View {
             .tracking(1.6)
             .foregroundStyle(Color.recaptrAccent)
     }
-
-    // MARK: - Readouts and conversions
 
     private var volumeFraction: Double {
         (vm.monitorVolume - volumeMin) / (volumeMax - volumeMin)
@@ -299,9 +241,8 @@ struct AudioModule: View {
         return String(format: "%+.0f dB", peakDbfs)
     }
 
-    /// dBFS (-60..0) → 0..1 fraction with mild log curve so quiet
-    /// sounds register visibly without compressing loud peaks.
-    /// Matches the existing VUMeterView convention in ContentView.
+    /// dBFS (-60…0) → 0…1 fraction. Quiet input still registers
+    /// visibly without compressing loud peaks.
     private func normalize(_ dbfs: Float) -> Float {
         let floor: Float = -60
         let ceil: Float = 0
@@ -313,11 +254,8 @@ struct AudioModule: View {
         min(max(v, 0), 1)
     }
 
-    // MARK: - Monitor toggle (also targeted by future keyboard shortcut)
-
-    /// Toggle monitor on/off. Window-level keyboard shortcut in
-    /// Phase 6.4 will hit this same method via a hidden Button or a
-    /// dedicated AppCommands binding.
+    /// Toggle monitor on/off. Targeted by both the inline button and
+    /// the window-level keyboard shortcut.
     func toggleMonitor() {
         vm.monitorEnabled.toggle()
     }
@@ -325,7 +263,7 @@ struct AudioModule: View {
 
 // MARK: - Preview
 
-#Preview("Audio Module — idle + active states") {
+#Preview("Audio Module") {
     PreviewWrapper()
         .frame(width: 460, height: 420)
         .background(Color.recaptrBackground)

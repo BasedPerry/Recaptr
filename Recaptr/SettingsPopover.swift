@@ -2,23 +2,15 @@
 //  SettingsPopover.swift
 //  Recaptr
 //
-//  Phase 6 — gear icon popover that holds everything the floating
-//  chrome doesn't surface directly. Lives behind the gear button
-//  in the top-right of ContentViewNext.
+//  Gear-icon popover presented from the top-right of the main
+//  window. Holds the controls that aren't surfaced on the floating
+//  chrome pills: input audio device + gain, save folder, permission
+//  status (only when action is needed), and the current status line.
 //
-//  Sections, top to bottom:
-//    1. Audio       — source picker, gain, enable toggle, VU meter
-//    2. Save        — folder selection + reset
-//    3. Preview     — start/stop control (in case auto-preview isn't
-//                     desired) + Show in Finder for the last recording
-//    4. Permissions — mic + screen recording status, with Recheck /
-//                     Open Settings actions, only shown when needed
-//    5. Status      — current status line, mono-formatted
-//
-//  All rows reuse the existing internal structs from ContentView.swift
+//  Composes existing rows defined in ContentView.swift
 //  (AudioChannelRow, SaveLocationRow, StatusBar, PermissionBanner,
-//  ScreenRecordingPermissionBanner), so this popover stays a thin
-//  composition layer.
+//  ScreenRecordingPermissionBanner) so this file stays a thin
+//  presentation layer.
 //
 
 import SwiftUI
@@ -41,14 +33,10 @@ struct SettingsPopover: View {
 
     // MARK: Audio
     //
-    // Phase 6.3.2 — Audio section holds INPUT setup only: mic device
-    // picker, gain slider, channel enable, VU readout. Mic gain is a
-    // set-and-forget calibration that belongs behind the gear menu.
-    //
-    // Monitor toggle + monitor volume live on the AudioModule pill
-    // on the right edge — they're the dynamic controls that change
-    // mid-session (different game = different monitor level), so the
-    // pill keeps them one click away.
+    // Input setup only: device picker, gain slider, channel enable,
+    // VU readout. Monitor toggle + monitor volume live on the right-
+    // edge AudioModule pill, since those are the controls a user
+    // adjusts mid-session.
 
     private var audioSection: some View {
         Section {
@@ -68,11 +56,6 @@ struct SettingsPopover: View {
     }
 
     // MARK: Save Location
-    //
-    // Phase 6.2 — folded "Show Last in Finder" into this section.
-    // The dedicated Preview section is gone: preview is now an
-    // implementation detail (runs automatically when a source is
-    // selected, may auto-pause for performance), not a user toggle.
 
     private var saveSection: some View {
         Section {
@@ -97,7 +80,7 @@ struct SettingsPopover: View {
         }
     }
 
-    // MARK: Permissions (only when something needs attention)
+    // MARK: Permissions (rendered only when something needs action)
 
     private var permissionsSection: some View {
         let micNeedsAction = vm.audioPermissionStatus != .authorized
@@ -128,7 +111,7 @@ struct SettingsPopover: View {
         }
     }
 
-    // MARK: Status (current line of telemetry / probe info / error)
+    // MARK: Status
 
     private var statusSection: some View {
         Section {
@@ -137,8 +120,6 @@ struct SettingsPopover: View {
             sectionHeader("STATUS")
         }
     }
-
-    // MARK: Section header style
 
     private func sectionHeader(_ text: String) -> some View {
         Text(text)

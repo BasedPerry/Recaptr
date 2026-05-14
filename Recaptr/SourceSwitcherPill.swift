@@ -2,30 +2,21 @@
 //  SourceSwitcherPill.swift
 //  Recaptr
 //
-//  Phase 6 — Apple-native source switcher.
+//  Top-bar source switcher: a 3-segment mode selector (Window /
+//  Screen / Camera) paired with a dropdown listing the available
+//  sources within the active mode.
 //
-//  Two native macOS containers paired together:
-//    1. `Picker` with `.pickerStyle(.segmented)` for the mode
-//       selector. This renders as native NSSegmentedControl —
-//       the same control used in Finder's toolbar for view modes
-//       (icons / list / columns / gallery) and in Music for
-//       library views.
-//    2. A `Menu` next to it lists the available sources of the
-//       currently-selected mode. Renders as native NSPopUpButton —
-//       the standard macOS "this is a dropdown" affordance.
-//
-//  Same pattern Apple uses when a sidebar collapses into a
-//  toolbar pill on macOS Tahoe / Sequoia. Drop this directly
-//  into a `.toolbar` ToolbarItemGroup for the full native
-//  integration, or use inline like in the preview.
-//
-//  Public API preserved: bind to SourceMode, separately bind
-//  to the selected source within that mode.
+//  The mode selector is a custom segmented control rather than a
+//  native Picker(.segmented) because macOS's segmented Picker does
+//  not reliably render both an SF Symbol and a text label per
+//  segment. The custom HStack version renders icon + label
+//  consistently and lets each segment pick up its own brand tint
+//  when active.
 //
 
 import SwiftUI
 
-// MARK: - Mode enum (unchanged from v1)
+// MARK: - Mode enum
 
 enum SourceMode: String, CaseIterable, Identifiable, Hashable {
     case window, screen, camera
@@ -49,22 +40,21 @@ enum SourceMode: String, CaseIterable, Identifiable, Hashable {
     }
 }
 
-// MARK: - Lightweight source descriptor for the menu
+// MARK: - Source descriptor
 
-/// Minimal shape the switcher needs to render a source menu.
-/// The MainViewModel maps its richer VideoSource into this.
+/// Minimal shape the switcher needs to render a source menu. The
+/// view model maps its richer `VideoSource` into this.
 struct PickableSource: Identifiable, Hashable {
     let id: String
     let name: String
 }
 
-// MARK: - Source switcher (native containers)
+// MARK: - Source switcher
 
 struct SourceSwitcherPill: View {
     @Binding var activeMode: SourceMode
-    /// Sources of the currently-active mode. Caller filters this
-    /// upstream (e.g. catalog.videoSources.filter { $0.kind == ... }
-    /// → mapped to PickableSource).
+    /// Sources of the currently-active mode. Caller filters and maps
+    /// the catalog's full source list upstream.
     var sourcesForActiveMode: [PickableSource]
     @Binding var selectedSourceID: String?
 
@@ -73,24 +63,12 @@ struct SourceSwitcherPill: View {
             modePicker
             sourceMenu
         }
-        // Phase 6.1 — taller pill, more icon presence. Bumped vertical
-        // padding from 6→11 so the top bar has actual weight over the
-        // preview, and both controls ride .controlSize(.large) so the
-        // SF Symbols read at glance distance.
         .padding(.horizontal, 14)
         .padding(.vertical, 11)
-        // True Liquid Glass — see Glass.swift. v1 stacked .regularMaterial
-        // under a 0.55 solid surface fill, which is why the pill read
-        // as a graphite panel instead of glass. Now it's actual translucent
-        // glass with only a faint violet hero-tint at the top edge.
         .brandGlassCapsule(topTint: .violet)
     }
 
-    // MARK: Mode picker (custom — native Picker.segmented refused to
-    // render both icon AND title on macOS, no matter how loudly we
-    // .labelStyle(.titleAndIcon)'d at it. Custom segmented control
-    // gives us full control: real SF Symbols beside the label, brand
-    // tint on the selected pill, smooth selection animation.)
+    // MARK: Mode picker
 
     private var modePicker: some View {
         HStack(spacing: 4) {
@@ -100,9 +78,6 @@ struct SourceSwitcherPill: View {
         }
         .padding(3)
         .background(
-            // Inner track that the selection pill rides inside.
-            // Very low-alpha so the glass capsule it sits inside is
-            // still the dominant surface.
             Capsule().fill(Color.white.opacity(0.04))
         )
         .overlay(
@@ -125,8 +100,6 @@ struct SourceSwitcherPill: View {
                 Text(mode.label)
                     .font(.system(size: 13, weight: .medium))
             }
-            // Active segment: dark text on the bright brand tint.
-            // Inactive segment: muted secondary on transparent.
             .foregroundStyle(isActive ? Color.graphite : Color.recaptrTextSecondary)
             .padding(.horizontal, 12)
             .padding(.vertical, 7)
@@ -139,19 +112,19 @@ struct SourceSwitcherPill: View {
         .help(mode.label)
     }
 
-    /// Per-mode tint. Selected segment fills with this; the dropdown
-    /// icon to the right of the modePicker also borrows it.
+    /// Per-mode brand tint. Selected segment fills with this; the
+    /// dropdown icon borrows it as well.
     private var activeModeTint: Color { tintFor(activeMode) }
 
     private func tintFor(_ mode: SourceMode) -> Color {
         switch mode {
-        case .window: return .restore   // cool blue — window/structured
-        case .screen: return .violet    // atmospheric — whole display
-        case .camera: return .signal    // signal-green — live capture
+        case .window: return .restore
+        case .screen: return .violet
+        case .camera: return .signal
         }
     }
 
-    // MARK: Source menu (Menu → NSPopUpButton)
+    // MARK: Source menu
 
     private var sourceMenu: some View {
         Menu {
@@ -173,8 +146,8 @@ struct SourceSwitcherPill: View {
         } label: {
             HStack(spacing: 8) {
                 Image(systemName: activeMode.systemImage)
-                    .imageScale(.medium)               // bumped from .small
-                    .foregroundStyle(activeModeTint)   // mode-tinted icon
+                    .imageScale(.medium)
+                    .foregroundStyle(activeModeTint)
                 Text(currentSourceName)
                     .lineLimit(1)
                     .truncationMode(.middle)
@@ -196,7 +169,7 @@ struct SourceSwitcherPill: View {
 
 // MARK: - Preview
 
-#Preview("Source Switcher — native Apple containers") {
+#Preview("Source Switcher") {
     PreviewWrapper()
         .frame(width: 720, height: 360)
         .background(Color.recaptrBackground)
@@ -223,7 +196,7 @@ private struct PreviewWrapper: View {
     ]
     private let cameras: [PickableSource] = [
         .init(id: "cam-4kx", name: "Elgato 4K X"),
-        .init(id: "cam-iphone", name: "Brandon Perry's iPhone Camera"),
+        .init(id: "cam-iphone", name: "iPhone Camera"),
     ]
 
     var body: some View {

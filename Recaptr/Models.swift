@@ -2,18 +2,9 @@
 //  Models.swift
 //  Recaptr
 //
-//  Phase 1 (2026-05-09): merged file.
-//  - VideoSource / AudioSource / CaptureError lifted unchanged from
-//    Dev/BackupCapture/Sources/Models.swift. Consumed by DeviceCatalog
-//    and (in Phase 2+) by MainViewModel and the capture services.
-//  - CaptureDeviceInfo / CaptureDeviceFormat preserved from the prior
-//    Dev/Recaptr/Recaptr/Models.swift created during Phase 0. They
-//    capture per-format diagnostics (resolution × frame-rate × pixel
-//    format) that DeviceCatalog does not currently expose. Held here
-//    for Phase 3 — H.264 encoder configuration needs to know what
-//    formats the 4K X actually supports. Will be populated by a method
-//    on DeviceCatalog (or a small dedicated FormatCatalog) when Phase 3
-//    needs them.
+//  Shared value types: video / audio source descriptors used by the
+//  device catalog and capture services, per-format diagnostic structs
+//  consumed by the encoder config, and the top-level CaptureError.
 //
 
 import Foundation
@@ -21,8 +12,10 @@ import AVFoundation
 import ScreenCaptureKit
 import CoreMedia
 
-// MARK: - Source orchestration (lifted from BackupCapture)
+// MARK: - Source descriptors
 
+/// A capturable video source. Either a screen / window from
+/// ScreenCaptureKit or an AVCaptureDevice camera.
 struct VideoSource: Identifiable, Hashable {
     enum Kind: String { case screenDisplay, screenWindow, camera }
     let id: String
@@ -33,42 +26,40 @@ struct VideoSource: Identifiable, Hashable {
     let cameraUniqueID: String?
 }
 
-// MARK: - Camera classification (Phase 6.6.1)
-//
-// Heuristic helpers used by autoSelectStartupSource() to prefer a
-// capture card on first launch. AVFoundation doesn't expose a clean
-// "this is a capture card" flag (the underlying AVCaptureDevice.deviceType
-// is `.external` for both capture cards and most USB webcams), so we
-// match on common manufacturer / product name patterns. False positives
-// here just mean a regular webcam gets auto-picked — still a better
-// default than the previous "Select a source" empty state.
+// MARK: - Camera classification heuristics
 
+/// Heuristics used by startup auto-source selection to prefer a
+/// capture card over a built-in webcam or Continuity Camera.
+///
+/// AVFoundation does not expose a flag identifying capture cards —
+/// the underlying `AVCaptureDevice.deviceType` is `.external` for
+/// both capture cards and most USB webcams — so this matches on
+/// common manufacturer and product name fragments. False positives
+/// just mean a non-capture-card webcam might be auto-picked, which
+/// is still preferable to the alternative of no default source.
 extension VideoSource {
 
-    /// True if the camera's name looks like a video capture card —
-    /// the kind of device a creator plugs a console / camera /
-    /// switcher into. Names checked are common manufacturers and
-    /// product lines.
+    /// True if the camera's name matches a known video-capture-card
+    /// manufacturer or product line.
     var isCameraCaptureCard: Bool {
         guard kind == .camera else { return false }
         let needles = [
-            "elgato",          // 4K X, Cam Link, HD60, etc.
-            "magewell",        // USB Capture HDMI, Pro Capture
-            "avermedia",       // Live Gamer, Capture
-            "blackmagic",      // ATEM Mini, UltraStudio, etc.
-            "aja",             // U-TAP, Kona
-            "live gamer",      // AverMedia GC range
-            "usb capture",     // generic OEM
-            "hdmi capture",    // generic OEM
-            "video capture"    // generic OEM
+            "elgato",
+            "magewell",
+            "avermedia",
+            "blackmagic",
+            "aja",
+            "live gamer",
+            "usb capture",
+            "hdmi capture",
+            "video capture"
         ]
         let lower = name.lowercased()
         return needles.contains { lower.contains($0) }
     }
 
-    /// True if the camera is a Continuity Camera (iPhone / iPad acting
-    /// as a macOS webcam). Useful but generally not what a creator
-    /// wants auto-selected at launch — those are per-session by nature.
+    /// True if the camera is a Continuity Camera (iPhone or iPad
+    /// acting as a macOS webcam). Detected via name match.
     var isContinuityCamera: Bool {
         guard kind == .camera else { return false }
         let lower = name.lowercased()
@@ -78,11 +69,13 @@ extension VideoSource {
     }
 }
 
+/// A capturable audio source. `id` is the CoreAudio device UID.
 struct AudioSource: Identifiable, Hashable {
     let id: String
     let name: String
 }
 
+/// Top-level error type surfaced from the capture stack.
 enum CaptureError: Error, LocalizedError {
     case permissionDenied
     case configurationFailed(String)
@@ -99,11 +92,11 @@ enum CaptureError: Error, LocalizedError {
     }
 }
 
-// MARK: - Per-format diagnostics (Phase 0 → Phase 3 encoder config)
+// MARK: - Per-format diagnostics
 
-/// A capture device's full per-format catalog. Populated during device
-/// discovery and consumed in Phase 3 to choose H.264 encoder settings
-/// against the formats the device actually supports.
+/// A capture device's full per-format catalog. Populated during
+/// device discovery and consumed by the encoder configuration to
+/// choose settings against the formats the device supports.
 struct CaptureDeviceInfo: Identifiable {
     var id: String { uniqueID }
     let name: String
