@@ -39,12 +39,19 @@ final class RecaptrRecordingSmokeTests: XCTestCase {
         // Capture cards and webcams run 30 or 60; anything lower means
         // the format lock regressed.
         XCTAssertGreaterThanOrEqual(probe.fps, 29)
+        // An audio track full of zero-fill is a silent recording. The
+        // channel must actually have pushed captured audio.
+        if probe.status.contains("push=") {
+            XCTAssertGreaterThan(number(in: probe.status, after: "push=", until: " ") ?? 0, 0,
+                                 "Audio channel captured nothing: \(probe.status)")
+        }
     }
 
     // MARK: - Helpers
 
     struct Probe {
         var raw: String
+        var status: String
         var duration: Double
         var videoTracks: Int
         var fps: Double
@@ -95,6 +102,7 @@ final class RecaptrRecordingSmokeTests: XCTestCase {
 
         return Probe(
             raw: raw,
+            status: text(of: statusText),
             duration: number(in: raw, after: "Probe → ", until: "s") ?? 0,
             videoTracks: Int(number(in: raw, after: "video tracks=", until: " ") ?? 0),
             fps: number(in: raw, after: "fps=", until: " ") ?? 0,

@@ -103,9 +103,9 @@ struct AudioMixerStats: Equatable {
 /// Canonical mixer format: 48 kHz / Stereo / Float32 / interleaved.
 /// Interleaved makes CMSampleBuffer construction straightforward
 /// (one CMBlockBuffer wrapping the whole frame range).
-private let kMixerSampleRate: Double = 48_000
-private let kMixerChannels: AVAudioChannelCount = 2
-private let kMixerChunkFrames: AVAudioFrameCount = 1024
+nonisolated private let kMixerSampleRate: Double = 48_000
+nonisolated private let kMixerChannels: AVAudioChannelCount = 2
+nonisolated private let kMixerChunkFrames: AVAudioFrameCount = 1024
 
 private func makeMixerFormat() -> AVAudioFormat {
     AVAudioFormat(
@@ -120,7 +120,7 @@ private func makeMixerFormat() -> AVAudioFormat {
 
 /// One input source with its own AVAudioEngine bound to a specific
 /// physical input device.
-final class AudioInputChannel: @unchecked Sendable {
+nonisolated final class AudioInputChannel: @unchecked Sendable {
 
     let label: String
     private let outputFormat: AVAudioFormat
@@ -229,7 +229,11 @@ final class AudioInputChannel: @unchecked Sendable {
         let engine = AVAudioEngine()
         let player = AVAudioPlayerNode()
         engine.attach(player)
-        engine.connect(player, to: engine.mainMixerNode, format: monitorFormat)
+        do {
+            try engine.connectNode(player, to: engine.mainMixerNode, format: monitorFormat)
+        } catch {
+            print("AudioInputChannel[\(label)]: monitor connect failed: \(error.localizedDescription)")
+        }
         engine.mainMixerNode.outputVolume = monitorVolume
         self.monitorEngine = engine
         self.monitorPlayerNode = player
@@ -250,7 +254,7 @@ final class AudioInputChannel: @unchecked Sendable {
         do {
             monitorEngine.prepare()
             try monitorEngine.start()
-            monitorPlayerNode.play()
+            try monitorPlayerNode.playAudio()
             monitorRunning = true
             let outFormat = monitorEngine.outputNode.outputFormat(forBus: 0)
             print("AudioInputChannel[\(label)]: monitor engine started — outputNode format=\(outFormat)")
@@ -314,7 +318,14 @@ final class AudioInputChannel: @unchecked Sendable {
         }
         converter = conv
 
-        // 5. Install tap.
+        // 5. Install tap. Deliberately the pre-27 `installTap`, even
+        // though Swift marks it deprecated at macOS 27. Tested
+        // 2026-09-26 with an Elgato 4K X: the replacement
+        // `installAudioTap` delivered audio on a fresh engine but no
+        // audio at all after a channel stop/start (source switch),
+        // leaving recordings with a silent track. Its documented
+        // minimum buffer is also 100 ms versus 1024 frames (~21 ms)
+        // here, which would add monitor latency.
         engine.inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buf, _ in
             self?.handleTap(buf)
         }
@@ -591,18 +602,20 @@ final class AudioInputChannel: @unchecked Sendable {
     /// kAudioOutputUnitProperty_CurrentDevice routes input from that
     /// physical device.
     static func setEngineInputDevice(engine: AVAudioEngine, deviceID: AudioDeviceID) throws {
-        guard let audioUnit = engine.inputNode.audioUnit else {
-            throw CaptureError.configurationFailed("Engine has no input audioUnit")
-        }
         var devID = deviceID
-        let st = AudioUnitSetProperty(
-            audioUnit,
-            kAudioOutputUnitProperty_CurrentDevice,
-            kAudioUnitScope_Global,
-            0,
-            &devID,
-            UInt32(MemoryLayout<AudioDeviceID>.size)
-        )
+        let st: OSStatus = try engine.inputNode.withAudioUnit { unit in
+            guard let unit else {
+                throw CaptureError.configurationFailed("Engine has no input audioUnit")
+            }
+            return AudioUnitSetProperty(
+                unit,
+                kAudioOutputUnitProperty_CurrentDevice,
+                kAudioUnitScope_Global,
+                0,
+                &devID,
+                UInt32(MemoryLayout<AudioDeviceID>.size)
+            )
+        }
         guard st == noErr else {
             throw CaptureError.configurationFailed("AudioUnitSetProperty(CurrentDevice): \(st)")
         }
@@ -613,19 +626,21 @@ final class AudioInputChannel: @unchecked Sendable {
     /// took (the AUHAL can silently fall back to the system default
     /// input).
     static func currentEngineInputDeviceID(engine: AVAudioEngine) throws -> AudioDeviceID {
-        guard let audioUnit = engine.inputNode.audioUnit else {
-            throw CaptureError.configurationFailed("Engine has no input audioUnit")
-        }
         var devID: AudioDeviceID = 0
         var size = UInt32(MemoryLayout<AudioDeviceID>.size)
-        let st = AudioUnitGetProperty(
-            audioUnit,
-            kAudioOutputUnitProperty_CurrentDevice,
-            kAudioUnitScope_Global,
-            0,
-            &devID,
-            &size
-        )
+        let st: OSStatus = try engine.inputNode.withAudioUnit { unit in
+            guard let unit else {
+                throw CaptureError.configurationFailed("Engine has no input audioUnit")
+            }
+            return AudioUnitGetProperty(
+                unit,
+                kAudioOutputUnitProperty_CurrentDevice,
+                kAudioUnitScope_Global,
+                0,
+                &devID,
+                &size
+            )
+        }
         guard st == noErr else {
             throw CaptureError.configurationFailed("AudioUnitGetProperty(CurrentDevice): \(st)")
         }
