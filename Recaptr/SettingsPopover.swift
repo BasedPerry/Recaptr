@@ -33,10 +33,11 @@ struct SettingsPopover: View {
 
     // MARK: Audio
     //
-    // Input setup only: device picker, gain slider, channel enable,
-    // VU readout. Monitor toggle + monitor volume live on the right-
-    // edge AudioModule pill, since those are the controls a user
-    // adjusts mid-session.
+    // Input setup only: source audio and commentary mic, each with a
+    // device picker, gain slider, channel enable, and VU readout.
+    // Monitor toggle + monitor volume live on the right-edge
+    // AudioModule pill, since those are the controls a user adjusts
+    // mid-session.
 
     private var audioSection: some View {
         Section {
@@ -49,6 +50,18 @@ struct SettingsPopover: View {
                 deviceLocked: vm.isPreviewing || vm.isRecording,
                 gainLocked: vm.isRecording,
                 stats: vm.mixerStats.channels.indices.contains(0) ? vm.mixerStats.channels[0] : nil
+            )
+            // Commentary mic, mixed on top of the source audio. Pick
+            // "None" to turn it off.
+            AudioChannelRow(
+                label: "Mic",
+                sources: vm.availableAudioSources,
+                deviceID: $vm.ch2DeviceID,
+                gain: $vm.ch2Gain,
+                enabled: $vm.ch2Enabled,
+                deviceLocked: vm.isPreviewing || vm.isRecording,
+                gainLocked: vm.isRecording,
+                stats: vm.mixerStats.channels.indices.contains(1) ? vm.mixerStats.channels[1] : nil
             )
         } header: {
             sectionHeader("AUDIO")
