@@ -54,6 +54,29 @@ final class RecaptrUITestsLaunchTests: XCTestCase {
         }
     }
 
+    /// Audio pill with a mic armed, resting and hovered (numbers
+    /// only appear on hover).
+    @MainActor
+    func testAudioPillScreenshot() throws {
+        let app = XCUIApplication()
+        app.launchArguments += ["-ApplePersistenceIgnoreState", "YES",
+                                "-RecaptrKeepChromeVisible", "YES",
+                                "-RecaptrUITesting", "YES",
+                                "-RecaptrUITestMicInput", "Jump Desktop Microphone"]
+        app.launch()
+        let pill = app.descendants(matching: .any)["audioPill"].firstMatch
+        XCTAssertTrue(pill.waitForExistence(timeout: 10))
+        Thread.sleep(forTimeInterval: 4)
+        XCTAssertTrue(app.descendants(matching: .any)["micLevel"].exists, "Mic meter missing with a mic armed")
+        for (name, hover) in [("resting", false), ("hover", true)] {
+            if hover { pill.hover(); Thread.sleep(forTimeInterval: 0.5) }
+            let shot = XCTAttachment(screenshot: pill.screenshot())
+            shot.name = "Launch, Pill \(name)"
+            shot.lifetime = .keepAlways
+            add(shot)
+        }
+    }
+
     static func settingsWindow(in app: XCUIApplication) -> XCUIElement {
         app.windows.matching(NSPredicate(format: "identifier CONTAINS 'Settings'")).firstMatch
     }

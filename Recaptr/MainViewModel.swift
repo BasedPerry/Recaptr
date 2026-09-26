@@ -174,6 +174,9 @@ final class MainViewModel: ObservableObject {
     /// Plays SCStream system audio while monitoring a screen or
     /// window capture. The mic monitor lives on the AudioMixer channel.
     private let systemAudioMonitor = SystemAudioMonitor()
+    /// Levels for system audio on the direct (no-mic) screen path,
+    /// which never passes through the mixer.
+    private let screenAudioLevels = LevelTracker()
     private let audioMixer: AudioMixer
     private var activeDims: CMVideoDimensions = .init(width: 0, height: 0)
     private var hasAudio = false  // Snapshot at startRecording — locked until stopRecording
@@ -606,11 +609,26 @@ final class MainViewModel: ObservableObject {
     /// Channel 1 audio levels in dBFS. Returns nil when the mixer
     /// isn't running. Both values are smoothed inside the mixer.
     func currentAudioLevels() -> (rms: Float, peak: Float)? {
-        guard audioMixer.running else { return nil }
-        let snap = audioMixer.snapshot()
-        guard let ch0 = snap.channels.first else { return nil }
-        return (ch0.rmsDbfs, ch0.peakDbfs)
+        sourceLevels()
     }
+
+    /// Level of the main source's audio: the capture card / camera
+    /// channel, or system audio for Screen and Window sources (through
+    /// the mixer's System channel when a mic is armed, otherwise the
+    /// direct path). Nil when nothing is flowing.
+    func sourceLevels() -> (rms: Float, peak: Float)? {
+        guard let src = selectedMainSource, isPreviewing else { return nil }
+        if src.kind == .camera { return channelLevels(0) }
+        return hasScreenAudio ? screenAudioLevels.levels() : channelLevels(2)
+    }
+
+    /// Level of the commentary mic, or nil when no mic is running.
+    func micLevels() -> (rms: Float, peak: Float)? {
+        micArmed ? channelLevels(1) : nil
+    }
+
+    /// True when a commentary mic is chosen (so the pill shows its meter).
+    var hasMic: Bool { micArmed }
 
     // MARK: - Screenshot + Marker
 
@@ -1145,6 +1163,7 @@ final class MainViewModel: ObservableObject {
                 systemChannel?.pushExternal(sb)
             } else {
                 self?.recorder.appendAudio(sb)
+                self?.screenAudioLevels.feed(sb)
             }
             self?.systemAudioMonitor.feed(sb)
         }
