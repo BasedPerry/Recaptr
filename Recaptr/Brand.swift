@@ -76,37 +76,14 @@ private extension NSColor {
     }
 }
 
-// MARK: - Legacy chrome tokens (removed during component migration)
-
-extension Color {
-    @available(*, deprecated, message: "Use .foregroundStyle(.primary)")
-    nonisolated static let recaptrTextPrimary = Color.primary
-    @available(*, deprecated, message: "Use .foregroundStyle(.secondary)")
-    nonisolated static let recaptrTextSecondary = Color.secondary
-    @available(*, deprecated, message: "Use .foregroundStyle(.tertiary)")
-    nonisolated static let recaptrTextMuted = Color.secondary.opacity(0.7)
-    @available(*, deprecated, message: "Use .foregroundStyle(.quaternary)")
-    nonisolated static let recaptrTextDim = Color.secondary.opacity(0.4)
-    @available(*, deprecated, message: "Use Color.accentColor")
-    nonisolated static let recaptrAccent = Color.accentColor
-    @available(*, deprecated, message: "Use .fill(.quaternary)")
-    nonisolated static let beige = Color.secondary
-    @available(*, deprecated, message: "Use .foregroundStyle(.primary)")
-    nonisolated static let beigeBright = Color.primary
-    @available(*, deprecated, message: "Use .foregroundStyle(.primary)")
-    nonisolated static let graphite = Color.recaptrBackground
-    @available(*, deprecated, message: "Use .warningAmber")
-    nonisolated static let recaptrWarning = Color.warningAmber
-    @available(*, deprecated, message: "Use Color.accentColor.opacity(0.18)")
-    nonisolated static let recaptrAccentMuted = Color.accentColor.opacity(0.18)
-}
-
 // MARK: - Typography
 //
 // Space Grotesk (heading) + Inter (body) + IBM Plex Mono (telemetry).
-// All three families ship in Recaptr/Fonts/ and auto-register via the
-// INFOPLIST_KEY_ATSApplicationFontsPath build setting. If a .ttf is
-// missing, Font.custom silently falls back to the system font.
+// The .ttf files go in Recaptr/Fonts/ and auto-register via the
+// INFOPLIST_KEY_ATSApplicationFontsPath build setting. As of
+// 2026-09-26 the folder holds only its README, so every BrandFont
+// currently falls back to the system font (Font.custom does this
+// silently).
 
 enum BrandFont {
     case heading(weight: Font.Weight, size: CGFloat)

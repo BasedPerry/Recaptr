@@ -7,7 +7,7 @@
 //  chrome pills: input audio device + gain, save folder, permission
 //  status (only when action is needed), and the current status line.
 //
-//  Composes existing rows defined in ContentView.swift
+//  Composes existing rows defined in SettingsRows.swift
 //  (AudioChannelRow, SaveLocationRow, StatusBar, PermissionBanner,
 //  ScreenRecordingPermissionBanner) so this file stays a thin
 //  presentation layer.
@@ -125,7 +125,7 @@ struct SettingsPopover: View {
         Text(text)
             .font(BrandFont.mono(weight: .medium, size: 11).swiftUI)
             .tracking(1.4)
-            .foregroundStyle(Color.recaptrAccent)
+            .foregroundStyle(.secondary)
     }
 }
 
