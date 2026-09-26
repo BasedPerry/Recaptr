@@ -2,79 +2,103 @@
 //  Brand.swift
 //  Recaptr
 //
-//  Design system tokens: palette, semantic color aliases, gradients,
-//  typography, spacing rhythm, corner radii. Every component
-//  references the semantic aliases (recaptrAccent, recaptrSurface,
-//  etc.), so a single change here cascades through the UI.
+//  Design tokens: palette, gradients, typography, spacing, radii.
+//
+//  Two kinds of color live here:
+//
+//    Chrome (text and icons sitting on glass) does NOT use brand
+//    colors. Use the system hierarchical styles instead:
+//    `.foregroundStyle(.primary / .secondary / .tertiary)` and
+//    `.fill(.quaternary)`. Those get vibrancy on glass and follow
+//    Light / Dark, Increase Contrast, and the Liquid Glass look
+//    setting automatically. Selection and focus use the system accent
+//    (`Color.accentColor`), which follows the user's accent choice.
+//
+//    Semantic brand colors carry meaning: mode identity, meters,
+//    markers, warnings. Each one is a dynamic color with Light, Dark,
+//    and high-contrast variants so it stays legible in every
+//    appearance. Record red is the system `.red`.
 //
 
 import SwiftUI
+import AppKit
 
-// MARK: - Brand palette
-
-extension Color {
-    static let graphite     = Color(red: 0x1B/255, green: 0x1F/255, blue: 0x23/255)
-    static let graphite2    = Color(red: 0x24/255, green: 0x2A/255, blue: 0x30/255)
-    static let graphite3    = Color(red: 0x2C/255, green: 0x33/255, blue: 0x3B/255)
-    static let signal       = Color(red: 0x8D/255, green: 0xFC/255, blue: 0xB7/255)
-    static let violet       = Color(red: 0xA1/255, green: 0x79/255, blue: 0xF2/255)
-    static let restore      = Color(red: 0x5E/255, green: 0xB2/255, blue: 0xD6/255)
-    static let beige        = Color(red: 0xCF/255, green: 0xCA/255, blue: 0xC2/255)
-    static let beigeBright  = Color(red: 0xF4/255, green: 0xF0/255, blue: 0xE8/255)
-
-    /// Warm amber used for "off / warning" semantics (mute, no-signal,
-    /// error states). Not part of the cool palette proper but kept
-    /// alongside it for discoverability.
-    static let warningAmber = Color(red: 0xE8/255, green: 0x9A/255, blue: 0x3F/255)
-}
-
-// MARK: - Semantic aliases
+// MARK: - Semantic brand palette
 
 extension Color {
-    static let recaptrBackground    = Color.graphite
-    static let recaptrSurface       = Color.graphite2
-    static let recaptrSurfaceHi     = Color.graphite3
-    static let recaptrTextPrimary   = Color.beigeBright
-    static let recaptrTextSecondary = Color.beige
-    static let recaptrTextMuted     = Color.beige.opacity(0.62)
-    static let recaptrTextDim       = Color.beige.opacity(0.38)
-    static let recaptrBorder        = Color.beige.opacity(0.10)
-    static let recaptrBorderStrong  = Color.beige.opacity(0.20)
-    static let recaptrAccent        = Color.restore
-    static let recaptrAccentMuted   = Color.restore.opacity(0.18)
-    static let recaptrStatus        = Color.signal
-    static let recaptrWarning       = Color.warningAmber
+    /// Signal green: healthy level, monitor on, markers.
+    nonisolated static let signal = Color.adaptive(
+        light: 0x1A9E5C, dark: 0x8DFCB7, lightHC: 0x0B7A42, darkHC: 0xB5FFD1)
+    /// Violet: Screen mode identity, mid-level meter band.
+    nonisolated static let violet = Color.adaptive(
+        light: 0x7645D8, dark: 0xA179F2, lightHC: 0x5A2DB8, darkHC: 0xC3A6FF)
+    /// Restore blue: Window mode identity, low end of the volume fill.
+    nonisolated static let restore = Color.adaptive(
+        light: 0x1F7FA8, dark: 0x5EB2D6, lightHC: 0x0F6187, darkHC: 0x8FD0EC)
+    /// Warm amber for "off / warning" semantics (mute, no signal).
+    nonisolated static let warningAmber = Color.adaptive(
+        light: 0xB5650F, dark: 0xE89A3F, lightHC: 0x8F4E05, darkHC: 0xFFB860)
+
+    /// Graphite letterbox behind the video preview. Stays dark in
+    /// both appearances because it frames video, not chrome.
+    nonisolated static let recaptrBackground = Color(
+        red: 0x1B / 255, green: 0x1F / 255, blue: 0x23 / 255)
+
+    /// Dynamic color that resolves per appearance, including the
+    /// Increase Contrast variants. Resolves live when the user
+    /// changes appearance, so no relaunch is needed.
+    nonisolated static func adaptive(
+        light: UInt32, dark: UInt32, lightHC: UInt32, darkHC: UInt32
+    ) -> Color {
+        Color(nsColor: NSColor(name: nil) { appearance in
+            let match = appearance.bestMatch(from: [
+                .aqua, .darkAqua,
+                .accessibilityHighContrastAqua,
+                .accessibilityHighContrastDarkAqua,
+            ])
+            switch match {
+            case .darkAqua:                          return NSColor(hex: dark)
+            case .accessibilityHighContrastAqua:     return NSColor(hex: lightHC)
+            case .accessibilityHighContrastDarkAqua: return NSColor(hex: darkHC)
+            default:                                 return NSColor(hex: light)
+            }
+        })
+    }
 }
 
-// MARK: - Gradients
-
-extension LinearGradient {
-    /// 135° restore → violet → signal. Reserved for hero accents and
-    /// brand-signature moments; not for routine segment fills.
-    static let recaptrSignal = LinearGradient(
-        stops: [
-            .init(color: .restore, location: 0.0),
-            .init(color: .violet,  location: 0.52),
-            .init(color: .signal,  location: 1.0),
-        ],
-        startPoint: .topLeading,
-        endPoint: .bottomTrailing
-    )
+private extension NSColor {
+    nonisolated convenience init(hex: UInt32) {
+        self.init(
+            srgbRed: CGFloat((hex >> 16) & 0xFF) / 255,
+            green: CGFloat((hex >> 8) & 0xFF) / 255,
+            blue: CGFloat(hex & 0xFF) / 255,
+            alpha: 1)
+    }
 }
 
-extension RadialGradient {
-    /// Soft radial spotlight from top center. Used behind hero
-    /// sections and the preview surface on first open.
-    static let recaptrHeroGlow = RadialGradient(
-        stops: [
-            .init(color: Color.restore.opacity(0.18), location: 0.0),
-            .init(color: Color.violet.opacity(0.10),  location: 0.5),
-            .init(color: .clear,                       location: 1.0),
-        ],
-        center: .top,
-        startRadius: 0,
-        endRadius: 600
-    )
+// MARK: - Legacy chrome tokens (removed during component migration)
+
+extension Color {
+    @available(*, deprecated, message: "Use .foregroundStyle(.primary)")
+    nonisolated static let recaptrTextPrimary = Color.primary
+    @available(*, deprecated, message: "Use .foregroundStyle(.secondary)")
+    nonisolated static let recaptrTextSecondary = Color.secondary
+    @available(*, deprecated, message: "Use .foregroundStyle(.tertiary)")
+    nonisolated static let recaptrTextMuted = Color.secondary.opacity(0.7)
+    @available(*, deprecated, message: "Use .foregroundStyle(.quaternary)")
+    nonisolated static let recaptrTextDim = Color.secondary.opacity(0.4)
+    @available(*, deprecated, message: "Use Color.accentColor")
+    nonisolated static let recaptrAccent = Color.accentColor
+    @available(*, deprecated, message: "Use .fill(.quaternary)")
+    nonisolated static let beige = Color.secondary
+    @available(*, deprecated, message: "Use .foregroundStyle(.primary)")
+    nonisolated static let beigeBright = Color.primary
+    @available(*, deprecated, message: "Use .foregroundStyle(.primary)")
+    nonisolated static let graphite = Color.recaptrBackground
+    @available(*, deprecated, message: "Use .warningAmber")
+    nonisolated static let recaptrWarning = Color.warningAmber
+    @available(*, deprecated, message: "Use Color.accentColor.opacity(0.18)")
+    nonisolated static let recaptrAccentMuted = Color.accentColor.opacity(0.18)
 }
 
 // MARK: - Typography
