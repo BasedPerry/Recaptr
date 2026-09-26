@@ -133,21 +133,22 @@ final class Recorder: @unchecked Sendable {
     private var writer: AVAssetWriter?
     private var videoReceiver: AVAssetWriterInput.SampleBufferReceiver?
     private var audioReceiver: AVAssetWriterInput.SampleBufferReceiver?
-    /// Marker track for clip markers: a timed-metadata track, linked
-    /// to the video as its chapter list. Each marker closes the running
-    /// range and opens the next ("Start", "Marker 1", ...), written as
-    /// markers drop so a crash mid-take keeps the ones already written.
+    /// Clip marker times on the capture clock. Kept in memory and
+    /// handed to the Final Cut .fcpxml when the take stops, not
+    /// written into the .mov.
     ///
-    /// Status (tested 2026-09-26): the track, its timing, and the
-    /// chapter-list link are all written correctly, but AVFoundation
-    /// (and so QuickTime Player) doesn't list metadata-track chapters,
-    /// so markers don't yet appear in players' chapter menus. A
-    /// QuickTime text-track version made files AVFoundation refused to
-    /// open, so it was dropped.
-    private var chapterReceiver: AVAssetWriterInput.MetadataReceiver?
-    private var chapterStart: CMTime = .invalid
-    private var chapterTitle = "Start"
-    private var markerCount = 0
+    /// History (tested 2026-09-26): markers used to be a timed-metadata
+    /// track written live. Final Cut ignores that track, QuickTime
+    /// doesn't list it, and in 4K takes a second marker sample made
+    /// the writer fail the next append (-11800 / -17771) about 0.5 s
+    /// later, losing the whole file: 4 of 9 takes as contiguous
+    /// ranges, 9 of 9 as frame-long samples, with or without the
+    /// chapter-list link. Writing the samples at stop instead left a
+    /// file AVFoundation couldn't open.
+    private var markerTimes: [CMTime] = []
+    /// Marker offsets in seconds from the first frame of the last
+    /// finished take. Set by `stop()` before it returns.
+    private(set) var lastMarkerSeconds: [Double] = []
 
     /// Per-source audio tracks keyed by mixer channel label ("Audio",
     /// "Mic", "System"). Empty for single-source recordings.
@@ -271,18 +272,6 @@ final class Recorder: @unchecked Sendable {
             }
         }
 
-        // Chapter (marker) track, linked to the video as its chapter
-        // list so players show it in their chapter menu.
-        let chapterInput = try Self.makeChapterInput()
-        guard writer.canAdd(chapterInput) else {
-            throw CaptureError.writerFailed("Cannot add chapter track")
-        }
-        let chapterReceiver = writer.inputMetadataReceiver(for: chapterInput)
-        let chapterList = AVAssetTrack.AssociationType.chapterList.rawValue
-        if videoInput.canAddTrackAssociation(withTrackOf: chapterInput, type: chapterList) {
-            videoInput.addTrackAssociation(withTrackOf: chapterInput, type: chapterList)
-        }
-
         do {
             try writer.start()
         } catch {
@@ -292,10 +281,7 @@ final class Recorder: @unchecked Sendable {
         self.writer = writer
         self.videoReceiver = videoReceiver
         self.audioReceiver = audioReceiver
-        self.chapterReceiver = chapterReceiver
-        self.chapterStart = .invalid
-        self.chapterTitle = "Start"
-        self.markerCount = 0
+        self.markerTimes = []
         self.sessionStartTime = .invalid
         self.isWriting = true
 
@@ -323,52 +309,23 @@ final class Recorder: @unchecked Sendable {
         guard self.sessionStartTime == .invalid else { return }
         writer.startSession(atSourceTime: pts)
         self.sessionStartTime = pts
-        self.chapterStart = pts
     }
 
-    // MARK: - Markers (chapters)
+    // MARK: - Markers
 
     /// Drop a clip marker at the current moment. Stamped from the host
-    /// clock, the same time base as the capture PTS, so the chapter
+    /// clock, the same time base as the capture PTS, so the marker
     /// lines up with the frame on screen when the key was pressed.
     func addMarker() {
         let now = CMClockGetTime(CMClockGetHostTimeClock())
         writerQueue.async { [weak self] in
-            guard let self, self.isWriting, self.chapterStart.isValid,
-                  CMTimeCompare(now, self.chapterStart) > 0 else { return }
-            self.writeChapter(until: now)
-            self.markerCount += 1
-            self.chapterTitle = "Marker \(self.markerCount)"
-            self.chapterStart = now
+            guard let self, self.isWriting, self.sessionStartTime.isValid,
+                  CMTimeCompare(now, self.sessionStartTime) > 0 else { return }
+            // Two presses inside one frame land on the same frame; keep one.
+            if let last = self.markerTimes.last,
+               CMTimeGetSeconds(CMTimeSubtract(now, last)) < 1.0 / 60 { return }
+            self.markerTimes.append(now)
         }
-    }
-
-    /// Write the running chapter, ending at `end`. writerQueue only.
-    private func writeChapter(until end: CMTime) {
-        guard let receiver = chapterReceiver, chapterStart.isValid,
-              CMTimeCompare(end, chapterStart) > 0 else { return }
-        let group = AVTimedMetadataGroup(
-            items: [Self.chapterItem(title: chapterTitle)],
-            timeRange: CMTimeRange(start: chapterStart, end: end)
-        )
-        do {
-            _ = try receiver.appendImmediately(group)
-        } catch {
-            lastAppendError = "chapter: \(error.localizedDescription)"
-        }
-    }
-
-    /// One chapter title item. Every chapter uses this exact shape
-    /// (identifier, UTF-8, language "en"), and the track's format is
-    /// derived from it: AVFoundation raises an uncatchable exception
-    /// if an appended group doesn't match the track format.
-    private static func chapterItem(title: String) -> AVMutableMetadataItem {
-        let item = AVMutableMetadataItem()
-        item.identifier = .commonIdentifierTitle
-        item.dataType = kCMMetadataBaseDataType_UTF8 as String
-        item.extendedLanguageTag = "en"
-        item.value = title as NSString
-        return item
     }
 
     private static func compressionProperties(for quality: VideoQuality,
@@ -382,6 +339,17 @@ final class Recorder: @unchecked Sendable {
         ]
     }
 
+    /// Error with its domain, code, and underlying error, for the
+    /// recording summary (the localized text alone is too generic).
+    static func describe(_ error: Error) -> String {
+        let ns = error as NSError
+        var text = "\(ns.domain) \(ns.code)"
+        if let underlying = ns.userInfo[NSUnderlyingErrorKey] as? NSError {
+            text += " (\(underlying.domain) \(underlying.code))"
+        }
+        return text
+    }
+
     /// Every input runs in real-time mode. Swift marks this deprecated
     /// at macOS 27 in favor of the receiver's appendImmediately, but it
     /// is still required. Tested 2026-09-26 with an Elgato 4K X at
@@ -392,26 +360,6 @@ final class Recorder: @unchecked Sendable {
     /// risks starving the capture buffer pool on long takes.
     private static func markRealTime(_ input: AVAssetWriterInput) {
         input.expectsMediaDataInRealTime = true
-    }
-
-    private static func makeChapterInput() throws -> AVAssetWriterInput {
-        let template = AVTimedMetadataGroup(
-            items: [chapterItem(title: "Start")],
-            timeRange: CMTimeRange(start: .zero, duration: CMTime(value: 1, timescale: 1))
-        )
-        guard let desc = template.copyFormatDescription() else {
-            throw CaptureError.writerFailed("Chapter format description unavailable")
-        }
-        let input = AVAssetWriterInput(mediaType: .metadata, outputSettings: nil, sourceFormatHint: desc)
-        // Chapter readers look chapters up by locale, and QuickTime
-        // convention keeps a chapter track disabled.
-        input.languageCode = "eng"
-        input.extendedLanguageTag = "en"
-        input.marksOutputTrackAsEnabled = false
-        // Sparse track: without real-time mode the writer would hold
-        // video back waiting to interleave marker samples.
-        markRealTime(input)
-        return input
     }
 
     func appendVideo(_ sampleBuffer: CMSampleBuffer) {
@@ -451,7 +399,7 @@ final class Recorder: @unchecked Sendable {
                 }
             } catch {
                 self.videoAppendRejected &+= 1
-                self.lastAppendError = "video: \(error.localizedDescription)"
+                self.lastAppendError = "video: \(Self.describe(error)) writer=\(writer.status.rawValue) \(writer.error.map { Self.describe($0) } ?? "")"
             }
         }
     }
@@ -504,7 +452,7 @@ final class Recorder: @unchecked Sendable {
                 // the writer is refusing our buffers, usually because
                 // their format doesn't match the AAC output settings.
                 self.audioAppendRejected &+= 1
-                self.lastAppendError = "audio: \(error.localizedDescription)"
+                self.lastAppendError = "audio\(source.map { "[\($0)]" } ?? ""): \(Self.describe(error)) writer=\(writer.status.rawValue) \(writer.error.map { Self.describe($0) } ?? "")"
             }
         }
     }
@@ -540,12 +488,10 @@ final class Recorder: @unchecked Sendable {
                     return
                 }
                 self.isWriting = false
-                // Close the last chapter at the last written frame. A
-                // take without markers writes no chapters at all.
-                if self.markerCount > 0, self.lastVideoPTS.isValid {
-                    self.writeChapter(until: self.lastVideoPTS)
-                }
-                self.chapterReceiver?.finish()
+                let start = self.sessionStartTime
+                self.lastMarkerSeconds = start.isValid
+                    ? self.markerTimes.map { CMTimeGetSeconds(CMTimeSubtract($0, start)) }
+                    : []
                 self.videoReceiver?.finish()
                 self.audioReceiver?.finish()
                 for r in self.sourceReceivers.values { r.finish() }
@@ -557,7 +503,6 @@ final class Recorder: @unchecked Sendable {
                         self.videoReceiver = nil
                         self.audioReceiver = nil
                         self.sourceReceivers = [:]
-                        self.chapterReceiver = nil
                         self.sessionStartTime = .invalid
                     }
                     cont.resume(returning: url)

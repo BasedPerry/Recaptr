@@ -747,7 +747,7 @@ final class MainViewModel: ObservableObject {
         guard isRecording else { return }
         let t = recordingElapsed
         markers.append(t)
-        // Written into the file as a chapter.
+        // Precise capture-clock time, for the .fcpxml.
         recorder.addMarker()
         status = String(format: "Marker dropped at %02d:%02d", Int(t) / 60, Int(t) % 60)
     }
@@ -1355,7 +1355,7 @@ final class MainViewModel: ObservableObject {
         if let url {
             Task {
                 await self.probeRecordedFile(url)
-                await self.writeFinalCutMarkers(for: url)
+                await self.writeFinalCutMarkers(for: url, markerSeconds: self.recorder.lastMarkerSeconds)
             }
         }
     }
@@ -1402,11 +1402,11 @@ final class MainViewModel: ObservableObject {
         return "\(recPart) · \(mixPart) · \(chPart)"
     }
 
-    /// Final Cut doesn't read the markers stored in the .mov, so a
-    /// recording with markers also gets a .fcpxml beside it.
-    private func writeFinalCutMarkers(for url: URL) async {
+    /// A recording with markers gets a .fcpxml beside it; that's where
+    /// Final Cut picks the markers up.
+    private func writeFinalCutMarkers(for url: URL, markerSeconds: [Double]) async {
         do {
-            if let xml = try await FinalCutMarkers.writeIfNeeded(for: url) {
+            if let xml = try await FinalCutMarkers.writeIfNeeded(for: url, markerSeconds: markerSeconds) {
                 if UserDefaults.standard.bool(forKey: "RecaptrUITesting"),
                    let text = try? String(contentsOf: xml, encoding: .utf8) {
                     print("RecaptrUITest: fcpxml BEGIN\n\(text)RecaptrUITest: fcpxml END")
@@ -1449,16 +1449,6 @@ final class MainViewModel: ObservableObject {
                 audioDetail = String(format: "audio: %.2fs / %@", aSeconds, fmtSummary)
             }
 
-            // Clip markers live in a timed-metadata track (see
-            // Recorder); report how many marker ranges it holds.
-            var markerRanges = 0
-            if let markerTrack = try await asset.loadTracks(withMediaType: .metadata).first {
-                let reader = try AVAssetReader(asset: asset)
-                let output = AVAssetReaderTrackOutput(track: markerTrack, outputSettings: nil)
-                let provider = reader.outputMetadataProvider(for: output)
-                try reader.start()
-                while try await provider.next() != nil { markerRanges += 1 }
-            }
             // Every audio track's length: per-source tracks must match
             // each other and the video, or they drift out of sync.
             var trackLengths: [String] = []
@@ -1483,8 +1473,8 @@ final class MainViewModel: ObservableObject {
                     transfer = tf == (kCMFormatDescriptionTransferFunction_ITU_R_709_2 as String) ? "709" : tf
                 }
             }
-            let probeSummary = String(format: "Probe → %.2fs total · video tracks=%d · fps=%.2f · video %@ %.1f Mbps · transfer=%@ · audio tracks=%d (enabled %d) · marker ranges=%d · lengths video %.2f audio [%@] · %@",
-                                      dur, videoTracks.count, fps, codec, videoMbps, transfer, audioTracks.count, enabledAudio, markerRanges, videoLength, trackLengths.joined(separator: ", ") as NSString, audioDetail)
+            let probeSummary = String(format: "Probe → %.2fs total · video tracks=%d · fps=%.2f · video %@ %.1f Mbps · transfer=%@ · audio tracks=%d (enabled %d) · markers=%d · lengths video %.2f audio [%@] · %@",
+                                      dur, videoTracks.count, fps, codec, videoMbps, transfer, audioTracks.count, enabledAudio, recorder.lastMarkerSeconds.count, videoLength, trackLengths.joined(separator: ", ") as NSString, audioDetail)
             lastFileProbeSummary = probeSummary
             // Combine with the recording summary so the final status
             // shows both "what we tried to record" and "what's actually

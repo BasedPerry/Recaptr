@@ -3,14 +3,13 @@
 //  Recaptr
 //
 //  Writes a Final Cut Pro XML file next to a recording that has clip
-//  markers. Final Cut doesn't read the markers stored inside the .mov
-//  (a timed-metadata track), so the .fcpxml carries them: double-click
-//  it (or File > Import > XML) and the clip arrives with every marker
-//  on its frame.
+//  markers. The .fcpxml is where markers live (the .mov has none; see
+//  Recorder): double-click it (or File > Import > XML) and the clip
+//  arrives with every marker on its frame.
 //
-//  Markers are read back from the finished file, so the file stays
-//  the single source of truth. FCPXML 1.11 (Final Cut 10.6.6 and
-//  later); validated against Final Cut's bundled DTD.
+//  Frame size, rate and length are read back from the finished file.
+//  FCPXML 1.11 (Final Cut 10.6.6 and later); validated against Final
+//  Cut's bundled DTD.
 //
 
 import Foundation
@@ -18,13 +17,15 @@ import AVFoundation
 
 enum FinalCutMarkers {
 
-    /// Write `<recording>.fcpxml` beside `movURL` if the file has
-    /// markers. Returns the written URL, or nil when there were none.
+    /// Write `<recording>.fcpxml` beside `movURL` if the take had
+    /// markers (`markerSeconds`: offsets from the first frame).
+    /// Returns the written URL, or nil when there were none.
     @discardableResult
-    static func writeIfNeeded(for movURL: URL) async throws -> URL? {
+    static func writeIfNeeded(for movURL: URL, markerSeconds: [Double]) async throws -> URL? {
+        guard !markerSeconds.isEmpty else { return nil }
         let asset = AVURLAsset(url: movURL)
-        let markers = try await readMarkers(asset)
-        guard !markers.isEmpty,
+        let markers = markerSeconds.enumerated().map { (title: "Marker \($0.offset + 1)", seconds: $0.element) }
+        guard
               let video = try await asset.loadTracks(withMediaType: .video).first else { return nil }
 
         let size = try await video.load(.naturalSize)
@@ -38,23 +39,6 @@ enum FinalCutMarkers {
         let out = movURL.deletingPathExtension().appendingPathExtension("fcpxml")
         try xml.write(to: out, atomically: true, encoding: .utf8)
         return out
-    }
-
-    /// Marker titles and start times from the recording's marker
-    /// track, skipping the implicit "Start" range.
-    static func readMarkers(_ asset: AVURLAsset) async throws -> [(title: String, seconds: Double)] {
-        guard let track = try await asset.loadTracks(withMediaType: .metadata).first else { return [] }
-        let reader = try AVAssetReader(asset: asset)
-        let output = AVAssetReaderTrackOutput(track: track, outputSettings: nil)
-        let provider = reader.outputMetadataProvider(for: output)
-        try reader.start()
-        var markers: [(String, Double)] = []
-        while let group = try await provider.next() {
-            let loaded = try? await group.items.first?.load(.stringValue)
-            let title = (loaded ?? nil) ?? "Marker"
-            if title != "Start" { markers.append((title, group.timeRange.start.seconds)) }
-        }
-        return markers
     }
 
     static func document(movURL: URL, markers: [(title: String, seconds: Double)],

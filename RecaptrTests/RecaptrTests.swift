@@ -82,3 +82,28 @@ struct PeakLimiterTests {
         #expect(limiter.gain > 0.95)
     }
 }
+
+struct FinalCutMarkersTests {
+
+    /// Markers snap to whole frames and titles are escaped.
+    @Test func markersLandOnFrames() {
+        let xml = FinalCutMarkers.document(
+            movURL: URL(fileURLWithPath: "/tmp/Take & Co.mov"),
+            markers: [("Marker 1", 7.61), ("Marker 2", 15.0)],
+            width: 3840, height: 2160, fps: 60, duration: 30.12, audioTracks: 2)
+        #expect(xml.contains(#"<marker start="457/60s" duration="1/60s" value="Marker 1"/>"#))
+        #expect(xml.contains(#"<marker start="900/60s" duration="1/60s" value="Marker 2"/>"#))
+        #expect(xml.contains(#"duration="1807/60s""#))
+        #expect(xml.contains(#"audioSources="2""#))
+        #expect(xml.contains("Take &amp; Co"))
+    }
+
+    /// 59.94 fps uses the NTSC frame duration.
+    @Test func ntscRateUsesFractionalFrameDuration() {
+        let xml = FinalCutMarkers.document(
+            movURL: URL(fileURLWithPath: "/tmp/a.mov"), markers: [("Marker 1", 1.0)],
+            width: 1920, height: 1080, fps: 59.94, duration: 10, audioTracks: 1)
+        #expect(xml.contains(#"frameDuration="1001/60000s""#))
+        #expect(xml.contains(#"<marker start="60060/60000s""#))
+    }
+}

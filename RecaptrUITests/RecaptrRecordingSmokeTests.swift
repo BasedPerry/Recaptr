@@ -42,7 +42,7 @@ final class RecaptrRecordingSmokeTests: XCTestCase {
         // the format lock regressed.
         XCTAssertGreaterThanOrEqual(probe.fps, 29)
         XCTAssertEqual(probe.audioTracks, 1, "Single source should write one audio track")
-        XCTAssertEqual(probe.markerRanges, 0, "No markers, so no marker ranges")
+        XCTAssertEqual(probe.markers, 0, "No markers dropped")
         XCTAssertTrue(probe.raw.contains("transfer=709"), "Video should be tagged Rec. 709: \(probe.raw)")
         // An audio track full of zero-fill is a silent recording. The
         // channel must actually have pushed captured audio.
@@ -52,13 +52,13 @@ final class RecaptrRecordingSmokeTests: XCTestCase {
         }
     }
 
-    /// Two clip markers become three marker ranges (Start, Marker 1,
-    /// Marker 2) in the file's marker track, without costing frames.
+    /// Two clip markers land in the Final Cut .fcpxml without costing
+    /// frames.
     @MainActor
     func testCameraRecordingWithMarkers() throws {
         let probe = try record(modeKey: "3", seconds: 6, markers: 2)
         XCTAssertGreaterThanOrEqual(probe.fps, 29)
-        XCTAssertEqual(probe.markerRanges, 3, "Expected Start + 2 marker ranges: \(probe.raw)")
+        XCTAssertEqual(probe.markers, 2, "Expected 2 markers: \(probe.raw)")
         XCTAssertTrue(probe.raw.contains(".fcpxml"), "Expected a Final Cut marker file: \(probe.raw)")
     }
 
@@ -220,7 +220,7 @@ final class RecaptrRecordingSmokeTests: XCTestCase {
         var hasAudio: Bool
         var audioTracks: Int
         var enabledAudioTracks: Int
-        var markerRanges: Int
+        var markers: Int
     }
 
     @MainActor
@@ -302,7 +302,7 @@ final class RecaptrRecordingSmokeTests: XCTestCase {
             hasAudio: !raw.contains("audio: NONE"),
             audioTracks: Int(number(in: raw, after: "audio tracks=", until: " ") ?? 0),
             enabledAudioTracks: Int(number(in: raw, after: "(enabled ", until: ")") ?? 0),
-            markerRanges: Int(number(in: raw, after: "marker ranges=", until: " ") ?? 0)
+            markers: Int(number(in: raw, after: "markers=", until: " ") ?? 0)
         )
     }
 
