@@ -2,40 +2,60 @@
 //  RecaptrUITests.swift
 //  RecaptrUITests
 //
-//  Created by bp on 1/28/26.
-//
 
 import XCTest
 
 final class RecaptrUITests: XCTestCase {
 
     override func setUpWithError() throws {
-        // Put setup code here. This method is called before the invocation of each test method in the class.
-
-        // In UI tests it is usually best to stop immediately when a failure occurs.
         continueAfterFailure = false
-
-        // In UI tests it’s important to set the initial state - such as interface orientation - required for your tests before they run. The setUp method is a good place to do this.
     }
 
-    override func tearDownWithError() throws {
-        // Put teardown code here. This method is called after the invocation of each test method in the class.
-    }
-
+    /// Every floating control is reachable by accessibility identifier.
     @MainActor
-    func testExample() throws {
-        // UI tests must launch the application that they test.
-        let app = XCUIApplication()
-        app.launch()
+    func testChromeControlsAreReachable() throws {
+        let app = launchApp()
+        for id in ["recordButton", "screenshotButton", "markerButton",
+                   "settingsButton", "monitorToggle", "monitorVolume",
+                   "mode-window", "mode-screen", "mode-camera"] {
+            XCTAssertTrue(element(id, in: app).waitForExistence(timeout: 5),
+                          "Missing accessibility identifier \(id)")
+        }
+    }
 
-        // Use XCTAssert and related functions to verify your tests produce the correct results.
+    /// Monitor volume reports as a slider (the accessibility role
+    /// that carries increment / decrement for VoiceOver) with a
+    /// readable value. XCUITest's drag-based `adjust` cannot drive a
+    /// represented slider, so the adjustment itself is covered by the
+    /// manual VoiceOver pass.
+    @MainActor
+    func testMonitorVolumeIsAdjustable() throws {
+        let app = launchApp()
+        let volume = app.sliders["monitorVolume"]
+        XCTAssertTrue(volume.waitForExistence(timeout: 5))
+        XCTAssertTrue(volume.isEnabled)
+        XCTAssertNotNil(volume.value)
     }
 
     @MainActor
     func testLaunchPerformance() throws {
-        // This measures how long it takes to launch your application.
         measure(metrics: [XCTApplicationLaunchMetric()]) {
             XCUIApplication().launch()
         }
+    }
+
+    // MARK: - Helpers
+
+    @MainActor
+    private func launchApp() -> XCUIApplication {
+        let app = XCUIApplication()
+        app.launchArguments += ["-RecaptrKeepChromeVisible", "YES"]
+        app.launch()
+        return app
+    }
+
+    @MainActor
+    private func element(_ id: String, in app: XCUIApplication) -> XCUIElement {
+        app.descendants(matching: .any)[id].firstMatch
     }
 }

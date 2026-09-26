@@ -2,31 +2,46 @@
 //  RecaptrUITestsLaunchTests.swift
 //  RecaptrUITests
 //
-//  Created by bp on 1/28/26.
+//  Launch screenshots in Light and Dark so glass and color
+//  regressions show up in test reports. The chrome idle fade is
+//  disabled with `-RecaptrKeepChromeVisible YES` so the pills are in
+//  the shot.
 //
 
 import XCTest
 
 final class RecaptrUITestsLaunchTests: XCTestCase {
 
-    override class var runsForEachTargetApplicationUIConfiguration: Bool {
-        true
-    }
-
     override func setUpWithError() throws {
         continueAfterFailure = false
     }
 
     @MainActor
-    func testLaunch() throws {
+    func testLaunchDark() throws {
+        try captureLaunch(style: "Dark")
+    }
+
+    @MainActor
+    func testLaunchLight() throws {
+        // Any value other than "Dark" resolves to the light appearance.
+        try captureLaunch(style: "Light")
+    }
+
+    @MainActor
+    private func captureLaunch(style: String) throws {
         let app = XCUIApplication()
+        app.launchArguments += [
+            "-AppleInterfaceStyle", style,
+            "-RecaptrKeepChromeVisible", "YES",
+        ]
         app.launch()
 
-        // Insert steps here to perform after app launch but before taking a screenshot,
-        // such as logging into a test account or navigating somewhere in the app
+        let window = app.windows.firstMatch
+        XCTAssertTrue(window.waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["recordButton"].waitForExistence(timeout: 10))
 
-        let attachment = XCTAttachment(screenshot: app.screenshot())
-        attachment.name = "Launch Screen"
+        let attachment = XCTAttachment(screenshot: window.screenshot())
+        attachment.name = "Launch, \(style)"
         attachment.lifetime = .keepAlways
         add(attachment)
     }
