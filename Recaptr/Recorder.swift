@@ -17,9 +17,16 @@
 //      buffers with equal PTS; `AVCaptureSession` does not.
 //    - The recorder publishes a thread-safe `RecorderStats` snapshot
 //      so a long session shows live evidence that buffers are landing.
-//      The counters distinguish "rejected by our guards" from
-//      "rejected by AVAssetWriterInput.append()" — the latter is
-//      typically a format mismatch with the configured AAC output.
+//      The counters distinguish "rejected by our guards", "input not
+//      ready", and "rejected by the writer" (a thrown append error,
+//      typically a format mismatch with the configured output).
+//    - Uses the macOS 26 receiver API: `AVAssetWriter.inputReceiver`
+//      replaces `add(_:)`, `start()` replaces `startWriting()`, and
+//      `appendImmediately` replaces the `isReadyForMoreMediaData` +
+//      `append` pair. `appendImmediately` returns false when the input
+//      isn't ready and throws when the writer rejects a buffer, so
+//      neither case can fail silently. `expectsMediaDataInRealTime`
+//      stays on deliberately; see `_startSync`.
 //
 
 import Foundation
@@ -42,6 +49,9 @@ struct RecorderStats: Equatable {
     /// our buffers — usually a format mismatch with the configured
     /// AAC output.
     var audioAppendRejected: Int = 0
+    /// Video buffers the writer rejected with a thrown error. Stays
+    /// at zero in a healthy recording.
+    var videoAppendRejected: Int = 0
     /// Video buffers dropped because their PTS was less than or equal
     /// to the previously accepted video buffer's PTS. `SCStream`
     /// occasionally delivers consecutive samples with equal PTS, which
@@ -51,6 +61,8 @@ struct RecorderStats: Equatable {
     /// and climbs modestly during screen captures.
     var videoDroppedPtsRegression: Int = 0
     var writerErrorDescription: String?
+    /// Most recent append error thrown by either receiver.
+    var lastAppendError: String?
 }
 
 final class Recorder: @unchecked Sendable {
@@ -58,8 +70,8 @@ final class Recorder: @unchecked Sendable {
     private let writerQueue = DispatchQueue(label: "recaptr.recorder", qos: .userInitiated)
 
     private var writer: AVAssetWriter?
-    private var videoInput: AVAssetWriterInput?
-    private var audioInput: AVAssetWriterInput?
+    private var videoReceiver: AVAssetWriterInput.SampleBufferReceiver?
+    private var audioReceiver: AVAssetWriterInput.SampleBufferReceiver?
     private var sessionStartTime: CMTime = .invalid
     private var isWriting = false
 
@@ -70,15 +82,17 @@ final class Recorder: @unchecked Sendable {
     private var audioDroppedNotReady: Int = 0
     private var videoDroppedNotReady: Int = 0
     private var audioAppendRejected: Int = 0
+    private var videoAppendRejected: Int = 0
     private var videoDroppedPtsRegression: Int = 0
+    private var lastAppendError: String?
     /// Last accepted video PTS, used for the strict-monotonic guard
     /// in `appendVideo`. Reset to `.invalid` in `_startSync`.
     private var lastVideoPTS: CMTime = .invalid
 
     /// Configure and start the writer. Pass `withAudio: true` to add
     /// the AAC audio input. The decision must be made before
-    /// `startWriting`; `AVAssetWriter` doesn't allow inputs to be
-    /// added afterward.
+    /// `start()`; `AVAssetWriter` doesn't allow inputs to be added
+    /// afterward.
     ///
     /// `saveDirectory` is the resolved folder (user-selected via
     /// `RecordingStorage`, with the sandbox container as a fallback).
@@ -117,14 +131,22 @@ final class Recorder: @unchecked Sendable {
             ]
         ]
         let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
+        // Deprecated in Swift at macOS 27 in favor of the receiver's
+        // appendImmediately, but still required. Tested 2026-09-26
+        // with an Elgato 4K X at 1080p60: without this flag the writer
+        // holds video back to interleave with audio and
+        // appendImmediately reports "not ready" for ~40% of frames
+        // (33.9 fps file). With it: 60.00 fps, zero drops. The async
+        // append alternative would queue up to ~0.5 s of frames and
+        // risks starving the capture buffer pool on long takes.
         videoInput.expectsMediaDataInRealTime = true
         guard writer.canAdd(videoInput) else {
             throw CaptureError.writerFailed("Cannot add video input")
         }
-        writer.add(videoInput)
+        let videoReceiver = writer.inputReceiver(for: videoInput)
 
         // Audio — AAC stereo, 48 kHz, single track.
-        var audioInput: AVAssetWriterInput?
+        var audioReceiver: AVAssetWriterInput.SampleBufferReceiver?
         if withAudio {
             let audioSettings: [String: Any] = [
                 AVFormatIDKey: kAudioFormatMPEG4AAC,
@@ -133,21 +155,22 @@ final class Recorder: @unchecked Sendable {
                 AVEncoderBitRateKey: 128_000
             ]
             let ai = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
-            ai.expectsMediaDataInRealTime = true
+            ai.expectsMediaDataInRealTime = true  // see video input above
             guard writer.canAdd(ai) else {
                 throw CaptureError.writerFailed("Cannot add audio input")
             }
-            writer.add(ai)
-            audioInput = ai
+            audioReceiver = writer.inputReceiver(for: ai)
         }
 
-        guard writer.startWriting() else {
-            throw CaptureError.writerFailed("startWriting() returned false: \(writer.error?.localizedDescription ?? "unknown")")
+        do {
+            try writer.start()
+        } catch {
+            throw CaptureError.writerFailed("start() failed: \(error.localizedDescription)")
         }
 
         self.writer = writer
-        self.videoInput = videoInput
-        self.audioInput = audioInput
+        self.videoReceiver = videoReceiver
+        self.audioReceiver = audioReceiver
         self.sessionStartTime = .invalid
         self.isWriting = true
 
@@ -158,7 +181,9 @@ final class Recorder: @unchecked Sendable {
         self.audioDroppedNotReady = 0
         self.videoDroppedNotReady = 0
         self.audioAppendRejected = 0
+        self.videoAppendRejected = 0
         self.videoDroppedPtsRegression = 0
+        self.lastAppendError = nil
         self.lastVideoPTS = .invalid
 
         return url
@@ -178,7 +203,7 @@ final class Recorder: @unchecked Sendable {
             guard let self,
                   self.isWriting,
                   let writer = self.writer,
-                  let input = self.videoInput else { return }
+                  let receiver = self.videoReceiver else { return }
             guard writer.status == .writing else {
                 // Writer transitioned to .failed/.cancelled — stop accepting.
                 self.isWriting = false
@@ -201,13 +226,16 @@ final class Recorder: @unchecked Sendable {
                 return
             }
 
-            guard input.isReadyForMoreMediaData else {
-                self.videoDroppedNotReady &+= 1
-                return
-            }
-            if input.append(sampleBuffer) {
-                self.videoAccepted &+= 1
-                self.lastVideoPTS = pts
+            do {
+                if try receiver.appendImmediately(CMReadySampleBuffer(unsafeBuffer: sampleBuffer)) {
+                    self.videoAccepted &+= 1
+                    self.lastVideoPTS = pts
+                } else {
+                    self.videoDroppedNotReady &+= 1
+                }
+            } catch {
+                self.videoAppendRejected &+= 1
+                self.lastAppendError = "video: \(error.localizedDescription)"
             }
         }
     }
@@ -217,7 +245,7 @@ final class Recorder: @unchecked Sendable {
             guard let self,
                   self.isWriting,
                   let writer = self.writer,
-                  let input = self.audioInput else { return }
+                  let receiver = self.audioReceiver else { return }
             guard writer.status == .writing else {
                 self.isWriting = false
                 return
@@ -238,18 +266,18 @@ final class Recorder: @unchecked Sendable {
                 return
             }
 
-            guard input.isReadyForMoreMediaData else {
-                self.audioDroppedNotReady &+= 1
-                return
-            }
-            if input.append(sampleBuffer) {
-                self.audioAccepted &+= 1
-            } else {
-                // Silent rejection — if `audioAccepted` stays at zero
-                // while this climbs, the writer is refusing our
-                // buffers, usually because their format doesn't match
-                // the AAC output settings.
+            do {
+                if try receiver.appendImmediately(CMReadySampleBuffer(unsafeBuffer: sampleBuffer)) {
+                    self.audioAccepted &+= 1
+                } else {
+                    self.audioDroppedNotReady &+= 1
+                }
+            } catch {
+                // If `audioAccepted` stays at zero while this climbs,
+                // the writer is refusing our buffers, usually because
+                // their format doesn't match the AAC output settings.
                 self.audioAppendRejected &+= 1
+                self.lastAppendError = "audio: \(error.localizedDescription)"
             }
         }
     }
@@ -268,8 +296,10 @@ final class Recorder: @unchecked Sendable {
                 audioDroppedNotReady: self.audioDroppedNotReady,
                 videoDroppedNotReady: self.videoDroppedNotReady,
                 audioAppendRejected: self.audioAppendRejected,
+                videoAppendRejected: self.videoAppendRejected,
                 videoDroppedPtsRegression: self.videoDroppedPtsRegression,
-                writerErrorDescription: self.writer?.error?.localizedDescription
+                writerErrorDescription: self.writer?.error?.localizedDescription,
+                lastAppendError: self.lastAppendError
             )
         }
     }
@@ -282,15 +312,15 @@ final class Recorder: @unchecked Sendable {
                     return
                 }
                 self.isWriting = false
-                self.videoInput?.markAsFinished()
-                self.audioInput?.markAsFinished()
+                self.videoReceiver?.finish()
+                self.audioReceiver?.finish()
 
                 writer.finishWriting {
                     let url = writer.outputURL
                     self.writerQueue.async {
                         self.writer = nil
-                        self.videoInput = nil
-                        self.audioInput = nil
+                        self.videoReceiver = nil
+                        self.audioReceiver = nil
                         self.sessionStartTime = .invalid
                     }
                     cont.resume(returning: url)

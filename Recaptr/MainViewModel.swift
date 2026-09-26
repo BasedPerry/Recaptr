@@ -1170,7 +1170,13 @@ final class MainViewModel: ObservableObject {
     /// per-channel state and any errors so a silent-recording cause
     /// shows itself without needing the console.
     private static func buildRecordingSummary(rec: RecorderStats, mix: AudioMixerStats) -> String {
-        let recPart = "v=\(rec.videoAccepted) a=\(rec.audioAccepted) drop(pre/notReady/reject)=\(rec.audioDroppedPreAnchor)/\(rec.audioDroppedNotReady)/\(rec.audioAppendRejected)"
+        var recPart = "v=\(rec.videoAccepted) a=\(rec.audioAccepted) drop(pre/notReady/reject)=\(rec.audioDroppedPreAnchor)/\(rec.audioDroppedNotReady)/\(rec.audioAppendRejected)"
+        if rec.videoDroppedNotReady > 0 || rec.videoAppendRejected > 0 {
+            recPart += " vdrop(notReady/reject)=\(rec.videoDroppedNotReady)/\(rec.videoAppendRejected)"
+        }
+        if let err = rec.lastAppendError {
+            recPart += " appendErr=\(err)"
+        }
         let mixPart = "mix=\(mix.mixedFramesEmitted)f ticks=\(mix.ticks)"
         let chPart = mix.channels.map { ch -> String in
             var s = "\(ch.label):"
