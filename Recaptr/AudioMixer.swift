@@ -899,6 +899,11 @@ final class AudioMixer: @unchecked Sendable {
 
     private var formatDescription: CMAudioFormatDescription?
 
+    /// Keep every emitted track under full scale: one limiter for the
+    /// mix and one per source track. Emission queue only.
+    private var mixLimiter = PeakLimiter()
+    private var sourceLimiters: [String: PeakLimiter] = [:]
+
     init(channels: [AudioInputChannel],
          outputFormat: AVAudioFormat = makeMixerFormat(),
          chunkFrames: AVAudioFrameCount = kMixerChunkFrames) {
@@ -968,6 +973,9 @@ final class AudioMixer: @unchecked Sendable {
         guard anyStarted else {
             throw CaptureError.configurationFailed("No audio channels could start")
         }
+
+        mixLimiter = PeakLimiter()
+        sourceLimiters = [:]
 
         // 3. Align sources. Channels start one after another, so the
         //    first one up has already buffered audio from before the
@@ -1162,7 +1170,17 @@ final class AudioMixer: @unchecked Sendable {
                 _ = ch.pull(intoSummed: base, frames: frames)
             }
             for i in 0..<sampleCount { working[i] += own[i] }
+            var limiter = sourceLimiters[ch.label] ?? PeakLimiter()
+            own.withUnsafeMutableBufferPointer {
+                limiter.process($0.baseAddress!, sampleCount: sampleCount, channels: Int(kMixerChannels))
+            }
+            sourceLimiters[ch.label] = limiter
             isolated.append((ch.label, own))
+        }
+        // Limit the mix last, after summing the unlimited sources, so
+        // the sum can't clip either.
+        working.withUnsafeMutableBufferPointer {
+            mixLimiter.process($0.baseAddress!, sampleCount: sampleCount, channels: Int(kMixerChannels))
         }
 
         // If no channel is enabled+running, emit silence (still
