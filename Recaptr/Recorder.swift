@@ -59,9 +59,9 @@ enum VideoQuality: String, CaseIterable, Identifiable {
 
     var label: String {
         switch self {
-        case .standard:   return "Standard (HEVC, ~8 GB/hour)"
-        case .high:       return "High (HEVC, ~13 GB/hour)"
-        case .compatible: return "Compatible (H.264, ~13 GB/hour)"
+        case .standard:   return "Standard (HEVC)"
+        case .high:       return "High (HEVC)"
+        case .compatible: return "Compatible (H.264)"
         }
     }
 
@@ -69,12 +69,26 @@ enum VideoQuality: String, CaseIterable, Identifiable {
         self == .compatible ? .h264 : .hevc
     }
 
-    var bitrate: Int {
+    /// Bitrate at 1080p60, the resolution the presets were measured at.
+    var bitrateAt1080p60: Int {
         switch self {
         case .standard:   return 20_000_000
         case .high:       return 30_000_000
         case .compatible: return 30_000_000
         }
+    }
+
+    /// Bitrate for a capture size: same bits per pixel as the 1080p60
+    /// measurement, so a 4K recording looks as good per pixel as a
+    /// 1080p one (4K Standard = 80 Mbps).
+    func bitrate(width: Int32, height: Int32) -> Int {
+        let scale = Double(width) * Double(height) / (1920.0 * 1080.0)
+        return Int(Double(bitrateAt1080p60) * max(scale, 0.25))
+    }
+
+    /// Approximate file size per hour at a capture size.
+    func gigabytesPerHour(width: Int32, height: Int32) -> Double {
+        Double(bitrate(width: width, height: height)) * 3600 / 8 / 1e9
     }
 }
 
@@ -202,7 +216,7 @@ final class Recorder: @unchecked Sendable {
             AVVideoCodecKey: quality.codec,
             AVVideoWidthKey: NSNumber(value: width),
             AVVideoHeightKey: NSNumber(value: height),
-            AVVideoCompressionPropertiesKey: Self.compressionProperties(for: quality),
+            AVVideoCompressionPropertiesKey: Self.compressionProperties(for: quality, width: width, height: height),
         ]
         // A setting the encoder rejects would raise an uncatchable
         // exception at input creation; check first.
@@ -360,9 +374,10 @@ final class Recorder: @unchecked Sendable {
         return item
     }
 
-    private static func compressionProperties(for quality: VideoQuality) -> [String: Any] {
+    private static func compressionProperties(for quality: VideoQuality,
+                                              width: Int32, height: Int32) -> [String: Any] {
         [
-            AVVideoAverageBitRateKey: NSNumber(value: quality.bitrate),
+            AVVideoAverageBitRateKey: NSNumber(value: quality.bitrate(width: width, height: height)),
             AVVideoMaxKeyFrameIntervalKey: NSNumber(value: 60),
             AVVideoProfileLevelKey: quality.codec == .hevc
                 ? kVTProfileLevel_HEVC_Main_AutoLevel as String

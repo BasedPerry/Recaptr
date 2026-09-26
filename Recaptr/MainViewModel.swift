@@ -90,6 +90,16 @@ final class MainViewModel: ObservableObject {
         VideoQuality(savedValue: UserDefaults.standard.string(forKey: "RecaptrVideoQuality")) {
         didSet { UserDefaults.standard.set(videoQuality.rawValue, forKey: "RecaptrVideoQuality") }
     }
+    /// Camera / capture card resolution. Auto = highest at 60 fps.
+    @Published var captureResolution: CaptureResolution =
+        CaptureResolution(rawValue: UserDefaults.standard.string(forKey: "RecaptrCaptureResolution") ?? "") ?? .auto {
+        didSet { UserDefaults.standard.set(captureResolution.rawValue, forKey: "RecaptrCaptureResolution") }
+    }
+    /// Size actually being captured, for Settings and file-size math.
+    var activeCaptureSize: CMVideoDimensions? {
+        isPreviewing && activeDims.width > 0 ? activeDims : nil
+    }
+
     /// Opt-in; changes the image, so off by default.
     @Published var lowLightNoiseReduction: Bool =
         UserDefaults.standard.bool(forKey: "RecaptrLowLightNoiseReduction") {
@@ -1021,6 +1031,7 @@ final class MainViewModel: ObservableObject {
                     self?.recorder.appendVideo(sb)
                 }
                 svc.lowLightNoiseReduction = lowLightNoiseReduction
+                svc.preferredResolution = captureResolution
                 dims = try await svc.start(cameraUniqueID: cameraID,
                                            previewSink: previewSinkLayer)
                 lowLightNoiseReductionSupported = svc.lowLightNoiseReductionSupported
@@ -1074,6 +1085,7 @@ final class MainViewModel: ObservableObject {
 
             activeDims = dims
             isPreviewing = true
+            scheduleUITestAutoRecordIfRequested()
             replayAvailable = screenService?.isReplayBuffering ?? false
 
             // Audio pipeline depends on source kind:
@@ -1452,6 +1464,30 @@ final class MainViewModel: ObservableObject {
                 status = s
             }
             print("Recaptr file probe error: \(error)")
+        }
+    }
+
+    // MARK: - UI test hook: record without keystrokes
+
+    /// `-RecaptrUITesting YES -RecaptrUITestAutoRecord <seconds>`
+    /// records once, 3 s after preview starts, for <seconds>, then
+    /// quits after the file probe prints. Lets a capture be verified
+    /// from the command line without sending keystrokes.
+    private var uiTestAutoRecordDone = false
+    private func scheduleUITestAutoRecordIfRequested() {
+        let d = UserDefaults.standard
+        guard d.bool(forKey: "RecaptrUITesting"), !uiTestAutoRecordDone else { return }
+        let seconds = d.double(forKey: "RecaptrUITestAutoRecord")
+        guard seconds > 0 else { return }
+        uiTestAutoRecordDone = true
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(3))
+            await startRecording()
+            try? await Task.sleep(for: .seconds(seconds))
+            await stopRecording()
+            try? await Task.sleep(for: .seconds(4))  // let the probe print
+            print("RecaptrUITest: status → \(status)")
+            NSApp.terminate(nil)
         }
     }
 

@@ -22,6 +22,34 @@ import Foundation
 import AVFoundation
 import QuartzCore  // CACurrentMediaTime
 
+/// Capture resolution preference for camera and capture-card sources.
+enum CaptureResolution: String, CaseIterable, Identifiable {
+    case auto, uhd, qhd, fhd
+
+    var id: Self { self }
+
+    var label: String {
+        switch self {
+        case .auto: return "Auto (highest at 60 fps)"
+        case .uhd:  return "4K (3840×2160)"
+        case .qhd:  return "1440p (2560×1440)"
+        case .fhd:  return "1080p (1920×1080)"
+        }
+    }
+
+    /// Resolutions to try, best first. A specific choice falls back to
+    /// the next smaller one if the device doesn't offer it at 60 fps.
+    var searchOrder: [(Int32, Int32)] {
+        let all: [(Int32, Int32)] = [(3840, 2160), (3440, 1440), (2560, 1440), (1920, 1080)]
+        switch self {
+        case .auto: return all
+        case .uhd:  return all
+        case .qhd:  return [(2560, 1440), (1920, 1080)]
+        case .fhd:  return [(1920, 1080)]
+        }
+    }
+}
+
 final class CameraCaptureService: NSObject, @unchecked Sendable, AVCaptureVideoDataOutputSampleBufferDelegate {
 
     private let session = AVCaptureSession()
@@ -31,6 +59,10 @@ final class CameraCaptureService: NSObject, @unchecked Sendable, AVCaptureVideoD
 
     private let previewOutput = AVCaptureVideoDataOutput()
     private let recordOutput  = AVCaptureVideoDataOutput()
+
+    /// Resolution preference. Set before `start`. `.auto` takes the
+    /// highest resolution the device offers at 60 fps.
+    var preferredResolution: CaptureResolution = .auto
 
     /// Opt-in low-light noise reduction (macOS 27). Set before
     /// `start`. Applied to the record connection only: Apple allows
@@ -204,22 +236,31 @@ final class CameraCaptureService: NSObject, @unchecked Sendable, AVCaptureVideoD
             range.maxFrameRate >= targetRate - epsilon
         }
 
-        // Resolution preferences in priority order (USB-bandwidth aware).
-        let preferredResolutions: [(Int32, Int32)] = [
-            (1920, 1080),  // FHD — always USB 3.0 friendly at 60
-            (2560, 1440),  // QHD — fits USB 3.0 at 60 (~2.7 Gbps NV12)
-            (3440, 1440),  // UWQHD — fits USB 3.0 at 60 (~3.6 Gbps NV12)
-            (3840, 2160),  // 4K — needs USB 3.2 Gen 2 for 60; throttles on USB 3.0
-        ]
+        // Resolution preferences in priority order, from the user's
+        // Capture resolution setting. The old fixed order put 1080p
+        // first because 4K60 throttled to ~37 fps on a USB 3.0 port
+        // (May 2026); on a 10 Gb/s link the Elgato 4K X sustains it,
+        // so the choice is the user's, and Auto means highest.
+        let preferredResolutions = preferredResolution.searchOrder
 
         // Pick the first preferred resolution whose format supports the target rate.
         var picked: AVCaptureDevice.Format?
         for (w, h) in preferredResolutions {
-            if let fmt = allFormats.first(where: {
+            let matches = allFormats.filter {
                 let d = CMVideoFormatDescriptionGetDimensions($0.formatDescription)
                 return d.width == w && d.height == h
                     && $0.videoSupportedFrameRateRanges.contains(where: supportsTarget)
-            }) {
+            }
+            // Some devices list the same size twice. The Elgato 4K X
+            // offers two 3840×2160 formats: one tops out at 60 fps and
+            // actually delivers ~38 fps; the other also lists 120/144
+            // and delivers a clean 60 (tested 2026-09-26 on a 10 Gb/s
+            // link). Prefer the variant with the highest top rate.
+            let fastest = matches.max { a, b in
+                (a.videoSupportedFrameRateRanges.map(\.maxFrameRate).max() ?? 0)
+                    < (b.videoSupportedFrameRateRanges.map(\.maxFrameRate).max() ?? 0)
+            }
+            if let fmt = fastest {
                 picked = fmt
                 break
             }

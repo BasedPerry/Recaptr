@@ -194,6 +194,19 @@ private struct VideoSettingsTab: View {
     var body: some View {
         Form {
             Section {
+                Picker("Capture resolution", selection: $vm.captureResolution) {
+                    ForEach(CaptureResolution.allCases) { r in
+                        Text(r.label).tag(r)
+                    }
+                }
+                .disabled(vm.isRecording)
+                .onChange(of: vm.captureResolution) { _, _ in
+                    // The format is locked when the camera session starts.
+                    if vm.isPreviewing, !vm.isRecording,
+                       vm.selectedMainSource?.kind == .camera {
+                        Task { await vm.startPreview() }
+                    }
+                }
                 Picker("Encoding", selection: $vm.videoQuality) {
                     ForEach(VideoQuality.allCases) { q in
                         Text(q.label).tag(q)
@@ -201,7 +214,7 @@ private struct VideoSettingsTab: View {
                 }
                 .disabled(vm.isRecording)
             } footer: {
-                Text("HEVC keeps more detail than H.264 at the same size and plays everywhere on Apple devices, including Final Cut. Use Compatible only for tools that can't open HEVC. Sizes are for 1080p60.")
+                Text(videoFooter)
             }
 
             Section {
@@ -235,7 +248,21 @@ private struct VideoSettingsTab: View {
             }
         }
         .formStyle(.grouped)
-        .frame(height: 360)
+        .frame(height: 440)
+    }
+}
+
+extension VideoSettingsTab {
+    /// What's being captured now and what it costs per hour.
+    var videoFooter: String {
+        var lines: [String] = []
+        if let size = vm.activeCaptureSize {
+            let gb = vm.videoQuality.gigabytesPerHour(width: size.width, height: size.height)
+            let mbps = vm.videoQuality.bitrate(width: size.width, height: size.height) / 1_000_000
+            lines.append("Capturing \(size.width)×\(size.height). \(vm.videoQuality.label): \(mbps) Mbps, about \(Int(gb.rounded())) GB per hour.")
+        }
+        lines.append("Capture resolution applies to cameras and capture cards; Screen and Window sources record at 1080p. HEVC keeps more detail than H.264 at the same size and works in Final Cut. Use Compatible only for tools that can't open HEVC.")
+        return lines.joined(separator: " ")
     }
 }
 
