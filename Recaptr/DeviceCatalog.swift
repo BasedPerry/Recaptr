@@ -73,6 +73,11 @@ final class DeviceCatalog: ObservableObject {
     }
 
     private func loadShareableContent() async {
+        // Calling SCShareableContent without permission fires the
+        // Screen Recording prompt. Only enumerate once access is
+        // granted; the view model asks for it the first time the user
+        // picks a Window or Screen source.
+        guard CGPreflightScreenCaptureAccess() else { return }
         do {
             let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
             var screenSources: [VideoSource] = []

@@ -90,6 +90,11 @@ final class RecordingStorage: ObservableObject {
     /// otherwise the sandbox fallback. Creates the directory if
     /// missing.
     func resolveSaveDirectory() throws -> URL {
+        // UI tests record into the sandbox container so test files
+        // never land in the user's chosen footage folder.
+        if UserDefaults.standard.bool(forKey: "RecaptrUITesting") {
+            return try Self.sandboxDefault()
+        }
         if let url = securityScopedURL,
            FileManager.default.isWritableFile(atPath: url.path) {
             return url

@@ -109,6 +109,7 @@ struct ContentViewNext: View {
         // view hierarchy; hidden buttons inside `shortcutCarrier`
         // carry the bindings without taking visual space.
         .background(shortcutCarrier)
+        .overlay(alignment: .bottomTrailing) { uiTestProbe }
         .onAppear {
             syncActiveModeFromVM()
             resetFadeIfNeeded()
@@ -326,6 +327,7 @@ struct ContentViewNext: View {
             get: { activeMode },
             set: { newMode in
                 activeMode = newMode
+                if newMode != .camera { vm.screenModeSelected() }
                 let candidates = vm.catalog.videoSources.filter {
                     matchesMode(newMode, kind: $0.kind)
                 }
@@ -453,6 +455,27 @@ struct ContentViewNext: View {
         vm.dropMarker()
     }
 
+    // MARK: - UI test hook
+
+    /// With `-RecaptrUITesting YES`, exposes the last file-probe
+    /// summary to accessibility so UI tests can verify what actually
+    /// landed in the recorded file. Invisible and absent otherwise.
+    @ViewBuilder
+    private var uiTestProbe: some View {
+        if UserDefaults.standard.bool(forKey: "RecaptrUITesting") {
+            VStack(spacing: 0) {
+                Text(vm.lastFileProbeSummary ?? "")
+                    .accessibilityIdentifier("lastProbe")
+                Text(vm.status)
+                    .accessibilityIdentifier("statusLine")
+            }
+            .font(.system(size: 1))
+            .opacity(0.01)
+            .frame(width: 1, height: 2)
+            .allowsHitTesting(false)
+        }
+    }
+
     // MARK: - Keyboard shortcut carrier
     //
     // Hidden buttons embedded in the view hierarchy carry the
@@ -486,6 +509,7 @@ struct ContentViewNext: View {
     /// the preview empty).
     private func selectMode(_ mode: SourceMode) {
         activeMode = mode
+        if mode != .camera { vm.screenModeSelected() }
         let candidates = vm.catalog.videoSources.filter { matchesMode(mode, kind: $0.kind) }
         vm.selectedMainSource = candidates.first
     }

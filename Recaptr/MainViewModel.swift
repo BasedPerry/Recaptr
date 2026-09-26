@@ -283,10 +283,9 @@ final class MainViewModel: ObservableObject {
             await MainActor.run { self.autoSelectStartupSource() }
         }
         Task { await self.requestAudioPermissionIfNeeded() }
-        // Fire the Screen Recording TCC prompt at launch so the user
-        // sees it once (alongside the mic prompt) instead of hitting
-        // it the first time they pick a display source.
-        Task { @MainActor in self.requestScreenCapturePermissionIfNeeded() }
+        // Screen Recording is requested on demand (see
+        // `screenModeSelected`), not at launch, so camera-only users
+        // never see the prompt.
     }
 
     deinit {
@@ -405,6 +404,13 @@ final class MainViewModel: ObservableObject {
         }
     }
 
+    /// Called when the user switches to Window or Screen mode. Asks
+    /// for Screen Recording the first time it's actually needed.
+    func screenModeSelected() {
+        guard !CGPreflightScreenCaptureAccess() else { return }
+        requestScreenCapturePermissionIfNeeded()
+    }
+
     /// Re-poll Screen Recording permission. Called from the
     /// `NSApplication.didBecomeActive` observer (and can be called
     /// from a UI button). Does not trigger a prompt — only reads the
@@ -415,6 +421,10 @@ final class MainViewModel: ObservableObject {
         screenCapturePermissionGranted = current
         if current != was {
             print("recheckScreenCapturePermission(\(reason)): \(was) → \(current)")
+        }
+        // Newly granted: list displays and windows now.
+        if current, !was {
+            Task { await self.refreshCatalog() }
         }
         if current, status.hasPrefix("Screen recording permission denied") {
             status = "Idle"
@@ -1117,6 +1127,7 @@ final class MainViewModel: ObservableObject {
             // starts.
             liveStats = RecorderStats()
             lastRecordedFile = nil
+            lastFileProbeSummary = nil
             let audioLabel = hasAudio ? " + audio (mixer)" : " (video only — no audio armed)"
             status = "Recording → \(url.lastPathComponent)\(audioLabel)"
             // Stats timer is already running from preview — no need
@@ -1209,7 +1220,11 @@ final class MainViewModel: ObservableObject {
                 audioDetail = String(format: "audio: %.2fs / %@", aSeconds, fmtSummary)
             }
 
-            let probeSummary = String(format: "Probe → %.2fs total · video tracks=%d · %@", dur, videoTracks.count, audioDetail)
+            var fps: Float = 0
+            if let vTrack = videoTracks.first {
+                fps = try await vTrack.load(.nominalFrameRate)
+            }
+            let probeSummary = String(format: "Probe → %.2fs total · video tracks=%d · fps=%.2f · %@", dur, videoTracks.count, fps, audioDetail)
             lastFileProbeSummary = probeSummary
             // Combine with the recording summary so the final status
             // shows both "what we tried to record" and "what's actually
