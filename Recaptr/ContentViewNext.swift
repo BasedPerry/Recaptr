@@ -2,32 +2,28 @@
 //  ContentViewNext.swift
 //  Recaptr
 //
-//  Phase 6 — Pure QuickTime layout. Video-first surface with all
-//  chrome floating over the preview, fading on idle, waking on
-//  mouse move. Inspired by QuickTime Player and the iOS Camera /
-//  Photos slideshow patterns.
+//  Video-first window surface. All chrome floats over the preview,
+//  fades on idle, wakes on mouse move — modeled after QuickTime
+//  Player's borderless playback chrome.
 //
 //  Surface plan (each overlay is positioned with alignment on the
 //  preview):
 //    Top center       — SourceSwitcherPill
 //    Top right        — Settings gear (opens SettingsPopover)
-//    Right edge       — AudioModule (vertically centered) — Phase 6.3
-//                       replaced VolumeBar; surfaces input gain + live
-//                       VU + monitor toggle as first-class controls.
+//    Right edge       — AudioModule (gain + VU + monitor toggle)
 //    Bottom center    — RecordingControlsPill
 //    Bottom left      — Recording telemetry pill (only while recording)
 //    Center (empty)   — "Select a source" hint when nothing is picked
 //
 //  Behavior:
-//    - Mouse idle for `fadeDelay` seconds → chrome fades to 0% opacity.
+//    - Mouse idle for `fadeDelay` seconds → chrome fades to 0 % opacity.
 //    - Mouse moves (`onContinuousHover .active`) → chrome wakes.
 //    - When no source is selected, chrome stays visible regardless.
 //    - When recording, fade still applies; click anywhere to wake.
 //    - ⌘, opens the settings popover (standard macOS shortcut).
 //
-//  Window-level: paired with `.windowStyle(.hiddenTitleBar)` in
-//  RecaptrApp.swift so the preview goes edge-to-edge under the
-//  traffic lights, matching QuickTime Player's borderless feel.
+//  Paired with `.windowStyle(.hiddenTitleBar)` in RecaptrApp.swift so
+//  the preview runs edge-to-edge under the traffic lights.
 //
 
 import SwiftUI
@@ -37,23 +33,16 @@ struct ContentViewNext: View {
 
     @EnvironmentObject var vm: MainViewModel
 
-    // Local UI state for the new pills.
+    // Local UI state.
     @State private var activeMode: SourceMode = .camera
     @State private var showSettings: Bool = false
-    // Phase 6.3 — `isMixerOpen` / `monitorMuted` removed alongside the
-    // VolumeBar → AudioModule swap. AudioModule reads vm.monitorEnabled
-    // and vm.monitorVolume directly; gear button is the single entry
-    // point to the settings popover now.
 
     // Fade-out behavior.
     @State private var chromeOpacity: Double = 1.0
     @State private var fadeTask: Task<Void, Never>? = nil
     private let fadeDelay: TimeInterval = 3.0
 
-    // Phase 6.5.1 — screenshot flash. Soft brand-gradient halo that
-    // breathes in and out on capture. v1 used a rotating angular
-    // gradient at full opacity, which read as a flicker; v2 keeps
-    // the gradient static and softens it to a calm glow.
+    // Soft brand-gradient halo pulsed on a successful screenshot.
     @State private var screenshotFlashOpacity: Double = 0
 
     var body: some View {
@@ -77,11 +66,10 @@ struct ContentViewNext: View {
                 .allowsHitTesting(chromeOpacity > 0.05)
                 .animation(.easeInOut(duration: 0.35), value: chromeOpacity)
 
-            // Layer 4 — Phase 6.5.1 screenshot flash. Brand-gradient
-            // angular border, blurred for glow, pulses once on
-            // successful screenshot. Inspired by Apple Intelligence's
-            // living-color edge treatment but tuned to a quick punch
-            // (~0.6s total) so it doesn't disrupt the recording.
+            // Layer 4 — screenshot flash. Brand-gradient angular
+            // border, blurred for glow, pulses once on a successful
+            // screenshot (~0.6 s total so it doesn't disrupt the
+            // recording).
             screenshotFlashOverlay
                 .allowsHitTesting(false)
         }
@@ -97,17 +85,18 @@ struct ContentViewNext: View {
                 break
             }
         }
-        // Phase 6.4 — window-level keyboard shortcuts.
+        // Window-level keyboard shortcuts:
         //   ⌘,   Settings (Apple convention)
         //   ⌘R   Toggle record / stop
-        //   ⌘K   Toggle monitor mute (matches OBS, matches AudioModule pill)
+        //   ⌘K   Toggle monitor mute
         //   ⌘B   Drop clip marker
         //   ⌘1   Switch to Window mode
         //   ⌘2   Switch to Screen mode
         //   ⌘3   Switch to Camera mode
-        // Hidden Buttons embedded in the view hierarchy carry the
-        // shortcut bindings — same pattern Apple uses for menu-less
-        // single-window apps.
+        //
+        // SwiftUI binds `.keyboardShortcut` to a real Button in the
+        // view hierarchy; hidden buttons inside `shortcutCarrier`
+        // carry the bindings without taking visual space.
         .background(shortcutCarrier)
         .onAppear {
             syncActiveModeFromVM()
@@ -117,16 +106,15 @@ struct ContentViewNext: View {
         .onChange(of: vm.selectedMainSource) { _, new in
             syncActiveModeFromVM()
             resetFadeIfNeeded()
-            // Phase 6.2 / Task #16 — when video source changes, also
-            // auto-pick the matching audio (camera-mode only; see
-            // MainViewModel.autoSelectAudioForCurrentSource doc).
+            // When the video source changes, also auto-pick the
+            // matching audio (camera-mode only — see
+            // `MainViewModel.autoSelectAudioForCurrentSource`).
             vm.autoSelectAudioForCurrentSource()
-            // Phase 6.6.2 — always restart preview when source changes.
-            // Previously this had a `!vm.isPreviewing` guard which meant
-            // switching from Elgato to a Window while preview was already
-            // running silently did nothing — UI selection moved, preview
-            // surface kept showing the old source. startPreview() handles
-            // the stop-then-start internally so calling it unconditionally
+            // Always restart preview when the source changes. Guarding
+            // on `!vm.isPreviewing` here would let a source switch
+            // appear to take effect in the UI while the preview surface
+            // kept showing the old source; `startPreview()` handles
+            // stop-then-start internally so calling it unconditionally
             // is safe.
             if new != nil {
                 Task { await vm.startPreview() }
@@ -156,12 +144,9 @@ struct ContentViewNext: View {
                     .padding(.trailing, 16)
             }
             .overlay(alignment: .trailing) {
-                // Phase 6.3 — replaced VolumeBar with AudioModule.
-                // The right-edge audio surface now shows GAIN +
-                // live VU on top, MONITOR toggle on bottom. The old
-                // VolumeBar conflated "volume" with "monitor volume"
-                // and buried input gain inside the Settings popover —
-                // both fixed here.
+                // Right-edge audio surface: GAIN + live VU on top,
+                // MONITOR toggle on bottom. Reads `vm.monitorEnabled`
+                // and `vm.monitorVolume` directly.
                 AudioModule()
                     .environmentObject(vm)
                     .padding(.trailing, 16)
@@ -238,10 +223,10 @@ struct ContentViewNext: View {
                 .font(BrandFont.mono(weight: .regular, size: 11).swiftUI)
                 .foregroundStyle(Color.recaptrTextMuted)
 
-            // Phase 6.5 — markers count surface. Only renders once
-            // at least one marker has been dropped. Signal-green
-            // bookmark icon + count, animates in with opacity+scale
-            // so each drop has a perceptible visual acknowledgment.
+            // Markers count surface. Renders once at least one marker
+            // has been dropped. Signal-green bookmark icon + count,
+            // animates in with opacity+scale so each drop reads as a
+            // visible acknowledgment.
             if !vm.markers.isEmpty {
                 HStack(spacing: 3) {
                     Image(systemName: "bookmark.fill")
@@ -257,9 +242,7 @@ struct ContentViewNext: View {
         .animation(.spring(duration: 0.28, bounce: 0.35), value: vm.markers.count)
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
-        // True Liquid Glass — same modifier as the three main pills.
-        // Red dot + mono telemetry now sit on real glass instead of
-        // a graphite panel.
+        // Same brand-glass capsule as the main pills.
         .brandGlassCapsule(topTint: .red)
     }
 
@@ -382,10 +365,10 @@ struct ContentViewNext: View {
     // MARK: - Action handlers
 
     private func handleScreenshot() {
-        // Phase 6.5 — real screenshot. Captures the latest preview
-        // pixel buffer (held by vm.frameCache) and writes PNG to the
-        // user-picked save folder. On success, triggers the brand-
-        // gradient flash so the user gets visible acknowledgment.
+        // Captures the latest preview pixel buffer (held by
+        // `vm.frameCache`) and writes PNG to the user-picked save
+        // folder. On success, triggers the brand-gradient flash so
+        // the user gets a visible acknowledgment.
         Task {
             do {
                 _ = try await vm.captureScreenshot()
@@ -396,11 +379,11 @@ struct ContentViewNext: View {
         }
     }
 
-    // MARK: - Phase 6.5.1 — screenshot flash
+    // MARK: - Screenshot flash
 
     /// Soft brand-gradient halo on screenshot. Thin stroke with heavy
     /// blur reads as a glow, not a border. Static (no rotation) so it
-    /// breathes evenly instead of strobing. Max opacity is capped well
+    /// breathes evenly instead of strobing; max opacity is capped well
     /// below 1.0 so the brand colors stay calm.
     private var screenshotFlashOverlay: some View {
         RoundedRectangle(cornerRadius: 14, style: .continuous)
@@ -448,20 +431,17 @@ struct ContentViewNext: View {
     }
 
     private func handleMark() {
-        // Phase 6.5 — real marker persistence. vm.dropMarker() appends
-        // to vm.markers (cleared at each startRecording) and updates
-        // the status line. Phase 7c sidebar will surface the list.
+        // `vm.dropMarker()` appends to `vm.markers` (cleared at each
+        // `startRecording`) and updates the status line.
         vm.dropMarker()
     }
 
-    // MARK: - Phase 6.4 — Keyboard shortcut carrier
+    // MARK: - Keyboard shortcut carrier
     //
-    // SwiftUI binds `.keyboardShortcut` to a real Button in the view
-    // hierarchy. Hidden buttons inside a Group on .background carry
-    // the bindings without taking visual space. Buttons must have
-    // identifiable structure (not just a ForEach) for the modifier
-    // chain to attach properly per-button, so each shortcut is its
-    // own explicit Button.
+    // Hidden buttons embedded in the view hierarchy carry the
+    // `.keyboardShortcut` bindings without taking visual space. Each
+    // shortcut needs its own explicit Button (a ForEach loop won't
+    // attach the modifier chain per-button correctly).
     private var shortcutCarrier: some View {
         Group {
             Button("") { showSettings.toggle() }

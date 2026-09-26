@@ -2,50 +2,14 @@
 //  ContentView.swift
 //  Recaptr
 //
-//  Phase 2: preview + camera picker + Start/Stop.
-//  Phase 3: Record + Stop Recording + Show in Finder.
-//  Phase 4 (2026-05-09): audio source picker (None or any AudioSource).
-//  Phase 4 hardening (2026-05-09 evening):
-//    - Live elapsed-time readout while recording (mm:ss / h:mm:ss).
-//    - Live "v / a / drop" buffer counters from MainViewModel.liveStats
-//      so a long-session test surfaces immediately whether audio is
-//      actually landing in the file.
-//  Phase 4.5 (2026-05-09 evening, follow-on):
-//    - Two audio channel rows. Each has a device picker (None or any
-//      AudioSource), a gain slider (0–100 %), and an enabled toggle.
-//    - Both rows disabled while recording (per locked decision #2:
-//      pre-record-only volume).
-//    - Telemetry pill expanded with per-channel zero-fill counters
-//      so a long recording surfaces drift / starvation immediately.
-//  Phase 4.6 (2026-05-09 evening, diagnostics polish):
-//    - Per-channel VU meter (RMS dBFS, smoothed) next to the gain
-//      slider — visible during preview AND recording. If meters
-//      show signal but file plays silent, problem is downstream.
-//      If meters are dead, problem is upstream (TCC, device routing).
-//    - Status line shows the post-record file-probe result so
-//      "no audio in the file" is impossible to miss.
-//  Phase 4.6.1 (2026-05-09 night, hotfix):
-//    - Status text moved to its own row, wraps to 3 lines, and has
-//      a help() tooltip with the full content on hover. The old
-//      single-line truncated layout was useless for debugging.
-//    - "Recheck Mic" button + "Open Settings" button surface
-//      whenever audioPermissionStatus isn't .authorized, so a
-//      stuck "denied" state can be re-resolved without quitting.
-//  Phase 4.7 (2026-05-09 night, monitor function):
-//    - AudioChannelRow gained two lock parameters:
-//      `deviceLocked` (preview OR recording) — disables device
-//      picker + enabled toggle (changing those requires Stop
-//      Preview / Start Preview to rebind the engine).
-//      `gainLocked` (recording only) — slider stays interactive
-//      during preview so Brandon can dial gain visually with the
-//      VU meter live.
-//  Phase 4.9 (2026-05-09 night, closes out 4.x):
-//    - Removed Channel 2 row. Single audio source.
-//    - New MonitorRow: toggle + output volume slider for live
-//      foldback to system speakers. Toggle and slider are
-//      interactive at all times (no lock) — Brandon can flip the
-//      monitor on/off and adjust output volume during recording
-//      without affecting the recording itself.
+//  Legacy form-style layout for the main window. The live UI uses
+//  `ContentViewNext` (the QuickTime-style floating-chrome layout);
+//  this view stays in the project because `SettingsPopover` and other
+//  surfaces compose its internal row structs (`AudioChannelRow`,
+//  `SaveLocationRow`, `StatusBar`, `PermissionBanner`,
+//  `ScreenRecordingPermissionBanner`, `RecordingTelemetryView`,
+//  `VUMeterView`, `MonitorRow`). Hoist those into a shared file
+//  before deleting this view.
 //
 
 import SwiftUI
@@ -67,10 +31,9 @@ struct ContentView: View {
 
             VStack(spacing: 10) {
                 HStack {
-                    // Phase 5.3 — "Source" now covers cameras + displays
-                    // + windows. availableMainSources stopped filtering
-                    // to .camera; MainViewModel.startPreview() switches
-                    // on src.kind to route to the right service.
+                    // "Source" covers cameras + displays + windows.
+                    // `MainViewModel.startPreview()` switches on
+                    // `src.kind` to route to the right service.
                     Text("Source:").font(.callout)
                     Picker("Source", selection: $vm.selectedMainSource) {
                         Text("— Select —").tag(VideoSource?.none)
@@ -89,10 +52,10 @@ struct ContentView: View {
                     Spacer()
                 }
 
-                // Phase 7 sneak — user-selected save location row.
-                // Shows current destination + Change…/Reset actions.
-                // Disabled while recording so the destination can't
-                // change mid-take.
+                // User-selected save location row. Shows the current
+                // destination plus Change… / Reset actions. Locked
+                // while recording so the destination can't change
+                // mid-take.
                 SaveLocationRow(
                     storage: vm.recordingStorage,
                     locked: vm.isRecording
@@ -172,9 +135,10 @@ struct ContentView: View {
                     }
                 }
 
-                // Phase 4.6.1 — permission banner. Only shows when
-                // mic is not authorized; offers two actions to
-                // unstick the situation without quitting.
+                // Permission banner. Shows only when the mic is not
+                // authorized; offers Recheck + Open Settings so a
+                // stuck "denied" state can be resolved without
+                // quitting Recaptr.
                 if vm.audioPermissionStatus != .authorized {
                     PermissionBanner(
                         statusEnum: vm.audioPermissionStatus,
@@ -183,11 +147,11 @@ struct ContentView: View {
                     )
                 }
 
-                // Phase 5.4 — screen recording permission banner. Mirrors
-                // the mic banner pattern. Surfaces only when the user
-                // doesn't have screen recording authorized AND has
-                // selected a screen source (or hasn't selected yet —
-                // we show it on first launch so it's discoverable).
+                // Screen Recording TCC banner — same pattern as the
+                // mic banner. Surfaces when Screen Recording isn't
+                // authorized and the active source is a screen / window
+                // (or nothing is selected yet, so it's discoverable on
+                // first launch).
                 if !vm.screenCapturePermissionGranted &&
                     (vm.selectedMainSource?.kind != .camera) {
                     ScreenRecordingPermissionBanner(
@@ -196,11 +160,9 @@ struct ContentView: View {
                     )
                 }
 
-                // Phase 4.6.1 — status on its own row, wrappable,
-                // with the full content available on hover. The
-                // probe + permission lines are too long for one
-                // row, and the old single-line truncation made
-                // them useless for debugging.
+                // Status on its own wrappable row with the full
+                // content available on hover. Probe + permission
+                // lines are too long to fit one row reliably.
                 StatusBar(text: vm.status)
             }
             .padding(12)
@@ -257,10 +219,10 @@ struct PermissionBanner: View {
     }
 }
 
-/// Phase 7 sneak — save-location row. Shows the active save directory
-/// (last path component, full path on hover) and lets the user pick a
-/// new folder or reset to sandbox default. Disabled while recording so
-/// the destination can't change mid-take.
+/// Save-location row: shows the active save directory (last path
+/// component, full path on hover) and lets the user pick a new folder
+/// or reset to the sandbox default. Locked while recording so the
+/// destination can't change mid-take.
 struct SaveLocationRow: View {
     @ObservedObject var storage: RecordingStorage
     let locked: Bool
@@ -303,9 +265,9 @@ struct SaveLocationRow: View {
     }
 }
 
-/// Phase 5.4 — screen recording TCC banner. Surfaces "open Settings"
-/// and "recheck" so the user can grant Screen Recording, quit + relaunch
-/// (the TCC quirk), and recheck without quitting Recaptr blindly.
+/// Screen Recording TCC banner. Surfaces Open Settings + Recheck so
+/// the user can grant Screen Recording, quit + relaunch (the TCC
+/// quirk), and re-poll without restarting blindly.
 struct ScreenRecordingPermissionBanner: View {
     let onRecheck: () -> Void
     let onOpenSettings: () -> Void
@@ -343,13 +305,12 @@ struct StatusBar: View {
     let text: String
 
     var body: some View {
-        // Phase 4.6.4 — line limit bumped from 3 to 8 because the
-        // post-record summary now combines recorder counters,
-        // mixer counters, per-channel state (with native rate +
-        // push/pull/zf counts), and the file-probe result. With
-        // line wrapping at typical window width this lands at
-        // 5–7 lines. Tooltip on hover still has the full text
-        // verbatim if anything still gets clipped.
+        // The post-record summary combines recorder counters, mixer
+        // counters, per-channel state (with native rate + push / pull
+        // / zero-fill counts), and the file-probe result. With line
+        // wrapping at typical window width that lands at 5–7 lines;
+        // tooltip on hover still has the full text verbatim if it
+        // ever clips.
         Text(text)
             .font(.callout.monospaced())
             .foregroundColor(.secondary)
@@ -371,13 +332,13 @@ struct AudioChannelRow: View {
     @Binding var deviceID: String?
     @Binding var gain: Double
     @Binding var enabled: Bool
-    /// Phase 4.7 — preview OR recording. Locks device picker +
-    /// enabled toggle (changing those requires the audio engine to
-    /// be torn down and rebuilt).
+    /// Set while previewing OR recording. Locks the device picker
+    /// and enabled toggle — changing those requires the audio engine
+    /// to be torn down and rebuilt.
     let deviceLocked: Bool
-    /// Phase 4.7 — recording only. Slider stays interactive during
-    /// preview so Brandon can dial gain visually against the live
-    /// VU meter.
+    /// Set only while recording. The gain slider stays interactive
+    /// during preview so the user can dial gain visually against the
+    /// live VU meter before committing to a take.
     let gainLocked: Bool
     let stats: AudioInputChannelStats?
 
@@ -422,12 +383,11 @@ struct AudioChannelRow: View {
     }
 }
 
-/// Phase 4.9 — live audio monitor controls. Toggle routes mixer
-/// output to the system default output device; volume slider drives
-/// monitorEngine.mainMixerNode.outputVolume. Both stay interactive
+/// Live audio monitor controls. The toggle routes mixer output to
+/// the system default output device; the slider drives
+/// `monitorEngine.mainMixerNode.outputVolume`. Both stay interactive
 /// during preview AND recording — flipping the monitor doesn't
-/// affect what gets muxed into the file. Intentionally minimal
-/// styling for now (ugly is fine, we're styling later).
+/// affect what gets muxed into the file.
 private struct MonitorRow: View {
     @Binding var enabled: Bool
     @Binding var volume: Double
@@ -462,9 +422,10 @@ private struct MonitorRow: View {
     }
 }
 
-/// Phase 4.6 — VU meter rendered from AudioInputChannelStats.
-/// Maps -60 dBFS … 0 dBFS to 0…1 fill. Green → yellow → red zones.
-/// If stats is nil or the channel isn't running, renders empty.
+/// VU meter rendered from `AudioInputChannelStats`. Maps the
+/// −60 dBFS … 0 dBFS range to a 0…1 fill in green → yellow → red
+/// zones. Renders empty when `stats` is nil or the channel isn't
+/// running.
 private struct VUMeterView: View {
     let stats: AudioInputChannelStats?
 

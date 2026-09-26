@@ -2,32 +2,31 @@
 //  Recorder.swift
 //  Recaptr
 //
-//  Phase 3 (2026-05-09): AVAssetWriter wrapper, video-only.
-//  Phase 4 (2026-05-09): added optional audio writer input. Output
-//    location moved from FileManager.urls(for: .moviesDirectory) to
-//    NSHomeDirectory()/Movies — sandbox blocks the user's real ~/Movies
-//    without the assets.movies entitlement, container Movies is always
-//    writable. Phase 7 polish adds the user-selected save location flow.
-//  Phase 4 hardening (2026-05-09 evening):
-//    - Session now anchors on the FIRST arriving sample of any media
-//      type (video or audio), eliminating the 50–200ms of audio that
-//      was silently dropped at the start of every recording while we
-//      waited for the first video frame.
-//    - Explicit PTS check on audio: buffers older than the anchor are
-//      dropped with a counter so the failure surfaces instead of
-//      bouncing silently inside AVAssetWriter.
-//    - Recorder exposes a thread-safe RecorderStats snapshot
-//      (writer status, anchored, accepted/dropped counts, first-sample
-//      timestamp, writer.error). MainViewModel polls this on a 1s
-//      timer during recording so a long session shows live evidence
-//      that audio is actually landing.
+//  `AVAssetWriter` wrapper that muxes the active video pipeline
+//  (camera or SCStream) and, optionally, an audio track into an .mov.
+//
+//  Key non-obvious behaviors documented inline:
+//    - The writing session is anchored on the FIRST arriving sample
+//      of any media type, video or audio, so a recording doesn't drop
+//      the initial 50–200 ms of audio while waiting for the first
+//      video frame.
+//    - `appendVideo` enforces a strict-monotonic PTS guard.
+//      `AVAssetWriter` accepts equal or earlier PTS but the muxer
+//      emits non-monotonic-DTS warnings and the resulting file's
+//      frame timing is unreliable. `SCStream` occasionally delivers
+//      buffers with equal PTS; `AVCaptureSession` does not.
+//    - The recorder publishes a thread-safe `RecorderStats` snapshot
+//      so a long session shows live evidence that buffers are landing.
+//      The counters distinguish "rejected by our guards" from
+//      "rejected by AVAssetWriterInput.append()" — the latter is
+//      typically a format mismatch with the configured AAC output.
 //
 
 import Foundation
 import AVFoundation
 import CoreMedia
 
-/// Live recorder telemetry for the UI. Published from MainViewModel.
+/// Live recorder telemetry for the UI, published from `MainViewModel`.
 struct RecorderStats: Equatable {
     var isWriting: Bool = false
     var writerStatus: AVAssetWriter.Status = .unknown
@@ -37,18 +36,19 @@ struct RecorderStats: Equatable {
     var audioDroppedPreAnchor: Int = 0
     var audioDroppedNotReady: Int = 0
     var videoDroppedNotReady: Int = 0
-    /// Phase 4.6.4 — buffers that passed all our guards but got
-    /// rejected by AVAssetWriterInput.append() returning false.
-    /// If this climbs while audioAccepted stays at 0, the writer
-    /// is rejecting our buffers (format mismatch, PTS issue, etc.).
+    /// Buffers that passed our guards but were rejected by
+    /// `AVAssetWriterInput.append()` returning false. If this climbs
+    /// while `audioAccepted` stays at zero, the writer is rejecting
+    /// our buffers — usually a format mismatch with the configured
+    /// AAC output.
     var audioAppendRejected: Int = 0
-    /// Phase 5b — video buffers dropped because their PTS was less
-    /// than or equal to the previously accepted video buffer's PTS.
-    /// SCStream occasionally delivers consecutive samples with equal
-    /// PTS, which AVAssetWriter accepts but the muxer warns about
-    /// (non-monotonic DTS). AVCaptureSession (camera path) doesn't
-    /// have this issue, so this counter should stay at 0 for camera
-    /// recordings and climb modestly during screen captures.
+    /// Video buffers dropped because their PTS was less than or equal
+    /// to the previously accepted video buffer's PTS. `SCStream`
+    /// occasionally delivers consecutive samples with equal PTS, which
+    /// `AVAssetWriter` accepts but the muxer warns about
+    /// (non-monotonic DTS). `AVCaptureSession` is monotonic by
+    /// contract, so this counter stays at zero for camera recordings
+    /// and climbs modestly during screen captures.
     var videoDroppedPtsRegression: Int = 0
     var writerErrorDescription: String?
 }
@@ -71,16 +71,19 @@ final class Recorder: @unchecked Sendable {
     private var videoDroppedNotReady: Int = 0
     private var audioAppendRejected: Int = 0
     private var videoDroppedPtsRegression: Int = 0
-    /// Phase 5b — last accepted video PTS, used for the strict-monotonic
-    /// guard. Reset to .invalid in _startSync.
+    /// Last accepted video PTS, used for the strict-monotonic guard
+    /// in `appendVideo`. Reset to `.invalid` in `_startSync`.
     private var lastVideoPTS: CMTime = .invalid
 
-    /// Configures + starts the writer. Pass `withAudio: true` to add
-    /// the AAC audio writer input (must be decided before startWriting
-    /// — AVAssetWriter doesn't allow inputs added after).
-    /// `saveDirectory` is the resolved folder (Phase 7 sneak — user-
-    /// selected via RecordingStorage, with sandbox fallback). Caller
-    /// must hold security scope on it for the duration of the write.
+    /// Configure and start the writer. Pass `withAudio: true` to add
+    /// the AAC audio input. The decision must be made before
+    /// `startWriting`; `AVAssetWriter` doesn't allow inputs to be
+    /// added afterward.
+    ///
+    /// `saveDirectory` is the resolved folder (user-selected via
+    /// `RecordingStorage`, with the sandbox container as a fallback).
+    /// The caller is responsible for holding security scope on that
+    /// directory for the lifetime of the write.
     func start(width: Int32, height: Int32, withAudio: Bool, saveDirectory: URL) async throws -> URL {
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<URL, Error>) in
             writerQueue.async {
@@ -102,7 +105,7 @@ final class Recorder: @unchecked Sendable {
         let url = try Self.makeOutputURL(in: saveDirectory)
         let writer = try AVAssetWriter(outputURL: url, fileType: .mov)
 
-        // Video — H.264 SDR (decision 3)
+        // Video — H.264 SDR.
         let videoSettings: [String: Any] = [
             AVVideoCodecKey: AVVideoCodecType.h264,
             AVVideoWidthKey: NSNumber(value: width),
@@ -120,7 +123,7 @@ final class Recorder: @unchecked Sendable {
         }
         writer.add(videoInput)
 
-        // Audio — AAC stereo 48kHz (decision 2: single audio track)
+        // Audio — AAC stereo, 48 kHz, single track.
         var audioInput: AVAssetWriterInput?
         if withAudio {
             let audioSettings: [String: Any] = [
@@ -185,15 +188,13 @@ final class Recorder: @unchecked Sendable {
             let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
             self.anchorSessionIfNeeded(at: pts, writer: writer)
 
-            // Phase 5b — strict-monotonic PTS guard. SCStream
-            // occasionally delivers consecutive sample buffers with
-            // equal (or earlier) PTS; AVAssetWriter accepts them but
-            // the muxer emits non-monotonic-DTS warnings and the
-            // resulting file's frame-timing analysis is unreliable.
-            // Drop the offending buffer with a counter so the failure
-            // surfaces rather than bouncing silently inside ffmpeg.
-            // AVCaptureSession (camera path) is monotonic by contract,
-            // so this counter should stay at 0 for camera recordings.
+            // Strict-monotonic PTS guard. `AVAssetWriter` accepts
+            // equal or earlier PTS but the muxer emits
+            // non-monotonic-DTS warnings and the resulting file's
+            // frame timing becomes unreliable for downstream tools
+            // (ffprobe, video editors). Drop the offending buffer
+            // with a counter so the failure surfaces instead of
+            // hiding inside the .mov.
             if self.lastVideoPTS != .invalid,
                CMTimeCompare(pts, self.lastVideoPTS) <= 0 {
                 self.videoDroppedPtsRegression &+= 1
@@ -223,14 +224,15 @@ final class Recorder: @unchecked Sendable {
             }
 
             let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-            // First sample of any kind anchors the session — eliminates
-            // the historical loss of pre-video audio.
+            // The first sample of any kind anchors the session, so we
+            // don't lose the audio that arrives before the first video
+            // frame.
             self.anchorSessionIfNeeded(at: pts, writer: writer)
 
-            // Defensive: if for any reason the anchor was set by a
-            // later video frame and an older audio buffer is in flight
-            // behind it, AVAssetWriter rejects it. Drop explicitly so
-            // the counter shows what's happening.
+            // If the anchor was set by a later video frame and an
+            // older audio buffer is in flight behind it,
+            // `AVAssetWriter` rejects it. Drop explicitly so the
+            // counter shows what's happening.
             if CMTimeCompare(pts, self.sessionStartTime) < 0 {
                 self.audioDroppedPreAnchor &+= 1
                 return
@@ -243,10 +245,10 @@ final class Recorder: @unchecked Sendable {
             if input.append(sampleBuffer) {
                 self.audioAccepted &+= 1
             } else {
-                // Phase 4.6.4 — surface silent rejection. If
-                // audioAccepted stays at 0 while this climbs, the
-                // writer is rejecting our buffers — most likely a
-                // format mismatch with the AAC output settings.
+                // Silent rejection — if `audioAccepted` stays at zero
+                // while this climbs, the writer is refusing our
+                // buffers, usually because their format doesn't match
+                // the AAC output settings.
                 self.audioAppendRejected &+= 1
             }
         }
@@ -298,20 +300,18 @@ final class Recorder: @unchecked Sendable {
     }
 
     /// Build the output URL inside the caller-provided save directory.
-    /// RecordingStorage handles user-selected vs sandbox fallback +
-    /// security-scoped access; we just write into whatever URL we're
-    /// given. The directory is expected to exist already (Recording-
-    /// Storage's resolveSaveDirectory ensures the sandbox fallback is
-    /// created; user-picked folders exist by construction). We still
-    /// create it defensively in case it was removed between resolve
-    /// and write.
+    /// `RecordingStorage` handles the user-selected-vs-sandbox-fallback
+    /// decision and security-scoped access; this method just writes
+    /// inside the resolved directory. The folder is created if it
+    /// doesn't already exist, in case it was removed between
+    /// `resolveSaveDirectory` and the start of the write.
     private static func makeOutputURL(in directory: URL) throws -> URL {
         let fm = FileManager.default
         if !fm.fileExists(atPath: directory.path) {
             try fm.createDirectory(at: directory, withIntermediateDirectories: true)
         }
-        // Surface the resolved path so it's discoverable in console
-        // (Show in Finder will still navigate to it directly).
+        // Surface the resolved path in the console for debugging;
+        // "Show in Finder" still navigates there directly.
         print("Recaptr recordings dir: \(directory.path)")
 
         let stamp = Date().ISO8601Format().replacingOccurrences(of: ":", with: "-")

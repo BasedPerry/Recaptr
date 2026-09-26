@@ -2,100 +2,67 @@
 //  AudioMixer.swift
 //  Recaptr
 //
-//  Phase 4.5 (2026-05-09 evening). Multi-source audio capture +
-//  per-source gain + single AAC track output, per locked decision #2:
-//  "Single mixed audio track, per-source pre-record volume."
+//  N-channel audio capture, per-channel gain, single mixed AAC track
+//  out. Currently exposed to the UI as one channel + a live monitor;
+//  the N-channel architecture stays in place so multi-source support
+//  (e.g. via an aggregate device) can land later without rewriting.
 //
 //  Architecture
 //  ─────────────
-//  Each AudioInputChannel owns its own AVAudioEngine, bound to a
-//  specific input device via Core Audio's
-//  kAudioOutputUnitProperty_CurrentDevice. The engine's input node
+//  Each `AudioInputChannel` owns its own `AVAudioEngine`, bound to a
+//  specific physical input device via Core Audio's
+//  `kAudioOutputUnitProperty_CurrentDevice`. The engine's input node
 //  has a tap installed at the device's native format. The tap
-//  callback runs the buffer through a cached AVAudioConverter into
-//  the canonical mixer format (48 kHz / Stereo / Float32 / interleaved),
-//  applies the channel gain in place, and pushes the converted
-//  buffer onto the channel's serial queue, protected by mixerLock.
+//  callback runs the buffer through a cached `AVAudioConverter` into
+//  the canonical mixer format (48 kHz / Stereo / Float32 /
+//  interleaved), applies the channel gain in place, computes VU
+//  meters, and pushes the converted buffer onto the channel's pending
+//  queue under a lock.
 //
-//  The AudioMixer runs a DispatchSourceTimer at ~21.3 ms cadence
+//  `AudioMixer` runs a `DispatchSourceTimer` at ~21.3 ms cadence
 //  (1024 frames @ 48 kHz). Each tick pulls 1024 frames from each
-//  enabled channel, summing into a working buffer (zero-fill if a
-//  channel is starved), wraps the sum in a CMSampleBuffer with a
-//  monotonically-increasing PTS at 48 kHz timescale, and hands it
-//  to onMixedSampleBuffer (Recorder.appendAudio).
+//  enabled channel, sums them into a working buffer (zero-filling
+//  where a channel is starved), wraps the sum in a `CMSampleBuffer`
+//  with a monotonically-advancing PTS, and hands it to
+//  `onMixedSampleBuffer` (which feeds `Recorder.appendAudio`).
+//
+//  Mixer PTS is anchored to the host time clock
+//  (`CMClockGetHostTimeClock`) at `start()`, then advanced by
+//  `sampleClock / sampleRate`, so audio PTSes share the time domain
+//  with `AVCaptureSession`'s video PTSes. Putting audio in a
+//  different domain (e.g. starting at zero) causes every audio
+//  sample to land before the session anchor and be dropped.
+//
+//  Live monitor (foldback)
+//  ───────────────────────
+//  An output-only `AVAudioEngine` plays each post-gain buffer back to
+//  the system default output device. Output-only engines avoid the
+//  multi-input HAL conflict that would otherwise prevent capturing
+//  while monitoring. `AVAudioEngine.outputNode` binds to whichever
+//  device was the system default at engine-start time and does NOT
+//  follow later Sound-settings changes, so the monitor engine is
+//  rebuilt fresh on every toggle-on (see `buildMonitorEngine`).
 //
 //  Pre-record lock
 //  ───────────────
-//  Channel configuration (device, gain, enabled) is intended to be
-//  set BEFORE start(). The mixer's start()/stop() calls are made by
-//  MainViewModel around the recording lifecycle. The UI disables
-//  the channel controls while isRecording is true.
+//  Channel configuration (device, gain, enabled) is set BEFORE
+//  `start()`. `MainViewModel` brackets the mixer's `start()` /
+//  `stop()` calls around the preview / recording lifecycle, and the
+//  UI disables the channel controls while `isRecording` is true.
 //
-//  Phase 4.6 additions (2026-05-09 evening, follow-on):
-//   • Per-channel VU (RMS smoothed + peak in dBFS) computed in the
-//     tap, surfaced via AudioInputChannelStats. ContentView renders
-//     a small meter next to each channel's gain slider.
-//   • Verbose engine-startup logging — UID resolution, post-bind
-//     device read-back, native format dump — so a "no audio in file"
-//     symptom shows its source in the Xcode console immediately.
-//   • Read-back helper `currentEngineInputDeviceID(engine:)` that
-//     verifies the AUHAL actually bound to the device we asked for
-//     (the engine can quietly fall back to the system default).
-//
-//  Phase 4.7.1 fixes (2026-05-09 night):
-//   • PTS now anchored to the host time clock (CMClockGetHostTimeClock).
-//     Previously the mixer used sampleClock/48k starting at 0, which
-//     put audio PTSes in a different time domain than AVCaptureSession's
-//     video PTSes (host time). Result: when video happened to win
-//     the dispatch race to writerQueue, it anchored the session at
-//     a host-time value (~12,345 s), then every audio buffer's
-//     mixer-time PTS (0–135 s) landed before that anchor and got
-//     dropped. Brandon's 02:15 recording showed `drop(pre)=8,577/8,944`
-//     — 96 % of audio buffers rejected. Fix: pts = startClockTime +
-//     sampleClock/48000, where startClockTime is captured from the
-//     host clock at AudioMixer.start().
-//   • Tap-firing diagnostics: `handleTap` logs first call + every
-//     500th call so we can see in the Xcode console whether the
-//     tap is firing steadily or stalling.
-//
-//  Phase 4.7.3 fix (2026-05-09 night, the final audio bug):
-//   • The Phase 4.7.1 diagnostic showed the tap was firing 2,500+
-//     times — but `push=4800` (one tap-call worth of frames) for
-//     the entire recording. The bug: handleTap's AVAudioConverter
-//     callback returned `.endOfStream` when our single buffer had
-//     been consumed, which tells the converter "the stream is
-//     finished forever." After the first tap call's conversion,
-//     the converter went into a permanently-drained state and
-//     subsequent convert() calls produced 0 output frames. The
-//     `guard outBuf.frameLength > 0` then dropped every buffer
-//     silently. Fix: signal `.noDataNow` instead — tells the
-//     converter to drain the input we just gave it but stay alive
-//     for future calls. This was the actual final piece. After
-//     phase 4.6.5 (audioanalyticsd) and 4.7.1 (PTS clock), this is
-//     what unlocked real audio data flowing into the file.
-//
-//  Phase 4.7.4 fix (2026-05-09 night, multi-source resilience):
-//   • macOS HAL refuses two simultaneous AVAudioEngine input
-//     bindings to different physical devices. Channel 2's
-//     engine.start() throws kAudioServerStopErr (1937010544 =
-//     "stop"). Previously this throw propagated out of
-//     AudioMixer.start() before the timer was scheduled, leaving
-//     Channel 1's already-running engine orphaned (running but no
-//     mixer pulling from it). The recorder then got hasAudio=false
-//     and produced a video-only file even though Channel 1 was
-//     still capturing audio. Fix: catch each channel's start()
-//     individually, mark per-channel lastError on failure, keep
-//     going; mixer succeeds as long as at least one channel
-//     started. This is graceful degradation — full multi-source
-//     mixing requires a Core Audio aggregate device (Phase 4.8).
-//
-//  Limitations (deferred to Phase 4.8+):
-//   • No system-loopback capture for game audio (BlackHole / virtual
-//     audio device required — Apple does not expose loopback of
-//     arbitrary audio outputs in shipping macOS Tahoe).
-//   • Two-channel cap in UI (the architecture supports N channels).
-//   • Channel timing alignment is "drop or zero-fill", not phase-
-//     accurate cross-device sync.
+//  Limitations
+//  ───────────
+//   • No system-loopback capture for game audio on camera sources
+//     (a virtual audio device like BlackHole is required — Apple does
+//     not expose loopback of arbitrary audio outputs). Screen sources
+//     get system audio through `SCStream` instead.
+//   • macOS HAL refuses two simultaneous `AVAudioEngine` input
+//     bindings to different physical devices; multi-channel capture
+//     requires a Core Audio aggregate device. `start()` already
+//     degrades gracefully when a channel can't start, but UI today
+//     only surfaces one channel.
+//   • Channel alignment is drop-or-zero-fill, not phase-accurate
+//     cross-device sync.
 //
 
 import Foundation
@@ -117,12 +84,10 @@ struct AudioInputChannelStats: Equatable {
     var framesPulledByMixer: Int = 0
     var zeroFillEvents: Int = 0
     var lastError: String?
-    /// Phase 4.6 — RMS over the last converted buffer, in dBFS
-    /// (-inf .. 0). Smoothed with a simple low-pass for a stable
-    /// VU-style display.
+    /// RMS over the last converted buffer, in dBFS (-∞ … 0).
+    /// Smoothed with a one-pole low-pass for a stable VU display.
     var rmsDbfs: Float = -120.0
-    /// Phase 4.6 — peak sample magnitude over the last converted
-    /// buffer, in dBFS.
+    /// Peak sample magnitude over the last converted buffer, in dBFS.
     var peakDbfs: Float = -120.0
 }
 
@@ -159,11 +124,11 @@ final class AudioInputChannel: @unchecked Sendable {
 
     let label: String
     private let outputFormat: AVAudioFormat
-    /// Phase 4.9.1 — non-interleaved standard format used for the
-    /// monitor engine's player→mixer connection. AVAudioEngine's
-    /// mixer nodes reject interleaved formats on connections (the
-    /// `outputFormat` we use for CMSampleBuffer construction is
-    /// interleaved, so we need a separate format here).
+    /// Non-interleaved standard format used for the monitor engine's
+    /// player → mixer connection. `AVAudioEngine`'s mixer nodes reject
+    /// interleaved formats on bus connections, and `outputFormat`
+    /// (used for `CMSampleBuffer` construction) is interleaved — so a
+    /// separate format is required for the monitor side.
     private let monitorFormat: AVAudioFormat
 
     // Configuration — set by UI before start(); locked while running.
@@ -189,30 +154,29 @@ final class AudioInputChannel: @unchecked Sendable {
     private(set) var zeroFillEvents: Int = 0
     private(set) var lastError: String?
 
-    // Phase 4.6 — VU meter. Smoothed RMS / peak in dBFS, updated each
-    // tap callback. Read by snapshot() under lock.
+    // VU meter — smoothed RMS / peak in dBFS, updated each tap
+    // callback. Read by `snapshot()` under lock.
     private var smoothedRmsDbfs: Float = -120.0
     private var lastPeakDbfs: Float = -120.0
 
-    // Phase 4.7.1 — tap-firing diagnostic. Brandon's last test had
-    // push=4800 (only 100 ms) over a 3-minute recording, suggesting
-    // the tap fires briefly and stalls. These counters log to the
-    // Xcode console so we can see exactly when the cliff happens.
+    /// Tap-firing diagnostic. Logged on the first call and every
+    /// 500th call (about once per ~10 s at 48 kHz / 1024 frames per
+    /// tap). A plateauing counter is a strong signal that the tap
+    /// stalled.
     private var tapCallCount: Int = 0
 
-    // Phase 4.9 — live audio monitoring. A separate AVAudioEngine
-    // dedicated to OUTPUT plays each converted buffer back to the
-    // system default output device. Output-only engines don't hit
-    // the multi-input HAL conflict that killed multi-source capture.
-    // Latency is roughly tap-buffer (~21–100 ms) + AVAudioPlayerNode
-    // scheduling (~10–20 ms) — fine for game-capture monitoring.
+    // Live audio monitoring. A separate output-only `AVAudioEngine`
+    // plays each post-gain buffer back to the system default output
+    // device. Output-only engines avoid the multi-input HAL conflict
+    // that prevents capturing while monitoring. Latency is roughly
+    // tap-buffer (~21–100 ms) + `AVAudioPlayerNode` scheduling
+    // (~10–20 ms).
     //
-    // Phase 4.9.2 — these are now `var` because AVAudioEngine binds
-    // its outputNode to the system default output at engine-start
-    // time and does NOT follow later changes in Sound settings. We
-    // rebuild both fresh on every monitor toggle-on (see
-    // buildMonitorEngine() + startMonitorIfNeeded()) so the engine
-    // always binds to the user's *current* output choice.
+    // These are `var` because `AVAudioEngine.outputNode` binds to the
+    // system default output at engine-start time and does NOT follow
+    // later changes in Sound settings. `startMonitorIfNeeded()`
+    // rebuilds the engine on every toggle-on so it always binds to
+    // the user's *current* output choice.
     private var monitorEngine = AVAudioEngine()
     private var monitorPlayerNode = AVAudioPlayerNode()
     private var monitorRunning = false
@@ -230,42 +194,37 @@ final class AudioInputChannel: @unchecked Sendable {
     init(label: String, outputFormat: AVAudioFormat) {
         self.label = label
         self.outputFormat = outputFormat
-        // Phase 4.9.1 — standardFormatWithSampleRate: produces a
-        // non-interleaved Float32 format that AVAudioEngine's mixer
-        // nodes accept on their bus connections. We de-interleave
-        // each outBuf into a buffer of this format before scheduling
-        // it on the monitor player node (see handleTap).
+        // `standardFormatWithSampleRate:` produces a non-interleaved
+        // Float32 format that `AVAudioEngine`'s mixer nodes accept on
+        // bus connections. Each `outBuf` is de-interleaved into a
+        // buffer of this format before being scheduled on the monitor
+        // player node (see `handleTap`).
         self.monitorFormat = AVAudioFormat(
             standardFormatWithSampleRate: outputFormat.sampleRate,
             channels: outputFormat.channelCount
         ) ?? outputFormat
 
-        // Phase 4.9 — wire the monitor graph: player → mainMixer → output.
-        // No input bus on this engine — it only renders to the system
+        // Initial wire of the monitor graph via the same builder
+        // `startMonitorIfNeeded()` uses, so the (re)build path is the
+        // single source of truth. The engine constructed here is
+        // effectively throwaway — it gets replaced on the first
+        // toggle-on so the `outputNode` binds to the *then-current*
         // default output device.
-        //
-        // Phase 4.9.2 — the initial-wire is done via buildMonitorEngine()
-        // so the (re)build path is the single source of truth for wiring.
-        // The engine constructed here is throwaway — it'll be replaced
-        // the first time the user toggles Monitor ON, ensuring the
-        // outputNode binds to the *then-current* default output device
-        // rather than whatever was selected when the app launched.
         buildMonitorEngine()
     }
 
-    /// Phase 4.9.2 — (re)build the monitor engine + player node from
-    /// scratch and re-wire the graph. AVAudioEngine.outputNode binds
-    /// to whatever the system default output device is at engine-start
-    /// time; once bound, it does NOT follow later Sound-settings
-    /// changes. So `startMonitorIfNeeded()` calls this on every
-    /// toggle-on, throwing away the previous engine. The fresh engine
-    /// binds to whatever the user's current default output is —
-    /// speakers, headphones, AirPods, an HDMI device, whatever.
+    /// (Re)build the monitor engine + player node from scratch and
+    /// re-wire the graph. `AVAudioEngine.outputNode` binds to whichever
+    /// device is the system default output at engine-start time, and
+    /// does NOT follow later Sound-settings changes — so
+    /// `startMonitorIfNeeded()` calls this on every toggle-on,
+    /// throwing away the previous engine. The fresh engine binds to
+    /// whatever the user's current default output is (speakers,
+    /// headphones, AirPods, an HDMI device, etc.).
     ///
-    /// This is a workaround for the per-toggle case. A permanent fix
-    /// (listen for kAudioHardwarePropertyDefaultOutputDevice changes
-    /// and rebuild transparently) is deferred to the Audio + Video
-    /// monitor unification work that lands with the UI redesign.
+    /// A permanent fix would observe
+    /// `kAudioHardwarePropertyDefaultOutputDevice` changes and rebuild
+    /// transparently; that's deferred.
     private func buildMonitorEngine() {
         let engine = AVAudioEngine()
         let player = AVAudioPlayerNode()
@@ -276,18 +235,15 @@ final class AudioInputChannel: @unchecked Sendable {
         self.monitorPlayerNode = player
     }
 
-    /// Phase 4.9 — start the monitor engine if monitorEnabled is set.
-    /// Called by AudioMixer after a successful capture engine start.
-    /// Idempotent: safe to call when already running.
+    /// Start the monitor engine if `monitorEnabled` is set. Called by
+    /// `AudioMixer` after a successful capture engine start.
+    /// Idempotent — safe to call when already running.
     ///
-    /// Phase 4.9.2 — every toggle-on rebuilds the engine via
-    /// buildMonitorEngine() so the outputNode re-binds to the
-    /// *current* system default output device. Without this, the
-    /// engine remains bound to whatever default existed at app
-    /// launch, even if the user later switches outputs in System
-    /// Settings, producing silent monitor playback on the wrong
-    /// device. Logs the bound output format on success so we can
-    /// confirm the rebind worked.
+    /// Each toggle-on rebuilds the engine via `buildMonitorEngine()`
+    /// so the `outputNode` re-binds to the current system default
+    /// output device. Without this, the engine stays bound to whatever
+    /// was default at the previous start, producing silent monitor
+    /// playback on the wrong device if the user switched outputs.
     func startMonitorIfNeeded() {
         guard monitorEnabled, !monitorRunning else { return }
         buildMonitorEngine()
@@ -303,7 +259,7 @@ final class AudioInputChannel: @unchecked Sendable {
         }
     }
 
-    /// Phase 4.9 — stop the monitor engine.
+    /// Stop the monitor engine.
     func stopMonitor() {
         guard monitorRunning else { return }
         monitorPlayerNode.stop()
@@ -311,8 +267,9 @@ final class AudioInputChannel: @unchecked Sendable {
         monitorRunning = false
     }
 
-    /// Phase 4.9 — toggle monitor live without restarting capture.
-    /// Called by MainViewModel via Combine when the UI toggle changes.
+    /// Toggle the monitor on or off without restarting capture.
+    /// Called from `MainViewModel` via Combine when the UI toggle
+    /// changes.
     func setMonitor(enabled: Bool) {
         monitorEnabled = enabled
         if enabled {
@@ -336,9 +293,9 @@ final class AudioInputChannel: @unchecked Sendable {
 
         // 2. Bind the engine's input audio unit to that device.
         try Self.setEngineInputDevice(engine: engine, deviceID: coreAudioID)
-        // Phase 4.6 verify: read it back. If the engine quietly fell
-        // back to the default input, surface that — otherwise we'd
-        // capture from the wrong device with no warning.
+        // Read it back. If the engine quietly fell back to the default
+        // input, surface that — otherwise we'd capture from the wrong
+        // device with no warning.
         if let actualID = try? Self.currentEngineInputDeviceID(engine: engine), actualID != coreAudioID {
             print("AudioInputChannel[\(label)]: WARNING device mismatch after set — wanted \(coreAudioID), got \(actualID)")
         }
@@ -367,7 +324,7 @@ final class AudioInputChannel: @unchecked Sendable {
         engine.prepare()
         try engine.start()
         running = true
-        tapCallCount = 0  // Phase 4.7.1 — fresh diagnostic count.
+        tapCallCount = 0
         print("AudioInputChannel[\(label)]: engine started")
     }
 
@@ -377,7 +334,7 @@ final class AudioInputChannel: @unchecked Sendable {
             engine.inputNode.removeTap(onBus: 0)
             tapInstalled = false
         }
-        // Phase 4.9 — tear down monitor along with capture.
+        // Tear down the monitor alongside capture.
         stopMonitor()
         lock.lock()
         pending.removeAll()
@@ -387,9 +344,9 @@ final class AudioInputChannel: @unchecked Sendable {
         running = false
     }
 
-    /// Phase 4.7.4 — record a start() failure without re-throwing,
-    /// so other channels can keep running. Called by AudioMixer when
-    /// a per-channel start throws.
+    /// Record a `start()` failure without re-throwing, so other
+    /// channels can keep running. Called by `AudioMixer` when a
+    /// per-channel start throws.
     func recordStartFailure(_ message: String) {
         lock.lock()
         lastError = message
@@ -400,10 +357,9 @@ final class AudioInputChannel: @unchecked Sendable {
     // MARK: - Tap → converted buffer → pending queue
 
     private func handleTap(_ inBuf: AVAudioPCMBuffer) {
-        // Phase 4.7.1 — tap-firing diagnostic. First call + every
-        // 500th gets logged (a tap calling at 48k/1024 ≈ 47 Hz means
-        // ~1 log per 10 seconds). If the count plateaus in the
-        // console, we know exactly when the tap stopped firing.
+        // Tap-firing diagnostic. First call + every 500th call get
+        // logged (~1 log per 10 s at 48 kHz / 1024 frames per tap).
+        // A plateauing counter pinpoints when the tap stopped firing.
         tapCallCount += 1
         if tapCallCount == 1 || tapCallCount % 500 == 0 {
             print("AudioInputChannel[\(label)]: tap call #\(tapCallCount), inFrames=\(inBuf.frameLength), inRate=\(inBuf.format.sampleRate)Hz")
@@ -420,16 +376,13 @@ final class AudioInputChannel: @unchecked Sendable {
 
         var error: NSError?
         var supplied = false
-        // Phase 4.7.3 — use .noDataNow (NOT .endOfStream) to signal
-        // "no more input right now." `.endOfStream` permanently
-        // retires the converter; after the first tap call's
-        // conversion the converter would refuse to produce any more
-        // output, even though the tap keeps firing with fresh data.
-        // That manifested as `push=4800` (one tap-call worth of
-        // frames) for the entire recording while the tap callback
-        // fired thousands of times. `.noDataNow` lets the converter
-        // drain the input we just gave it but stay alive for the
-        // next call.
+        // Use `.noDataNow` (NOT `.endOfStream`) when the input has
+        // been consumed. `.endOfStream` permanently retires the
+        // converter — after the first tap call's conversion, the
+        // converter refuses to produce any more output even though
+        // the tap keeps delivering fresh buffers. `.noDataNow` tells
+        // the converter to drain the input we just gave it but stay
+        // alive for the next call.
         let status = converter.convert(to: outBuf, error: &error) { _, outStatus in
             if !supplied {
                 supplied = true
@@ -456,7 +409,7 @@ final class AudioInputChannel: @unchecked Sendable {
             if g != 1.0 {
                 for i in 0..<totalSamples { raw[i] *= g }
             }
-            // Phase 4.6 VU — RMS + peak over post-gain samples.
+            // VU meter — RMS + peak over post-gain samples.
             var sumSq: Float = 0
             for i in 0..<totalSamples {
                 let s = raw[i]
@@ -471,12 +424,13 @@ final class AudioInputChannel: @unchecked Sendable {
         let rmsDb = Self.linearToDbfs(rms)
         let peakDb = Self.linearToDbfs(peak)
 
-        // Phase 4.9 — live monitor playback. Phase 4.9.1: outBuf is
-        // interleaved (required for CMSampleBuffer construction) but
-        // AVAudioEngine's mixer nodes need non-interleaved (planar)
-        // PCM. De-interleave into a monitorFormat buffer and schedule
-        // that on the player node. AVAudioPlayerNode copies buffer
-        // contents internally so the source can be released after.
+        // Live monitor playback. `outBuf` is interleaved (required
+        // for `CMSampleBuffer` construction) but `AVAudioEngine`'s
+        // mixer nodes need non-interleaved (planar) PCM. De-interleave
+        // into a `monitorFormat` buffer and schedule that on the
+        // player node. `AVAudioPlayerNode.scheduleBuffer` copies the
+        // buffer contents internally so the source can be released
+        // immediately after.
         if monitorRunning,
            let monitorBuf = AVAudioPCMBuffer(pcmFormat: monitorFormat, frameCapacity: outBuf.frameLength),
            let interleavedSrc = outBuf.floatChannelData?.pointee,
@@ -654,8 +608,10 @@ final class AudioInputChannel: @unchecked Sendable {
         }
     }
 
-    /// Phase 4.6 — read back the audio unit's current device, used
-    /// after setEngineInputDevice() to verify the bind actually took.
+    /// Read back the audio unit's current device. Used after
+    /// `setEngineInputDevice()` to verify that the bind actually
+    /// took (the AUHAL can silently fall back to the system default
+    /// input).
     static func currentEngineInputDeviceID(engine: AVAudioEngine) throws -> AudioDeviceID {
         guard let audioUnit = engine.inputNode.audioUnit else {
             throw CaptureError.configurationFailed("Engine has no input audioUnit")
@@ -700,9 +656,11 @@ final class AudioMixer: @unchecked Sendable {
     private(set) var mixedFramesEmitted: Int = 0
     private(set) var ticks: Int = 0
 
-    /// Phase 4.7.1 — host clock time captured at start(). Mixer PTS
-    /// is computed as startClockTime + sampleClock/sampleRate so it
-    /// shares the time domain with AVCaptureSession's video PTSes.
+    /// Host clock time captured at `start()`. Mixer PTS is computed as
+    /// `startClockTime + sampleClock / sampleRate` so it shares the
+    /// time domain with `AVCaptureSession`'s video PTSes — otherwise
+    /// audio samples land before the writer's session anchor and get
+    /// dropped.
     private var startClockTime: CMTime = .invalid
 
     private var formatDescription: CMAudioFormatDescription?
@@ -736,23 +694,23 @@ final class AudioMixer: @unchecked Sendable {
         formatDescription = try Self.makeFormatDescription(from: outputFormat)
 
         // 2. Start every enabled channel that has a device.
-        // Phase 4.7.4 — graceful per-channel start. Two simultaneous
-        // AVAudioEngine input bindings on macOS produce a HAL
-        // conflict (kAudioServerStopErr = 1937010544 = "stop"); the
-        // second engine.start() throws. Previously we propagated
-        // that throw out of AudioMixer.start, which killed the
-        // already-running Channel 1's audio path because the mixer
-        // never reached its timer-resume step. Now we record the
-        // per-channel failure and keep going — mixer succeeds as
-        // long as at least one channel started.
+        //
+        // Graceful per-channel start: macOS HAL refuses two
+        // simultaneous `AVAudioEngine` input bindings to different
+        // physical devices (the second `engine.start()` throws
+        // `kAudioServerStopErr` = 1937010544 = "stop"). Propagating
+        // that throw would kill the already-running channel's path
+        // because the mixer would never reach its `timer.resume()`.
+        // Instead, record the per-channel failure and continue —
+        // the mixer succeeds as long as at least one channel started.
         var anyStarted = false
         for ch in channels where ch.enabled && ch.deviceUniqueID != nil {
             do {
                 try ch.start()
                 anyStarted = true
-                // Phase 4.9 — fire up the monitor engine if the
-                // channel was configured with monitoring on. No-op
-                // if monitorEnabled == false.
+                // Fire up the monitor engine if the channel was
+                // configured with monitoring on. No-op when
+                // `monitorEnabled` is false.
                 ch.startMonitorIfNeeded()
             } catch {
                 ch.recordStartFailure(error.localizedDescription)
@@ -763,12 +721,11 @@ final class AudioMixer: @unchecked Sendable {
             throw CaptureError.configurationFailed("No audio channels could start")
         }
 
-        // 3. Reset clocks.
+        // 3. Reset clocks. Capture the host clock so audio PTS shares
+        //    the time domain with `AVCaptureSession`'s video frames.
         sampleClock = 0
         mixedFramesEmitted = 0
         ticks = 0
-        // Phase 4.7.1 — capture host clock so PTS shares time domain
-        // with AVCaptureSession's video frames.
         let hostClock = CMClockGetHostTimeClock()
         startClockTime = CMClockGetTime(hostClock)
         print("AudioMixer: start clock anchored at host time \(CMTimeGetSeconds(startClockTime))s")
@@ -788,7 +745,7 @@ final class AudioMixer: @unchecked Sendable {
         timer = nil
         for ch in channels { ch.stop() }
         running = false
-        startClockTime = .invalid  // Phase 4.7.1 — reset for next start().
+        startClockTime = .invalid  // reset for the next start()
     }
 
     // MARK: - Tick → mix → emit
@@ -858,9 +815,9 @@ final class AudioMixer: @unchecked Sendable {
             return nil
         }
 
-        // Phase 4.7.1 — PTS in host time domain. startClockTime was
-        // captured at start(); add sampleClock-relative offset so
-        // each emit is monotonically advancing at exactly 48 kHz.
+        // PTS in the host time domain. `startClockTime` was captured
+        // at `start()`; add the `sampleClock`-relative offset so each
+        // emit advances monotonically at exactly 48 kHz.
         let elapsed = CMTime(value: sampleClock, timescale: CMTimeScale(kMixerSampleRate))
         let pts = startClockTime.isValid
             ? CMTimeAdd(startClockTime, elapsed)

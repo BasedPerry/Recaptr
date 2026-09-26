@@ -2,41 +2,39 @@
 //  ScreenCaptureService.swift
 //  Recaptr
 //
-//  Phase 5.2 (2026-05-11): screen capture via ScreenCaptureKit.
-//  Phase 5b (2026-05-11 evening): added SCStream system-audio loopback
-//    via SCStreamOutputType.audio. Promoted from spike after Phase 5's
-//    first real test (Safari + YouTube) hit the predicted "no good
-//    system-audio source in the available list" problem. iPhone-mic
-//    via Continuity starved (push=100608 / zf=6945 over 128s = ~2s of
-//    real audio). SCStream audio is Tahoe-native, shares the host
-//    clock with video, and bypasses the AudioMixer HAL-conflict trap
-//    that motivated the Phase 4.8 deferral.
+//  Screen / window capture via ScreenCaptureKit. Mirrors the
+//  two-output pattern used in `CameraCaptureService`: one `SCStream`
+//  delivers frames and we fan out to preview + record from the
+//  delegate callback.
 //
-//  Mirrors CameraCaptureService's two-output pattern (decision 5):
-//  one SCStream delivers frames; we fan out to preview + record from
-//  the delegate callback. For screen sources, audio comes from this
-//  SAME stream rather than the AudioMixer — MainViewModel bypasses the
-//  mixer when the source is .screenDisplay or .screenWindow. Camera
-//  sources keep the Phase 4.x mixer path (mic capture).
+//  For screen sources, audio comes from the SAME stream
+//  (`SCStreamOutputType.audio`) rather than the `AudioMixer`.
+//  `MainViewModel` bypasses the mixer when the source is
+//  `.screenDisplay` or `.screenWindow`; camera sources keep the mixer
+//  path for mic capture. Using SCStream's audio output keeps video
+//  and audio on the same host clock, which makes the recorder's
+//  session-anchor logic work without modification, and avoids the
+//  AVAudioEngine HAL-conflict that arises when an AVAudioEngine
+//  input is open against a system-audio loopback device.
 //
 //  Lifecycle:
-//    start(filter:previewSink:) — builds SCStreamConfiguration (1080p60
-//      BGRA), creates the SCStream, registers self as both delegate and
-//      sample-handler, starts capture. Returns the configured CMVideoDimensions
-//      so MainViewModel can pass them to the recorder. Throws on any
-//      configuration failure.
-//    stop() — calls SCStream.stopCapture(); drops the stream reference.
+//    - `start(filter:previewSink:)` — builds an `SCStreamConfiguration`
+//      (1080p60 BGRA + 48 kHz stereo audio), creates the stream,
+//      registers self as both delegate and sample handler, and starts
+//      capture. Returns the configured `CMVideoDimensions`. Throws on
+//      any configuration failure.
+//    - `stop()` — calls `SCStream.stopCapture()` and drops the
+//      reference.
 //
-//  Permission: ScreenCaptureKit routes through TCC "Screen & System Audio
-//  Recording." First call will fail with a no-permission error if the
-//  user hasn't authorized the bundle in System Settings → Privacy & Security
-//  → Screen Recording. MainViewModel handles the prompt (see Phase 5.4
-//  requestScreenCapturePermissionIfNeeded) before start() is called.
+//  Permission: ScreenCaptureKit routes through TCC "Screen & System
+//  Audio Recording." `MainViewModel` handles the prompt
+//  (`requestScreenCapturePermissionIfNeeded`) before `start()` is
+//  called.
 //
-//  Frame status: SCStream emits a frame for every refresh cycle, including
-//  no-change "idle" frames that don't carry pixel data. We filter to
-//  SCFrameStatus.complete so the preview layer and the recorder only see
-//  buffers with real content.
+//  Frame status: `SCStream` emits a frame for every refresh cycle,
+//  including no-change "idle" frames with no real pixel data. The
+//  service filters to `SCFrameStatus.complete` so only buffers with
+//  fresh content reach the preview layer and the recorder.
 //
 
 import Foundation
@@ -56,21 +54,21 @@ final class ScreenCaptureService: NSObject, @unchecked Sendable, SCStreamOutput,
     private weak var previewSinkLayer: SampleBufferPreviewLayer?
     private var activeDimensions: CMVideoDimensions = .init(width: 0, height: 0)
 
-    /// Set by MainViewModel before start(). Receives each non-idle frame
-    /// so the Recorder can append when isRecording is true. (The Recorder
-    /// itself ignores buffers when its writer is not running, matching
-    /// the camera-path contract — see Recorder.appendVideo().)
+    /// Set by `MainViewModel` before `start()`. Receives each non-idle
+    /// frame so the recorder can append while `isRecording` is true.
+    /// (The recorder ignores buffers when its writer is not running,
+    /// matching the camera-path contract — see `Recorder.appendVideo()`.)
     var onRecordBuffer: ((CMSampleBuffer) -> Void)?
 
-    /// Phase 5b — SCStream system-audio buffers (PCM Float32 stereo at
-    /// 48 kHz, per SCStreamConfiguration). Wired to recorder.appendAudio
-    /// in MainViewModel for screen sources. AVAssetWriterInput configured
-    /// for AAC accepts PCM input in transcode mode, so no extra
-    /// conversion is needed.
+    /// `SCStream` system-audio buffers (PCM Float32 stereo at 48 kHz,
+    /// per `SCStreamConfiguration`). Wired to `recorder.appendAudio`
+    /// in `MainViewModel` for screen sources. `AVAssetWriterInput`
+    /// configured for AAC accepts PCM input in transcode mode, so no
+    /// extra conversion is needed.
     var onAudioBuffer: ((CMSampleBuffer) -> Void)?
 
-    /// Surfaces SCStreamDelegate.didStopWithError so MainViewModel can
-    /// react to a stream that died mid-capture (display unplugged,
+    /// Surfaces `SCStreamDelegate.didStopWithError` so `MainViewModel`
+    /// can react to a stream that dies mid-capture (display unplugged,
     /// captured window closed, permission revoked).
     var onStreamStopped: ((Error?) -> Void)?
 
@@ -86,34 +84,32 @@ final class ScreenCaptureService: NSObject, @unchecked Sendable, SCStreamOutput,
         self.previewSinkLayer = previewSink
 
         let config = SCStreamConfiguration()
-        // Lock 1080p60 to match the camera-path Recorder settings
-        // (Phase 5.6). Resolution comes from the configuration, not
-        // from the source — SCStream will scale/letterbox as needed.
+        // Lock 1080p60 to match the camera-path recorder settings.
+        // Resolution comes from the configuration, not from the
+        // source — SCStream scales / letterboxes as needed.
         config.width  = 1920
         config.height = 1080
         config.minimumFrameInterval = CMTime(value: 1, timescale: 60)
-        // BGRA — the Recorder's H.264 encoder accepts BGRA (it converts
-        // to YUV420 internally). Camera path uses 420v; SCStream's
-        // preferred format on Apple Silicon is BGRA; both produce H.264.
+        // BGRA: the recorder's H.264 encoder accepts BGRA (it
+        // converts to YUV420 internally), and BGRA is SCStream's
+        // preferred pixel format on Apple Silicon.
         config.pixelFormat = kCVPixelFormatType_32BGRA
-        // Small queue, drop late frames. SCStream blocks the system
-        // compositor briefly if its queue is full — keep it short.
+        // Small queue, drop late frames. SCStream briefly blocks the
+        // system compositor if its queue is full — keep it short.
         config.queueDepth  = 5
-        // Cursor is part of the captured frame. Creators almost always
-        // want it; UI flag for hiding it can come later if Brandon wants.
+        // Cursor is part of the captured frame.
         config.showsCursor = true
 
-        // Phase 5b — enable system-audio loopback. SCStream delivers
-        // PCM Float32 stereo at the configured rate via the .audio
-        // output type. Recorder's AAC writer accepts PCM in transcode
-        // mode, so we route SCStream audio buffers straight to
-        // recorder.appendAudio (see MainViewModel).
+        // System-audio loopback. SCStream delivers PCM Float32 stereo
+        // at the configured rate via the `.audio` output type; the
+        // recorder's AAC writer accepts PCM in transcode mode, so
+        // these buffers feed `recorder.appendAudio` directly.
         config.capturesAudio = true
         config.sampleRate    = 48_000
         config.channelCount  = 2
         // Suppress Recaptr's own audio output from the loopback (e.g.
-        // if a future monitor plays through system speakers, we don't
-        // want to feed it back into the recording).
+        // when the live monitor plays through system speakers, we
+        // don't want to feed it back into the recording).
         config.excludesCurrentProcessAudio = true
 
         let s = SCStream(filter: filter, configuration: config, delegate: self)
@@ -144,14 +140,12 @@ final class ScreenCaptureService: NSObject, @unchecked Sendable, SCStreamOutput,
 
     // MARK: - SCStreamOutput
     //
-    // Delegate methods are NOT marked `nonisolated` — that pattern
-    // tripped Swift 6 strict-concurrency warnings (the inferred main-
-    // actor isolation of stored properties leaked into the nonisolated
-    // function body). CameraCaptureService follows the same convention:
-    // delegate methods take their isolation from the class, not from an
-    // explicit annotation. Either way, SCStream calls these on the
-    // queue we registered (outputQueue) — the keyword only changes
-    // Swift's type-level view, not actual execution thread.
+    // Delegate methods intentionally take their isolation from the
+    // class rather than carrying explicit `nonisolated` annotations;
+    // marking them `nonisolated` trips Swift 6 strict-concurrency
+    // warnings when stored properties' inferred actor isolation leaks
+    // into the function body. `SCStream` calls these on the queue we
+    // registered, regardless of annotation.
 
     func stream(_ stream: SCStream,
                 didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
@@ -177,17 +171,17 @@ final class ScreenCaptureService: NSObject, @unchecked Sendable, SCStreamOutput,
             onRecordBuffer?(sampleBuffer)
 
         case .audio:
-            // Phase 5b — SCStream system audio. CMSampleBuffer carries
-            // PCM Float32 at the configured rate, with PTS in the same
-            // host-clock domain as video (so recorder.appendAudio's
+            // System-audio loopback. The `CMSampleBuffer` carries PCM
+            // Float32 at the configured rate, with PTS in the same
+            // host-clock domain as video (so the recorder's
             // session-anchor logic works without changes).
             onAudioBuffer?(sampleBuffer)
 
         case .microphone:
-            // macOS 15+ adds a separate .microphone output type. Not
-            // wired in Phase 5b — mic narration on top of system audio
-            // is Phase 6 work (would route through AudioMixer alongside
-            // SCStream system audio, with per-source levels).
+            // macOS 15+ adds a separate `.microphone` output type for
+            // narration-on-top-of-system-audio capture. Not wired —
+            // would route through the AudioMixer alongside SCStream
+            // system audio with per-source levels.
             break
 
         @unknown default:
@@ -197,12 +191,13 @@ final class ScreenCaptureService: NSObject, @unchecked Sendable, SCStreamOutput,
 
     // MARK: - SCStreamDelegate
     //
-    // Observed (2026-05-11 Phase 5 first run): SCStream can succeed
-    // startCapture() and then ~100ms later call this method with
-    // "Failed to find any displays or windows to capture" (-3801ish
-    // family). User-level recovery: hit Start Preview again. Underlying
-    // cause appears to be a stale SCContentFilter resolution; not yet
-    // worth auto-retrying because the second attempt always succeeds.
+    // `SCStream` can occasionally accept `startCapture()` and then,
+    // ~100 ms later, fire this method with "Failed to find any
+    // displays or windows to capture." The cause is a stale
+    // `SCContentFilter` resolution; the second attempt always
+    // succeeds, so we don't auto-retry — `onStreamStopped` lets
+    // `MainViewModel` surface the failure and the user can hit Start
+    // Preview again.
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
         print("ScreenCaptureService: stream stopped with error: \(error.localizedDescription)")
