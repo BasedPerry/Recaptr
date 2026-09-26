@@ -142,6 +142,9 @@ final class MainViewModel: ObservableObject {
     private var cameraService: CameraCaptureService?
     private var screenService: ScreenCaptureService?
     private let recorder = Recorder()
+    /// Plays SCStream system audio while monitoring a screen or
+    /// window capture. The mic monitor lives on the AudioMixer channel.
+    private let systemAudioMonitor = SystemAudioMonitor()
     private let audioMixer: AudioMixer
     private var activeDims: CMVideoDimensions = .init(width: 0, height: 0)
     private var hasAudio = false  // Snapshot at startRecording — locked until stopRecording
@@ -186,11 +189,13 @@ final class MainViewModel: ObservableObject {
         $monitorEnabled
             .sink { [weak self] enabled in
                 self?.audioMixer.channel(at: 0)?.setMonitor(enabled: enabled)
+                self?.systemAudioMonitor.setEnabled(enabled)
             }
             .store(in: &cancellables)
         $monitorVolume
             .sink { [weak self] value in
                 self?.audioMixer.channel(at: 0)?.monitorVolume = Float(value)
+                self?.systemAudioMonitor.setVolume(Float(value))
             }
             .store(in: &cancellables)
 
@@ -1008,7 +1013,10 @@ final class MainViewModel: ObservableObject {
             }
             self?.recorder.appendVideo(sb)
         }
-        svc.onAudioBuffer  = { [weak self] sb in self?.recorder.appendAudio(sb) }
+        svc.onAudioBuffer  = { [weak self] sb in
+            self?.recorder.appendAudio(sb)
+            self?.systemAudioMonitor.feed(sb)
+        }
         svc.onStreamStopped = { [weak self] error in
             Task { @MainActor in
                 guard let self else { return }
@@ -1044,6 +1052,7 @@ final class MainViewModel: ObservableObject {
             Task { await svc.stop() }
         }
         hasScreenAudio = false
+        systemAudioMonitor.stop()
 
         previewSinkLayer.flush()
         // Clear the cached preview frame so a stale frame from this

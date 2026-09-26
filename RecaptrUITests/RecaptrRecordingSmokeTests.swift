@@ -22,7 +22,9 @@ final class RecaptrRecordingSmokeTests: XCTestCase {
 
     @MainActor
     func testScreenRecording() throws {
-        let probe = try record(modeKey: "2", seconds: 6)
+        // Monitor on, so system-audio playback runs alongside the
+        // recorder for the whole take.
+        let probe = try record(modeKey: "2", seconds: 6, monitor: true)
         XCTAssertEqual(probe.videoTracks, 1)
         XCTAssertGreaterThan(probe.duration, 4)
         // SCStream only delivers frames when the screen changes, so a
@@ -59,7 +61,7 @@ final class RecaptrRecordingSmokeTests: XCTestCase {
     }
 
     @MainActor
-    private func record(modeKey: String, seconds: TimeInterval) throws -> Probe {
+    private func record(modeKey: String, seconds: TimeInterval, monitor: Bool = false) throws -> Probe {
         let app = XCUIApplication()
         // Ignore saved window state so every run starts with the
         // capture window open.
@@ -79,6 +81,12 @@ final class RecaptrRecordingSmokeTests: XCTestCase {
         }
         // Let the preview settle so the format lock and audio are live.
         Thread.sleep(forTimeInterval: 3)
+        if monitor {
+            window.typeKey("k", modifierFlags: .command)
+            let toggle = app.buttons["monitorToggle"]
+            XCTAssertTrue(waitUntil(timeout: 3, { (toggle.value as? String) == "On" }),
+                          "Monitor did not switch on")
+        }
 
         window.typeKey("r", modifierFlags: .command)
         Thread.sleep(forTimeInterval: seconds)
