@@ -1374,7 +1374,10 @@ final class MainViewModel: ObservableObject {
         if let err = rec.lastAppendError {
             recPart += " appendErr=\(err)"
         }
-        let mixPart = "mix=\(mix.mixedFramesEmitted)f ticks=\(mix.ticks)"
+        var mixPart = "mix=\(mix.mixedFramesEmitted)f ticks=\(mix.ticks)"
+        if mix.catchUpChunks > 0 {
+            mixPart += " caughtUp=\(mix.catchUpChunks)"
+        }
         let chPart = mix.channels.map { ch -> String in
             var s = "\(ch.label):"
             if ch.deviceLabel != "—" {

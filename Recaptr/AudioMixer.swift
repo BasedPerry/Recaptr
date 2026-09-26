@@ -101,6 +101,8 @@ struct AudioMixerStats: Equatable {
     var running: Bool = false
     var mixedFramesEmitted: Int = 0
     var ticks: Int = 0
+    /// Chunks emitted late to catch up with the clock (system busy).
+    var catchUpChunks: Int = 0
     var channels: [AudioInputChannelStats] = []
 }
 
@@ -1024,6 +1026,7 @@ final class AudioMixer: @unchecked Sendable {
         sampleClock = 0
         mixedFramesEmitted = 0
         ticks = 0
+        catchUpChunks = 0
         let hostClock = CMClockGetHostTimeClock()
         startClockTime = CMClockGetTime(hostClock)
         print("AudioMixer: start clock anchored at host time \(CMTimeGetSeconds(startClockTime))s")
@@ -1039,6 +1042,19 @@ final class AudioMixer: @unchecked Sendable {
 
         scheduleStartWatchdog(attempt: 1)
         startRuntimeWatchdog()
+
+        // UI tests: `-RecaptrUITestStallMixer <seconds>` blocks the
+        // emission queue 6 s after start, like a heavily loaded system
+        // delaying the mixer's timer.
+        if UserDefaults.standard.bool(forKey: "RecaptrUITesting") {
+            let stall = UserDefaults.standard.double(forKey: "RecaptrUITestStallMixer")
+            if stall > 0 {
+                emissionQueue.asyncAfter(deadline: .now() + 6) {
+                    print("AudioMixer: TEST stalling emission for \(stall) s")
+                    Thread.sleep(forTimeInterval: stall)
+                }
+            }
+        }
 
         // UI tests: `-RecaptrUITestSimulateAudioReset notify|silent`
         // stops the device engines 6 s after start, as macOS does on
@@ -1204,6 +1220,33 @@ final class AudioMixer: @unchecked Sendable {
         guard running else { return }
         ticks &+= 1
 
+        // Emit every chunk that's due by the host clock, not one per
+        // tick. A dispatch timer that falls behind (busy system, 4K
+        // encoding, background throttling) drops the missed firings;
+        // emitting one chunk per tick then made the audio timeline run
+        // slow: a 17.5-minute 4K take ended 2.0 s short of the video
+        // and a 2 s stall lost exactly 2 s (2026-09-26). Catching up
+        // keeps audio locked to real time.
+        guard startClockTime.isValid else { emitChunk(); return }
+        let elapsed = CMTimeGetSeconds(CMTimeSubtract(CMClockGetTime(CMClockGetHostTimeClock()), startClockTime))
+        let due = Int64(elapsed * outputFormat.sampleRate)
+        var emitted = 0
+        while sampleClock + Int64(chunkFrames) <= due, emitted < maxCatchUpChunks {
+            emitChunk()
+            emitted += 1
+        }
+        if emitted > 1 { catchUpChunks &+= emitted - 1 }
+    }
+
+    /// Upper bound on chunks emitted in one tick (~10 s of audio), so
+    /// a very long stall can't produce one enormous burst.
+    private let maxCatchUpChunks = 470
+    /// Chunks emitted late to catch up with the clock. Diagnostic.
+    private(set) var catchUpChunks = 0
+
+    /// Pull one chunk from every armed channel, mix, limit, and emit
+    /// the mix plus per-source buffers at the next sample-clock PTS.
+    private func emitChunk() {
         let frames = chunkFrames
         let sampleCount = Int(frames) * Int(kMixerChannels)
 
@@ -1343,6 +1386,7 @@ final class AudioMixer: @unchecked Sendable {
             running: running,
             mixedFramesEmitted: mixedFramesEmitted,
             ticks: ticks,
+            catchUpChunks: catchUpChunks,
             channels: channels.map { $0.snapshot() }
         )
     }
