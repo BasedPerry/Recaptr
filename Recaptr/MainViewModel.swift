@@ -1425,6 +1425,13 @@ final class MainViewModel: ObservableObject {
                 try reader.start()
                 while try await provider.next() != nil { markerRanges += 1 }
             }
+            // Every audio track's length: per-source tracks must match
+            // each other and the video, or they drift out of sync.
+            var trackLengths: [String] = []
+            for t in audioTracks {
+                trackLengths.append(String(format: "%.2f", try await t.load(.timeRange).duration.seconds))
+            }
+            let videoLength = try await videoTracks.first?.load(.timeRange).duration.seconds ?? 0
             var enabledAudio = 0
             for t in audioTracks where try await t.load(.isEnabled) { enabledAudio += 1 }
             var fps: Float = 0
@@ -1442,8 +1449,8 @@ final class MainViewModel: ObservableObject {
                     transfer = tf == (kCMFormatDescriptionTransferFunction_ITU_R_709_2 as String) ? "709" : tf
                 }
             }
-            let probeSummary = String(format: "Probe → %.2fs total · video tracks=%d · fps=%.2f · video %@ %.1f Mbps · transfer=%@ · audio tracks=%d (enabled %d) · marker ranges=%d · %@",
-                                      dur, videoTracks.count, fps, codec, videoMbps, transfer, audioTracks.count, enabledAudio, markerRanges, audioDetail)
+            let probeSummary = String(format: "Probe → %.2fs total · video tracks=%d · fps=%.2f · video %@ %.1f Mbps · transfer=%@ · audio tracks=%d (enabled %d) · marker ranges=%d · lengths video %.2f audio [%@] · %@",
+                                      dur, videoTracks.count, fps, codec, videoMbps, transfer, audioTracks.count, enabledAudio, markerRanges, videoLength, trackLengths.joined(separator: ", ") as NSString, audioDetail)
             lastFileProbeSummary = probeSummary
             // Combine with the recording summary so the final status
             // shows both "what we tried to record" and "what's actually

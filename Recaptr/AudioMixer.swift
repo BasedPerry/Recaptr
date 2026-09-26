@@ -297,6 +297,10 @@ nonisolated final class AudioInputChannel: @unchecked Sendable {
         lastRecoveryReason = reason
     }
 
+    /// UI tests only: while set, `start()` fails as if the device had
+    /// vanished (an HDMI mode change resetting a capture card's audio).
+    var unavailableUntilForTesting: Date?
+
     /// UI tests only: stop the engine the way macOS does on a hardware
     /// change, optionally without the notification (a silent stall).
     func simulateEngineStopForTesting(notify: Bool) {
@@ -397,6 +401,9 @@ nonisolated final class AudioInputChannel: @unchecked Sendable {
 
     func start() throws {
         guard !running else { return }
+        if let until = unavailableUntilForTesting, Date() < until {
+            throw CaptureError.configurationFailed("\(label): device unavailable (test)")
+        }
         if isExternal {
             // No engine: buffers arrive through `pushExternal`. The
             // converter is built from the first buffer's format.
@@ -456,7 +463,8 @@ nonisolated final class AudioInputChannel: @unchecked Sendable {
         try engine.start()
         running = true
         tapCallCount = 0
-        lock.lock(); deliveredSinceStart = false; lock.unlock()
+        // A successful start clears any error from an earlier attempt.
+        lock.lock(); deliveredSinceStart = false; lastError = nil; lock.unlock()
         print("AudioInputChannel[\(label)]: engine started")
     }
 
@@ -1013,6 +1021,12 @@ final class AudioMixer: @unchecked Sendable {
             DispatchQueue.main.asyncAfter(deadline: .now() + 6) { [weak self] in
                 guard let self, self.running else { return }
                 print("AudioMixer: TEST simulating audio reset (\(mode))")
+                if mode == "down", let ch = self.channels.first(where: { $0.running && !$0.isExternal }) {
+                    // Source device gone for 3 s, then back.
+                    ch.unavailableUntilForTesting = Date().addingTimeInterval(3)
+                    ch.stop()
+                    return
+                }
                 for ch in self.channels where ch.running {
                     ch.simulateEngineStopForTesting(notify: mode == "notify")
                 }
@@ -1031,12 +1045,14 @@ final class AudioMixer: @unchecked Sendable {
     private var runtimeWatchdog: DispatchSourceTimer?
     private var lastPushed: [ObjectIdentifier: (frames: Int, since: Date)] = [:]
     private var failedRecoveries: [ObjectIdentifier: Int] = [:]
+    private var nextRetry: [ObjectIdentifier: Date] = [:]
     private let stallTimeout: TimeInterval = 1.5
     private let maxConsecutiveRecoveries = 5
 
     private func startRuntimeWatchdog() {
         lastPushed = [:]
         failedRecoveries = [:]
+        nextRetry = [:]
         let t = DispatchSource.makeTimerSource(queue: .main)
         // Start after the startup watchdog's window (4 x 0.6 s) so the
         // two never restart the same slow-starting channel.
@@ -1049,8 +1065,19 @@ final class AudioMixer: @unchecked Sendable {
     private func checkForStalls() {
         guard running else { return }
         let now = Date()
-        for ch in channels where ch.enabled && ch.running && !ch.isExternal {
+        for ch in channels where ch.isArmed && !ch.isExternal {
             let id = ObjectIdentifier(ch)
+            // A channel that's down (a restart failed, device briefly
+            // gone during an HDMI mode change) is retried with back-off
+            // instead of being left dead for the rest of the session.
+            guard ch.running else {
+                if now >= (nextRetry[id] ?? .distantPast) {
+                    let attempt = (failedRecoveries[id] ?? 0) + 1
+                    nextRetry[id] = now.addingTimeInterval(min(5, 1.5 * Double(attempt)))
+                    recover(ch, reason: "device unavailable")
+                }
+                continue
+            }
             let pushed = ch.pushedFrameCount
             guard let last = lastPushed[id], last.frames == pushed else {
                 if lastPushed[id] != nil { failedRecoveries[id] = 0 }
@@ -1066,29 +1093,26 @@ final class AudioMixer: @unchecked Sendable {
 
     /// Restart one channel in place. Main queue.
     private func recover(_ ch: AudioInputChannel, reason: String) {
-        guard running, ch.enabled, !ch.isExternal else { return }
+        guard running, ch.isArmed, !ch.isExternal else { return }
         let id = ObjectIdentifier(ch)
         let failures = (failedRecoveries[id] ?? 0) + 1
         failedRecoveries[id] = failures
-        guard failures <= maxConsecutiveRecoveries else {
-            if failures == maxConsecutiveRecoveries + 1 {
-                ch.stop()
-                ch.recordStartFailure("stopped delivering audio and could not be restarted")
-                print("AudioMixer: giving up on '\(ch.label)'")
-                onChannelEvent?("\(ch.label) audio stopped and could not be restarted. Check the device.")
-            }
-            return
+        if failures == maxConsecutiveRecoveries + 1 {
+            // Say so once, then keep retrying quietly with back-off;
+            // the track keeps running with silence meanwhile.
+            onChannelEvent?("\(ch.label) audio keeps dropping out. Recaptr will keep retrying; check the device.")
         }
-        print("AudioMixer: recovering '\(ch.label)' (\(reason))")
+        print("AudioMixer: recovering '\(ch.label)' (\(reason), attempt \(failures))")
         ch.stop()
         do {
             try ch.start()
             ch.startMonitorIfNeeded()
             ch.noteRecovery(reason: reason)
-            onChannelEvent?("\(ch.label) audio restarted (\(reason)).")
+            if failures <= maxConsecutiveRecoveries {
+                onChannelEvent?("\(ch.label) audio restarted (\(reason)).")
+            }
         } catch {
             ch.recordStartFailure(error.localizedDescription)
-            onChannelEvent?("\(ch.label) audio failed to restart: \(error.localizedDescription)")
         }
     }
 
@@ -1165,11 +1189,18 @@ final class AudioMixer: @unchecked Sendable {
         var isolated: [(label: String, samples: UnsafeMutablePointer<Float>)] = []
         defer { for item in isolated { item.samples.deallocate() } }
 
-        for ch in channels where ch.enabled && ch.running {
-            anyChannelActive = true
+        // Every armed channel emits a buffer every tick, silence while
+        // it's down (restarting, device gone). Skipping a down channel
+        // made its per-source track shorter than the others, so
+        // everything after the gap played early: a 5-minute 4K take
+        // lost 2.4 s of game audio this way (2026-09-26).
+        for ch in channels where ch.isArmed {
             let own = UnsafeMutablePointer<Float>.allocate(capacity: sampleCount)
             own.initialize(repeating: 0, count: sampleCount)
-            _ = ch.pull(intoSummed: own, frames: frames)
+            if ch.running {
+                anyChannelActive = true
+                _ = ch.pull(intoSummed: own, frames: frames)
+            }
             for i in 0..<sampleCount { working[i] += own[i] }
             isolated.append((ch.label, own))
         }
