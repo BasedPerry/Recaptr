@@ -1,102 +1,42 @@
+//
+//  Glass.swift
+//  Recaptr
+//
+//  The one Liquid Glass primitive for Recaptr's floating chrome.
+//
+//  Everything is system glass with nothing drawn on top: no tint
+//  gradient, no hairline stroke, no manual shadow. That keeps every
+//  surface under the control of the user's system settings (the
+//  Liquid Glass look slider in System Settings > Appearance, Light /
+//  Dark, Reduce Transparency, Increase Contrast), and changes to those
+//  settings apply live without a relaunch.
+//
+//  Rules for callers:
+//    - One glass layer per surface. Controls inside a glass pill are
+//      plain (borderless) so glass never stacks on glass.
+//    - `interactive: true` only when the glass itself is the control
+//      (for example a standalone icon button), not for a container
+//      that merely holds controls.
+//    - Do not add tints or overlays. Color belongs to content (record
+//      red, meters), not to the glass.
+//
+
 import SwiftUI
-import AppKit
-
-/// Generic Liquid Glass background container clipped to any Shape.
-///
-/// Uses `.glassEffect()` on macOS 26+, falls back to
-/// `NSVisualEffectView` with the `.hudWindow` material on earlier
-/// systems. Both paths render a translucent surface with a hairline
-/// white edge.
-struct GlassCard<S: Shape>: View {
-    let shape: S
-    init(_ shape: S) { self.shape = shape }
-    var body: some View {
-        Group {
-            if #available(macOS 26.0, *) {
-                Color.clear
-                    .glassEffect()
-                    .clipShape(shape)
-                    .overlay(shape.stroke(.white.opacity(0.06), lineWidth: 1))
-            } else {
-                VisualEffectView(material: .hudWindow, blending: .withinWindow)
-                    .clipShape(shape)
-                    .overlay(shape.stroke(.white.opacity(0.06), lineWidth: 1))
-            }
-        }
-    }
-}
-
-/// AppKit `NSVisualEffectView` wrapper for SwiftUI. Used as the
-/// pre-macOS-26 fallback for Liquid Glass surfaces.
-struct VisualEffectView: NSViewRepresentable {
-    let material: NSVisualEffectView.Material
-    let blending: NSVisualEffectView.BlendingMode
-    func makeNSView(context: Context) -> NSVisualEffectView {
-        let v = NSVisualEffectView()
-        v.material = material; v.blendingMode = blending
-        v.state = .active; v.isEmphasized = true
-        return v
-    }
-    func updateNSView(_ nsView: NSVisualEffectView, context: Context) {}
-}
-
-// MARK: - Brand Liquid Glass capsule
-
-/// Capsule-shaped Liquid Glass background used by the floating chrome
-/// pills (source switcher, audio module, recording controls, telemetry).
-///
-/// Renders translucent — no solid color overlay — so the preview
-/// behind the pill remains visible. An optional `topTint` paints a
-/// faint top-down gradient in the supplied color for brand hinting
-/// without compromising translucency.
-struct BrandGlassCapsule: ViewModifier {
-    let topTint: Color?
-
-    func body(content: Content) -> some View {
-        content
-            .background(
-                ZStack {
-                    // Translucent glass surface.
-                    Group {
-                        if #available(macOS 26.0, *) {
-                            Color.clear.glassEffect()
-                        } else {
-                            VisualEffectView(material: .hudWindow,
-                                             blending: .withinWindow)
-                        }
-                    }
-                    .clipShape(Capsule())
-
-                    // Optional top-down tint gradient. Low alpha so the
-                    // preview behind the pill still shows through.
-                    if let tint = topTint {
-                        Capsule().fill(
-                            LinearGradient(
-                                stops: [
-                                    .init(color: tint.opacity(0.14), location: 0.0),
-                                    .init(color: .clear,             location: 1.0),
-                                ],
-                                startPoint: .top,
-                                endPoint: .bottom
-                            )
-                        )
-                    }
-                }
-            )
-            // Hairline edge defines the pill's contour at low alpha.
-            .overlay(
-                Capsule()
-                    .strokeBorder(Color.white.opacity(0.10), lineWidth: 0.5)
-            )
-            .clipShape(Capsule())
-    }
-}
 
 extension View {
-    /// Apply the Liquid Glass capsule background to this view. Pass
-    /// an optional `topTint` color (e.g. `.violet`) to add a faint
-    /// gradient hint at the top edge.
+    /// Apply Recaptr's standard Liquid Glass background in `shape`.
+    func recaptrGlass(
+        in shape: some Shape = Capsule(),
+        interactive: Bool = false
+    ) -> some View {
+        glassEffect(.regular.interactive(interactive), in: shape)
+    }
+
+    /// Temporary shim while call sites migrate to `recaptrGlass`.
+    /// `topTint` is ignored on purpose. Removed at the end of the
+    /// component migration.
+    @available(*, deprecated, renamed: "recaptrGlass(in:interactive:)")
     func brandGlassCapsule(topTint: Color? = nil) -> some View {
-        modifier(BrandGlassCapsule(topTint: topTint))
+        recaptrGlass()
     }
 }

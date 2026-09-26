@@ -61,7 +61,11 @@ struct ContentViewNext: View {
             }
 
             // Layer 3 — Floating chrome (fades on idle).
-            chromeLayer
+            // One container for every floating glass surface so the
+            // system renders them as a single glass layer.
+            GlassEffectContainer {
+                chromeLayer
+            }
                 .opacity(chromeOpacity)
                 .allowsHitTesting(chromeOpacity > 0.05)
                 .animation(.easeInOut(duration: 0.35), value: chromeOpacity)
@@ -182,24 +186,16 @@ struct ContentViewNext: View {
         } label: {
             Image(systemName: "gearshape")
                 .font(.system(size: 15, weight: .medium))
-                .foregroundStyle(Color.recaptrTextSecondary)
-                .frame(width: 40, height: 40)
-                // True Liquid Glass circle — matches the three pills.
-                .background(
-                    Group {
-                        if #available(macOS 26.0, *) {
-                            Color.clear.glassEffect().clipShape(Circle())
-                        } else {
-                            VisualEffectView(material: .hudWindow,
-                                             blending: .withinWindow)
-                                .clipShape(Circle())
-                        }
-                    }
-                )
-                .overlay(Circle().strokeBorder(Color.white.opacity(0.10), lineWidth: 0.5))
+                .frame(width: 28, height: 28)
         }
-        .buttonStyle(.plain)
+        // System glass button: follows the Liquid Glass look setting
+        // and gets the native hover / press response for free.
+        .buttonStyle(.glass)
+        .buttonBorderShape(.circle)
+        .controlSize(.large)
         .help("Settings (⌘,)")
+        .accessibilityLabel("Settings")
+        .accessibilityIdentifier("settingsButton")
         .popover(isPresented: $showSettings, arrowEdge: .top) {
             SettingsPopover()
                 .environmentObject(vm)
