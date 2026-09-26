@@ -14,6 +14,10 @@
 //  Screenshot, Record, and Marker actions are wired as closures so
 //  the parent view owns their behavior.
 //
+//  The pill is the only glass layer. Side buttons are borderless on
+//  purpose: glass buttons inside a glass pill would stack glass on
+//  glass, which Apple's Liquid Glass guidance says to avoid.
+//
 
 import SwiftUI
 
@@ -24,12 +28,15 @@ struct RecordingControlsPill: View {
     var onToggleRecord: () -> Void
     var onMark: () -> Void
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     var body: some View {
         HStack(spacing: 28) {
             sideButton(
                 icon: "camera.viewfinder",
                 label: "Screenshot",
                 enabled: true,
+                id: "screenshotButton",
                 action: onScreenshot
             )
             recordButton
@@ -37,14 +44,14 @@ struct RecordingControlsPill: View {
                 icon: "bookmark.fill",
                 label: "Clip Marker",
                 enabled: isRecording,
+                id: "markerButton",
                 action: onMark
             )
         }
         .padding(.horizontal, 22)
         .padding(.vertical, 12)
-        // Neutral glass background — keeps the record button as the
-        // loudest element rather than competing with the source pill.
-        .brandGlassCapsule(topTint: nil)
+        // Neutral glass so the record button stays the loudest element.
+        .recaptrGlass()
     }
 
     // MARK: Side button (Screenshot / Marker)
@@ -54,18 +61,21 @@ struct RecordingControlsPill: View {
         icon: String,
         label: String,
         enabled: Bool,
+        id: String,
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
             Image(systemName: icon)
                 .font(.system(size: 16, weight: .medium))
-                .foregroundStyle(enabled ? Color.recaptrTextSecondary : Color.recaptrTextDim)
+                .foregroundStyle(enabled ? .secondary : .quaternary)
                 .frame(width: 36, height: 36)
                 .contentShape(Circle())
         }
         .buttonStyle(.plain)
         .disabled(!enabled)
         .help(label)
+        .accessibilityLabel(label)
+        .accessibilityIdentifier(id)
     }
 
     // MARK: Record button
@@ -89,14 +99,11 @@ struct RecordingControlsPill: View {
                             )
                     } else {
                         Circle()
-                            .stroke(
-                                Color.recaptrTextSecondary.opacity(0.55),
-                                lineWidth: 2.5
-                            )
+                            .stroke(.secondary, lineWidth: 2.5)
                     }
                 }
                 .frame(width: 60, height: 60)
-                .animation(.easeInOut(duration: 0.25), value: isRecording)
+                .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: isRecording)
 
                 // Inner indicator morphs between circle (idle) and
                 // rounded square (recording).
@@ -111,64 +118,45 @@ struct RecordingControlsPill: View {
                             .frame(width: 44, height: 44)
                     }
                 }
-                .animation(.spring(duration: 0.28, bounce: 0.35), value: isRecording)
+                .animation(reduceMotion ? nil : .spring(duration: 0.28, bounce: 0.35),
+                           value: isRecording)
             }
             .contentShape(Circle())
         }
         .buttonStyle(.plain)
         .disabled(!canRecord && !isRecording)
         .help(isRecording ? "Stop Recording" : "Start Recording")
+        .accessibilityLabel(isRecording ? "Stop Recording" : "Start Recording")
+        .accessibilityIdentifier("recordButton")
     }
 }
 
 // MARK: - Preview
 
-#Preview("Recording Controls — idle / recording") {
-    PreviewWrapper()
-        .frame(width: 420, height: 280)
-        .background(Color.recaptrBackground)
+#Preview("Recording Controls, Dark") {
+    ChromePreviewStage { RecordingControlsPreview() }
+        .frame(width: 1200, height: 300)
+        .preferredColorScheme(.dark)
 }
 
-private struct PreviewWrapper: View {
-    @State private var recA = false
-    @State private var recB = true
+#Preview("Recording Controls, Light") {
+    ChromePreviewStage { RecordingControlsPreview() }
+        .frame(width: 1200, height: 300)
+        .preferredColorScheme(.light)
+}
+
+private struct RecordingControlsPreview: View {
+    @State private var idle = false
+    @State private var recording = true
 
     var body: some View {
-        VStack(spacing: 32) {
-            stateBlock("IDLE · CAN RECORD") {
-                RecordingControlsPill(
-                    isRecording: recA,
-                    canRecord: true,
-                    onScreenshot: { },
-                    onToggleRecord: { recA.toggle() },
-                    onMark: { }
-                )
-            }
-            stateBlock("RECORDING IN PROGRESS") {
-                RecordingControlsPill(
-                    isRecording: recB,
-                    canRecord: true,
-                    onScreenshot: { },
-                    onToggleRecord: { recB.toggle() },
-                    onMark: { }
-                )
-            }
-        }
-        .padding(40)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-    }
-
-    @ViewBuilder
-    private func stateBlock<Content: View>(
-        _ label: String,
-        @ViewBuilder _ content: () -> Content
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(label)
-                .font(BrandFont.mono(weight: .regular, size: 10).swiftUI)
-                .tracking(1.6)
-                .foregroundStyle(Color.recaptrAccent)
-            content()
+        VStack(spacing: 24) {
+            RecordingControlsPill(isRecording: idle, canRecord: true,
+                                  onScreenshot: { }, onToggleRecord: { idle.toggle() },
+                                  onMark: { })
+            RecordingControlsPill(isRecording: recording, canRecord: true,
+                                  onScreenshot: { }, onToggleRecord: { recording.toggle() },
+                                  onMark: { })
         }
     }
 }

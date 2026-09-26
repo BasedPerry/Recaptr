@@ -31,12 +31,48 @@ extension View {
     ) -> some View {
         glassEffect(.regular.interactive(interactive), in: shape)
     }
+}
 
-    /// Temporary shim while call sites migrate to `recaptrGlass`.
-    /// `topTint` is ignored on purpose. Removed at the end of the
-    /// component migration.
-    @available(*, deprecated, renamed: "recaptrGlass(in:interactive:)")
-    func brandGlassCapsule(topTint: Color? = nil) -> some View {
-        recaptrGlass()
+// MARK: - Preview stage
+
+#if DEBUG
+/// Renders chrome over the three backdrops the manual test matrix
+/// uses: bright, dark, and busy. Previews cannot simulate the Liquid
+/// Glass look slider, so they supplement the running-app matrix
+/// rather than replace it.
+struct ChromePreviewStage<Content: View>: View {
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        HStack(spacing: 0) {
+            stage(Color.white)
+            stage(Color.recaptrBackground)
+            stage(busy)
+        }
+    }
+
+    private func stage(_ backdrop: some View) -> some View {
+        ZStack {
+            backdrop
+            content.padding(24)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// Stand-in for a busy camera feed: saturated, high-contrast
+    /// color with hard edges behind the glass.
+    private var busy: some View {
+        ZStack {
+            AngularGradient(colors: [.orange, .pink, .blue, .green, .yellow, .orange],
+                            center: .center)
+            VStack(spacing: 14) {
+                ForEach(0..<8, id: \.self) { i in
+                    Rectangle()
+                        .fill(i.isMultiple(of: 2) ? Color.black : Color.white)
+                        .frame(height: 6)
+                }
+            }
+        }
     }
 }
+#endif

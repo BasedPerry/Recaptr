@@ -6,12 +6,13 @@
 //  Screen / Camera) paired with a dropdown listing the available
 //  sources within the active mode.
 //
-//  The mode selector is a custom segmented control rather than a
-//  native Picker(.segmented) because macOS's segmented Picker does
-//  not reliably render both an SF Symbol and a text label per
-//  segment. The custom HStack version renders icon + label
-//  consistently and lets each segment pick up its own brand tint
-//  when active.
+//  The mode selector is a custom segmented control. Retested on
+//  macOS 27.0 (2026-09-26): native Picker(.segmented) still renders
+//  text only (the SF Symbols are dropped) and draws its own bezel
+//  track, which would sit as a second surface inside the glass pill.
+//  The custom version has no track: plain segments, with the active
+//  one marked by a system-accent capsule that slides between
+//  segments. The accent follows the user's accent color setting.
 //
 
 import SwiftUI
@@ -65,59 +66,56 @@ struct SourceSwitcherPill: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 11)
-        .brandGlassCapsule(topTint: .violet)
+        .recaptrGlass()
     }
 
     // MARK: Mode picker
 
+    @Namespace private var selectionNamespace
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     private var modePicker: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: 2) {
             ForEach(SourceMode.allCases) { mode in
                 modeSegment(for: mode)
             }
         }
-        .padding(3)
-        .background(
-            Capsule().fill(Color.white.opacity(0.04))
-        )
-        .overlay(
-            Capsule().strokeBorder(Color.white.opacity(0.06), lineWidth: 0.5)
-        )
-        .animation(.easeOut(duration: 0.18), value: activeMode)
+        .animation(reduceMotion ? nil : .snappy(duration: 0.22), value: activeMode)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Capture mode")
+        .accessibilityIdentifier("modePicker")
     }
 
-    @ViewBuilder
     private func modeSegment(for mode: SourceMode) -> some View {
         let isActive = mode == activeMode
-        let tint = tintFor(mode)
-
-        Button {
+        return Button {
             activeMode = mode
         } label: {
-            HStack(spacing: 6) {
-                Image(systemName: mode.systemImage)
-                    .font(.system(size: 12, weight: .semibold))
-                Text(mode.label)
-                    .font(.system(size: 13, weight: .medium))
-            }
-            .foregroundStyle(isActive ? Color.graphite : Color.recaptrTextSecondary)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 7)
-            .background(
-                Capsule().fill(isActive ? tint.opacity(0.92) : Color.clear)
-            )
-            .contentShape(Capsule())
+            Label(mode.label, systemImage: mode.systemImage)
+                .labelStyle(.titleAndIcon)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(isActive ? AnyShapeStyle(.white) : AnyShapeStyle(.secondary))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background {
+                    if isActive {
+                        Capsule()
+                            .fill(Color.accentColor)
+                            .matchedGeometryEffect(id: "selection", in: selectionNamespace)
+                    }
+                }
+                .contentShape(Capsule())
         }
         .buttonStyle(.plain)
         .help(mode.label)
+        .accessibilityAddTraits(isActive ? [.isSelected] : [])
+        .accessibilityIdentifier("mode-\(mode.rawValue)")
     }
 
-    /// Per-mode brand tint. Selected segment fills with this; the
-    /// dropdown icon borrows it as well.
-    private var activeModeTint: Color { tintFor(activeMode) }
-
-    private func tintFor(_ mode: SourceMode) -> Color {
-        switch mode {
+    /// Per-mode brand tint. Mode identity only (the dropdown icon);
+    /// selection itself uses the system accent.
+    private var activeModeTint: Color {
+        switch activeMode {
         case .window: return .restore
         case .screen: return .violet
         case .camera: return .signal
@@ -169,30 +167,27 @@ struct SourceSwitcherPill: View {
 
 // MARK: - Preview
 
-#Preview("Source Switcher") {
-    PreviewWrapper()
-        .frame(width: 720, height: 360)
-        .background(Color.recaptrBackground)
+#Preview("Source Switcher, Dark") {
+    ChromePreviewStage { SourceSwitcherPreview() }
+        .frame(width: 1800, height: 360)
+        .preferredColorScheme(.dark)
 }
 
-private struct PreviewWrapper: View {
-    @State private var modeA: SourceMode = .window
-    @State private var modeB: SourceMode = .screen
-    @State private var modeC: SourceMode = .camera
+#Preview("Source Switcher, Light") {
+    ChromePreviewStage { SourceSwitcherPreview() }
+        .frame(width: 1800, height: 360)
+        .preferredColorScheme(.light)
+}
 
+private struct SourceSwitcherPreview: View {
+    @State private var modeA: SourceMode = .window
+    @State private var modeB: SourceMode = .camera
     @State private var srcA: String? = "win-3599"
-    @State private var srcB: String? = "disp-1"
-    @State private var srcC: String? = "cam-4kx"
+    @State private var srcB: String? = "cam-4kx"
 
     private let windows: [PickableSource] = [
         .init(id: "win-3599", name: "Safari · #3599"),
         .init(id: "win-9785", name: "Xcode · #9785"),
-        .init(id: "win-7028", name: "Terminal · #7028"),
-    ]
-    private let screens: [PickableSource] = [
-        .init(id: "disp-1", name: "Built-in Retina"),
-        .init(id: "disp-2", name: "Acer CB281HK"),
-        .init(id: "disp-3", name: "Gigabyte M32U"),
     ]
     private let cameras: [PickableSource] = [
         .init(id: "cam-4kx", name: "Elgato 4K X"),
@@ -200,32 +195,11 @@ private struct PreviewWrapper: View {
     ]
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 24) {
-            stateBlock("WINDOW MODE", modeBinding: $modeA, srcBinding: $srcA, sources: windows)
-            stateBlock("SCREEN MODE", modeBinding: $modeB, srcBinding: $srcB, sources: screens)
-            stateBlock("CAMERA MODE", modeBinding: $modeC, srcBinding: $srcC, sources: cameras)
-        }
-        .padding(40)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-    }
-
-    @ViewBuilder
-    private func stateBlock(
-        _ label: String,
-        modeBinding: Binding<SourceMode>,
-        srcBinding: Binding<String?>,
-        sources: [PickableSource]
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(label)
-                .font(BrandFont.mono(weight: .regular, size: 11).swiftUI)
-                .tracking(1.6)
-                .foregroundStyle(Color.recaptrAccent)
-            SourceSwitcherPill(
-                activeMode: modeBinding,
-                sourcesForActiveMode: sources,
-                selectedSourceID: srcBinding
-            )
+        VStack(spacing: 24) {
+            SourceSwitcherPill(activeMode: $modeA, sourcesForActiveMode: windows,
+                               selectedSourceID: $srcA)
+            SourceSwitcherPill(activeMode: $modeB, sourcesForActiveMode: cameras,
+                               selectedSourceID: $srcB)
         }
     }
 }

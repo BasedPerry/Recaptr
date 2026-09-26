@@ -30,6 +30,9 @@ struct AudioModule: View {
     @State private var peakDbfs: Float = -120
     @State private var isDraggingVolume: Bool = false
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.colorSchemeContrast) private var contrast
+
     /// 30Hz timer publisher driving VU updates. Auto-connected so
     /// it runs while the view is mounted, fires on main.
     private let vuTimer = Timer.publish(every: 1.0 / 30.0, on: .main, in: .common).autoconnect()
@@ -49,8 +52,9 @@ struct AudioModule: View {
         .frame(width: baseWidth + (isDraggingVolume ? 4 : 0))
         .frame(height: totalHeight)
         .padding(.vertical, 12)
-        .brandGlassCapsule(topTint: .violet)
-        .animation(.spring(duration: 0.22, bounce: 0.18), value: isDraggingVolume)
+        .recaptrGlass()
+        .animation(reduceMotion ? nil : .spring(duration: 0.22, bounce: 0.18),
+                   value: isDraggingVolume)
         .onReceive(vuTimer) { _ in
             if let levels = vm.currentAudioLevels() {
                 rmsDbfs = levels.rms
@@ -83,10 +87,10 @@ struct AudioModule: View {
             VStack(spacing: 2) {
                 Text(volumeReadout)
                     .font(BrandFont.mono(weight: .medium, size: 11).swiftUI)
-                    .foregroundStyle(vm.monitorEnabled ? Color.recaptrTextPrimary : Color.recaptrTextMuted)
+                    .foregroundStyle(vm.monitorEnabled ? .primary : .tertiary)
                 Text(peakReadout)
                     .font(BrandFont.mono(weight: .regular, size: 9).swiftUI)
-                    .foregroundStyle(Color.recaptrTextMuted)
+                    .foregroundStyle(.secondary)
             }
         }
         .padding(.horizontal, 8)
@@ -98,7 +102,8 @@ struct AudioModule: View {
         Button(action: toggleMonitor) {
             Image(systemName: vm.monitorEnabled ? "headphones" : "headphones.slash")
                 .font(.system(size: 18, weight: .medium))
-                .foregroundStyle(vm.monitorEnabled ? Color.signal : Color.recaptrTextSecondary)
+                .foregroundStyle(vm.monitorEnabled ? AnyShapeStyle(Color.signal)
+                                                   : AnyShapeStyle(.secondary))
                 .frame(width: 32, height: 32)
                 .background(
                     Circle()
@@ -108,6 +113,9 @@ struct AudioModule: View {
         }
         .buttonStyle(.plain)
         .help(vm.monitorEnabled ? "Mute monitor" : "Unmute monitor")
+        .accessibilityLabel("Monitor")
+        .accessibilityValue(vm.monitorEnabled ? "On" : "Muted")
+        .accessibilityIdentifier("monitorToggle")
     }
 
     /// Draggable monitor volume column. Dims (but stays draggable)
@@ -120,9 +128,7 @@ struct AudioModule: View {
             let isLive = vm.monitorEnabled
 
             ZStack(alignment: .bottom) {
-                Capsule()
-                    .fill(Color.beige.opacity(0.10))
-                    .frame(width: trackColumnWidth)
+                trackBackground
 
                 Capsule()
                     .fill(
@@ -142,14 +148,14 @@ struct AudioModule: View {
                     .animation(.easeOut(duration: 0.2), value: isLive)
 
                 Circle()
-                    .fill(Color.beigeBright)
+                    .fill(.primary)
                     .frame(width: 10, height: 10)
                     .opacity(isLive ? 1.0 : 0.5)
                     .position(
                         x: geo.size.width / 2,
                         y: max(5, h - h * fill)
                     )
-                    .shadow(color: .black.opacity(0.4), radius: 2)
+                    .shadow(radius: 1)
                     .allowsHitTesting(false)
 
                 // Wider invisible hit target so the user doesn't have
@@ -169,6 +175,17 @@ struct AudioModule: View {
             }
         }
         .frame(maxWidth: .infinity)
+        // Expose the custom track to accessibility as a real slider,
+        // so VoiceOver, Accessibility Inspector, and UI tests can read
+        // and adjust the monitor volume.
+        .accessibilityRepresentation {
+            Slider(value: $vm.monitorVolume, in: volumeMin...volumeMax, step: 0.05) {
+                Text("Monitor volume")
+            }
+            .accessibilityValue("\(Int(vm.monitorVolume * 100)) percent"
+                                + (vm.monitorEnabled ? "" : ", muted"))
+        }
+        .accessibilityIdentifier("monitorVolume")
     }
 
     /// Read-only VU column. RMS fills bottom-up; a thin peak tick
@@ -180,9 +197,7 @@ struct AudioModule: View {
             let peakFill = CGFloat(normalize(peakDbfs))
 
             ZStack(alignment: .bottom) {
-                Capsule()
-                    .fill(Color.beige.opacity(0.08))
-                    .frame(width: trackColumnWidth)
+                trackBackground
 
                 // Signal-green at quiet (good headroom), violet mid,
                 // red at the clipping danger zone (>-3 dBFS).
@@ -204,7 +219,7 @@ struct AudioModule: View {
                 // Peak tick floats above the RMS body. Decays via the
                 // mixer's built-in smoothing on peakDbfs.
                 Rectangle()
-                    .fill(Color.beigeBright)
+                    .fill(.primary)
                     .frame(width: trackColumnWidth + 2, height: 1.5)
                     .position(
                         x: geo.size.width / 2,
@@ -216,15 +231,26 @@ struct AudioModule: View {
             }
         }
         .frame(maxWidth: .infinity)
+        .accessibilityElement()
+        .accessibilityLabel("Input level")
+        .accessibilityValue(peakReadout)
     }
 
     // MARK: - Helpers
+
+    /// Empty-track fill. System fill so it follows appearance; one
+    /// step stronger under Increase Contrast.
+    private var trackBackground: some View {
+        Capsule()
+            .fill(contrast == .increased ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.quaternary))
+            .frame(width: trackColumnWidth)
+    }
 
     private func sectionLabel(_ text: String) -> some View {
         Text(text)
             .font(BrandFont.mono(weight: .medium, size: 9).swiftUI)
             .tracking(1.6)
-            .foregroundStyle(Color.recaptrAccent)
+            .foregroundStyle(.secondary)
     }
 
     private var volumeFraction: Double {
@@ -263,26 +289,14 @@ struct AudioModule: View {
 
 // MARK: - Preview
 
-#Preview("Audio Module") {
-    PreviewWrapper()
-        .frame(width: 460, height: 420)
-        .background(Color.recaptrBackground)
+#Preview("Audio Module, Dark") {
+    ChromePreviewStage { AudioModule().environmentObject(MainViewModel()) }
+        .frame(width: 600, height: 400)
+        .preferredColorScheme(.dark)
 }
 
-private struct PreviewWrapper: View {
-    @StateObject private var vm = MainViewModel()
-
-    var body: some View {
-        HStack(spacing: 40) {
-            VStack {
-                Text("CURRENT STATE")
-                    .font(BrandFont.mono(weight: .regular, size: 10).swiftUI)
-                    .tracking(1.6)
-                    .foregroundStyle(Color.recaptrAccent)
-                AudioModule()
-                    .environmentObject(vm)
-            }
-        }
-        .padding(30)
-    }
+#Preview("Audio Module, Light") {
+    ChromePreviewStage { AudioModule().environmentObject(MainViewModel()) }
+        .frame(width: 600, height: 400)
+        .preferredColorScheme(.light)
 }

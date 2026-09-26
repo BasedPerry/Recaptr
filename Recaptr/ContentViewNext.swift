@@ -147,7 +147,6 @@ struct ContentViewNext: View {
                     selectedSourceID: selectedSourceIDBinding
                 )
                 .padding(.top, 14)
-                .shadow(color: .black.opacity(0.45), radius: 14, y: 4)
             }
             .overlay(alignment: .topTrailing) {
                 settingsButton
@@ -161,7 +160,6 @@ struct ContentViewNext: View {
                 AudioModule()
                     .environmentObject(vm)
                     .padding(.trailing, 16)
-                    .shadow(color: .black.opacity(0.45), radius: 14, y: 4)
             }
             .overlay(alignment: .bottom) {
                 RecordingControlsPill(
@@ -172,14 +170,12 @@ struct ContentViewNext: View {
                     onMark: handleMark
                 )
                 .padding(.bottom, 28)
-                .shadow(color: .black.opacity(0.45), radius: 14, y: 4)
             }
             .overlay(alignment: .bottomLeading) {
                 if vm.isRecording {
                     telemetryFloating
                         .padding(.bottom, 28)
                         .padding(.leading, 20)
-                        .shadow(color: .black.opacity(0.40), radius: 10, y: 3)
                         .transition(reduceMotion
                                     ? .opacity
                                     : .opacity.combined(with: .move(edge: .bottom)))
@@ -223,10 +219,10 @@ struct ContentViewNext: View {
                 .shadow(color: .red.opacity(0.65), radius: 4)
             Text(formattedElapsed)
                 .font(BrandFont.mono(weight: .medium, size: 13).swiftUI)
-                .foregroundStyle(Color.recaptrTextPrimary)
+                .foregroundStyle(.primary)
             Text("v=\(vm.liveStats.videoAccepted) a=\(vm.liveStats.audioAccepted)")
                 .font(BrandFont.mono(weight: .regular, size: 11).swiftUI)
-                .foregroundStyle(Color.recaptrTextMuted)
+                .foregroundStyle(.tertiary)
 
             // Markers count surface. Renders once at least one marker
             // has been dropped. Signal-green bookmark icon + count,
@@ -239,7 +235,7 @@ struct ContentViewNext: View {
                         .foregroundStyle(Color.signal)
                     Text("\(vm.markers.count)")
                         .font(BrandFont.mono(weight: .medium, size: 11).swiftUI)
-                        .foregroundStyle(Color.recaptrTextPrimary)
+                        .foregroundStyle(.primary)
                 }
                 .transition(reduceMotion ? .opacity : .opacity.combined(with: .scale))
             }
@@ -248,8 +244,10 @@ struct ContentViewNext: View {
                    value: vm.markers.count)
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
-        // Same brand-glass capsule as the main pills.
-        .brandGlassCapsule(topTint: .red)
+        // Plain glass: the red dot already says "recording".
+        .recaptrGlass()
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("telemetryPill")
     }
 
     private var formattedElapsed: String {
@@ -268,13 +266,13 @@ struct ContentViewNext: View {
         VStack(spacing: 10) {
             Image(systemName: "video.fill.badge.plus")
                 .font(.system(size: 36, weight: .regular))
-                .foregroundStyle(Color.recaptrTextMuted)
+                .foregroundStyle(.tertiary)
             Text("Select a source to begin")
                 .font(BrandFont.body(weight: .medium, size: 15).swiftUI)
-                .foregroundStyle(Color.recaptrTextSecondary)
+                .foregroundStyle(.secondary)
             Text("Pick Window, Screen, or Camera from the switcher above.")
                 .font(BrandFont.body(weight: .regular, size: 12).swiftUI)
-                .foregroundStyle(Color.recaptrTextMuted)
+                .foregroundStyle(.tertiary)
         }
         .padding(24)
         .frame(maxWidth: 360)
@@ -297,6 +295,9 @@ struct ContentViewNext: View {
     /// any mouse move via `wakeChrome`.
     private func scheduleFade() {
         guard vm.selectedMainSource != nil else { return }  // keep visible when nothing selected
+        // Launch argument `-RecaptrKeepChromeVisible YES` disables the
+        // idle fade for UI tests and screenshot passes.
+        guard !UserDefaults.standard.bool(forKey: "RecaptrKeepChromeVisible") else { return }
         fadeTask?.cancel()
         fadeTask = Task { @MainActor in
             try? await Task.sleep(for: .seconds(fadeDelay))
@@ -492,8 +493,16 @@ struct ContentViewNext: View {
 
 // MARK: - Preview
 
-#Preview("ContentViewNext — QuickTime layout") {
+#Preview("Main window, Dark") {
     ContentViewNext()
         .environmentObject(MainViewModel())
         .frame(width: 1100, height: 700)
+        .preferredColorScheme(.dark)
+}
+
+#Preview("Main window, Light") {
+    ContentViewNext()
+        .environmentObject(MainViewModel())
+        .frame(width: 1100, height: 700)
+        .preferredColorScheme(.light)
 }
