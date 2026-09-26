@@ -49,6 +49,9 @@ final class RecaptrUITests: XCTestCase {
     @MainActor
     private func launchApp() -> XCUIApplication {
         let app = XCUIApplication()
+        // Ignore saved window state so every run starts with the
+        // capture window open.
+        app.launchArguments += ["-ApplePersistenceIgnoreState", "YES"]
         app.launchArguments += ["-RecaptrKeepChromeVisible", "YES"]
         app.launch()
         return app
