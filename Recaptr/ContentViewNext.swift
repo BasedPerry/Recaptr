@@ -45,6 +45,10 @@ struct ContentViewNext: View {
     // Soft brand-gradient halo pulsed on a successful screenshot.
     @State private var screenshotFlashOpacity: Double = 0
 
+    // System state the chrome follows.
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.appearsActive) private var appearsActive
+
     var body: some View {
         ZStack {
             // Layer 0 — graphite ground beneath the preview (visible
@@ -66,9 +70,12 @@ struct ContentViewNext: View {
             GlassEffectContainer {
                 chromeLayer
             }
-                .opacity(chromeOpacity)
+                // Dim when the window is inactive, like system chrome.
+                .opacity(chromeOpacity * (appearsActive ? 1.0 : 0.6))
                 .allowsHitTesting(chromeOpacity > 0.05)
-                .animation(.easeInOut(duration: 0.35), value: chromeOpacity)
+                .animation(reduceMotion ? .linear(duration: 0.1) : .easeInOut(duration: 0.35),
+                           value: chromeOpacity)
+                .animation(.easeInOut(duration: 0.2), value: appearsActive)
 
             // Layer 4 — screenshot flash. Brand-gradient angular
             // border, blurred for glow, pulses once on a successful
@@ -173,7 +180,9 @@ struct ContentViewNext: View {
                         .padding(.bottom, 28)
                         .padding(.leading, 20)
                         .shadow(color: .black.opacity(0.40), radius: 10, y: 3)
-                        .transition(.opacity.combined(with: .move(edge: .bottom)))
+                        .transition(reduceMotion
+                                    ? .opacity
+                                    : .opacity.combined(with: .move(edge: .bottom)))
                 }
             }
     }
@@ -232,10 +241,11 @@ struct ContentViewNext: View {
                         .font(BrandFont.mono(weight: .medium, size: 11).swiftUI)
                         .foregroundStyle(Color.recaptrTextPrimary)
                 }
-                .transition(.opacity.combined(with: .scale))
+                .transition(reduceMotion ? .opacity : .opacity.combined(with: .scale))
             }
         }
-        .animation(.spring(duration: 0.28, bounce: 0.35), value: vm.markers.count)
+        .animation(reduceMotion ? nil : .spring(duration: 0.28, bounce: 0.35),
+                   value: vm.markers.count)
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         // Same brand-glass capsule as the main pills.
@@ -268,6 +278,9 @@ struct ContentViewNext: View {
         }
         .padding(24)
         .frame(maxWidth: 360)
+        // Sits on the always-dark letterbox, not on glass, so pin
+        // the hierarchical styles to their dark variants.
+        .environment(\.colorScheme, .dark)
     }
 
     // MARK: - Fade behavior
@@ -399,9 +412,16 @@ struct ContentViewNext: View {
 
     /// Run the flash sequence. Long-ish ease-in-out on both sides
     /// (~250ms in, ~200ms hold, ~500ms out) so it reads as a calm
-    /// breath rather than a snap.
+    /// breath rather than a snap. With Reduce Motion on, it becomes a
+    /// brief static highlight with no animated ramp.
     private func triggerScreenshotFlash() {
         Task { @MainActor in
+            if reduceMotion {
+                screenshotFlashOpacity = 1.0
+                try? await Task.sleep(for: .milliseconds(450))
+                screenshotFlashOpacity = 0
+                return
+            }
             withAnimation(.easeInOut(duration: 0.25)) {
                 screenshotFlashOpacity = 1.0
             }
