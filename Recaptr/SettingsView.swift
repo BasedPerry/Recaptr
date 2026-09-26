@@ -3,18 +3,13 @@
 //  Recaptr
 //
 //  The macOS Settings window (Recaptr > Settings…, ⌘, or the gear
-//  button). Replaces the old gear popover, which crammed each audio
-//  channel into one row too wide for it and locked the device pickers
-//  whenever preview was running (which is always).
+//  button): app-wide settings only. Per-method tuning (sources,
+//  capture resolution, audio devices and gain, instant replay) lives
+//  in the source sidebar; monitor volume lives on the audio card.
 //
 //  Tabs:
-//    Audio        source audio, commentary mic, monitor
-//    Video        encoding, low-light noise reduction, instant replay
-//    Recording    save folder, last recording, diagnostics
+//    Recording    encoding preset, save folder, last recording
 //    Permissions  microphone, camera, screen recording
-//
-//  Audio devices apply live while previewing (MainViewModel
-//  .applyAudioSelectionChange) and lock only while recording.
 //
 
 import SwiftUI
@@ -25,12 +20,6 @@ struct SettingsView: View {
 
     var body: some View {
         TabView {
-            Tab("Audio", systemImage: "waveform") {
-                AudioSettingsTab()
-            }
-            Tab("Video", systemImage: "video") {
-                VideoSettingsTab()
-            }
             Tab("Recording", systemImage: "record.circle") {
                 RecordingSettingsTab()
             }
@@ -43,229 +32,6 @@ struct SettingsView: View {
     }
 }
 
-// MARK: - Audio
-
-private struct AudioSettingsTab: View {
-    @EnvironmentObject var vm: MainViewModel
-
-    var body: some View {
-        Form {
-            Section {
-                devicePicker(selection: $vm.ch1DeviceID, id: "sourceDevicePicker")
-                GainRow(gain: $vm.ch1Gain, locked: vm.isRecording)
-                LevelRow(channel: 0)
-            } header: {
-                Text("Source audio")
-            } footer: {
-                Text("Picked automatically to match the camera or capture card. Screen and Window sources record system audio instead.")
-            }
-
-            Section {
-                devicePicker(selection: $vm.ch2DeviceID, id: "micDevicePicker")
-                GainRow(gain: $vm.ch2Gain, locked: vm.isRecording)
-                LevelRow(channel: 1)
-            } header: {
-                Text("Commentary mic")
-            } footer: {
-                Text("Mixed on top of the source audio. With two sources, each also gets its own track in the file so you can rebalance later.")
-            }
-
-            Section {
-                Toggle("Listen while capturing", isOn: $vm.monitorEnabled)
-                LabeledContent("Volume") {
-                    HStack {
-                        Slider(value: $vm.monitorVolume, in: 0...1.5)
-                            .disabled(!vm.monitorEnabled)
-                        Text("\(Int(vm.monitorVolume * 100))%")
-                            .monospacedDigit()
-                            .foregroundStyle(.secondary)
-                            .frame(width: 44, alignment: .trailing)
-                    }
-                }
-            } header: {
-                Text("Monitor")
-            } footer: {
-                Text("Plays the source audio through your current output. Toggle with ⌘K. Your mic is never monitored.")
-            }
-
-            if vm.isRecording {
-                Section {
-                    Label("Devices are locked while recording.", systemImage: "lock.fill")
-                        .foregroundStyle(.secondary)
-                }
-            }
-        }
-        .formStyle(.grouped)
-        .frame(height: 660)
-    }
-
-    private func devicePicker(selection: Binding<String?>, id: String) -> some View {
-        Picker("Device", selection: selection) {
-            Text("None").tag(String?.none)
-            ForEach(vm.availableAudioSources) { src in
-                Text(src.name).tag(String?.some(src.id))
-            }
-        }
-        .disabled(vm.isRecording)
-        .accessibilityIdentifier(id)
-    }
-}
-
-private struct GainRow: View {
-    @Binding var gain: Double
-    let locked: Bool
-
-    var body: some View {
-        LabeledContent("Gain") {
-            HStack {
-                Slider(value: $gain, in: 0...1.5)
-                    .disabled(locked)
-                Text("\(Int(gain * 100))%")
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
-                    .frame(width: 44, alignment: .trailing)
-            }
-        }
-    }
-}
-
-/// Live level meter for one mixer channel, redrawn at 30 fps.
-private struct LevelRow: View {
-    @EnvironmentObject var vm: MainViewModel
-    let channel: Int
-
-    var body: some View {
-        LabeledContent("Level") {
-            TimelineView(.periodic(from: .now, by: 1.0 / 30.0)) { _ in
-                LevelMeter(levels: vm.channelLevels(channel))
-            }
-            .frame(height: 8)
-        }
-    }
-}
-
-private struct LevelMeter: View {
-    let levels: (rms: Float, peak: Float)?
-    @Environment(\.colorSchemeContrast) private var contrast
-
-    var body: some View {
-        GeometryReader { geo in
-            let w = geo.size.width
-            ZStack(alignment: .leading) {
-                Capsule()
-                    .fill(contrast == .increased ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.quaternary))
-                if let levels {
-                    Capsule()
-                        .fill(LinearGradient(
-                            stops: [
-                                .init(color: .signal, location: 0.0),
-                                .init(color: .signal, location: 0.6),
-                                .init(color: .warningAmber, location: 0.85),
-                                .init(color: .red, location: 1.0),
-                            ],
-                            startPoint: .leading, endPoint: .trailing))
-                        .mask(alignment: .leading) {
-                            Rectangle().frame(width: w * fraction(levels.rms))
-                        }
-                    Rectangle()
-                        .fill(.primary)
-                        .frame(width: 2)
-                        .offset(x: max(0, w * fraction(levels.peak) - 1))
-                        .opacity(levels.peak > -100 ? 0.8 : 0)
-                }
-            }
-        }
-        .accessibilityElement()
-        .accessibilityLabel("Level")
-        .accessibilityValue(levels.map { String(format: "%.0f dB peak", $0.peak) } ?? "No signal")
-    }
-
-    /// −60…0 dBFS → 0…1.
-    private func fraction(_ db: Float) -> CGFloat {
-        CGFloat(min(max((db + 60) / 60, 0), 1))
-    }
-}
-
-// MARK: - Video
-
-private struct VideoSettingsTab: View {
-    @EnvironmentObject var vm: MainViewModel
-
-    var body: some View {
-        Form {
-            Section {
-                Picker("Capture resolution", selection: $vm.captureResolution) {
-                    ForEach(CaptureResolution.allCases) { r in
-                        Text(r.label).tag(r)
-                    }
-                }
-                .disabled(vm.isRecording)
-                .onChange(of: vm.captureResolution) { _, _ in
-                    // The format is locked when the camera session starts.
-                    if vm.isPreviewing, !vm.isRecording,
-                       vm.selectedMainSource?.kind == .camera {
-                        Task { await vm.startPreview() }
-                    }
-                }
-                Picker("Encoding", selection: $vm.videoQuality) {
-                    ForEach(VideoQuality.allCases) { q in
-                        Text(q.label).tag(q)
-                    }
-                }
-                .disabled(vm.isRecording)
-            } footer: {
-                Text(videoFooter)
-            }
-
-            Section {
-                Toggle("Low-light noise reduction", isOn: $vm.lowLightNoiseReduction)
-                    .disabled(vm.isRecording || !vm.lowLightNoiseReductionSupported)
-                    .onChange(of: vm.lowLightNoiseReduction) { _, _ in
-                        // Applied when the camera session is built.
-                        if vm.isPreviewing, !vm.isRecording,
-                           vm.selectedMainSource?.kind == .camera {
-                            Task { await vm.startPreview() }
-                        }
-                    }
-            } footer: {
-                Text(vm.lowLightNoiseReductionSupported
-                     ? "Cleans up grain in dim webcam footage. It changes the image, so it's off by default."
-                     : "Not supported by the current source. Available with webcams and Continuity Camera, not capture cards.")
-            }
-
-            Section {
-                Toggle("Instant replay", isOn: $vm.instantReplay)
-                    .disabled(vm.isRecording)
-                    .onChange(of: vm.instantReplay) { _, _ in
-                        // The buffer is attached when the stream starts.
-                        if vm.isPreviewing, !vm.isRecording,
-                           vm.selectedMainSource?.kind != .camera {
-                            Task { await vm.startPreview() }
-                        }
-                    }
-            } footer: {
-                Text("Keeps the last 15 seconds of a Screen or Window source in memory. Press ⇧⌘R to save it as a clip, recording or not.")
-            }
-        }
-        .formStyle(.grouped)
-        .frame(height: 440)
-    }
-}
-
-extension VideoSettingsTab {
-    /// What's being captured now and what it costs per hour.
-    var videoFooter: String {
-        var lines: [String] = []
-        if let size = vm.activeCaptureSize {
-            let gb = vm.videoQuality.gigabytesPerHour(width: size.width, height: size.height)
-            let mbps = vm.videoQuality.bitrate(width: size.width, height: size.height) / 1_000_000
-            lines.append("Capturing \(size.width)×\(size.height). \(vm.videoQuality.label): \(mbps) Mbps, about \(Int(gb.rounded())) GB per hour.")
-        }
-        lines.append("Capture resolution applies to cameras and capture cards; Screen and Window sources record at 1080p. HEVC keeps more detail than H.264 at the same size and works in Final Cut. Use Compatible only for tools that can't open HEVC.")
-        return lines.joined(separator: " ")
-    }
-}
-
 // MARK: - Recording
 
 private struct RecordingSettingsTab: View {
@@ -273,6 +39,19 @@ private struct RecordingSettingsTab: View {
 
     var body: some View {
         Form {
+            Section {
+                Picker("Encoding", selection: $vm.videoQuality) {
+                    ForEach(VideoQuality.allCases) { q in
+                        Text(q.label).tag(q)
+                    }
+                }
+                .disabled(vm.isRecording)
+            } header: {
+                Text("Video")
+            } footer: {
+                Text(encodingFooter)
+            }
+
             Section("Save location") {
                 SaveFolderRow(storage: vm.recordingStorage, locked: vm.isRecording)
             }
@@ -303,7 +82,20 @@ private struct RecordingSettingsTab: View {
             }
         }
         .formStyle(.grouped)
-        .frame(height: 360)
+        .frame(height: 480)
+    }
+}
+
+extension RecordingSettingsTab {
+    /// Bitrate and size per hour at the current capture size.
+    var encodingFooter: String {
+        var text = "HEVC keeps more detail than H.264 at the same size and works in Final Cut. Use Compatible only for tools that can't open HEVC."
+        if let size = vm.activeCaptureSize {
+            let mbps = vm.videoQuality.bitrate(width: size.width, height: size.height) / 1_000_000
+            let gb = Int(vm.videoQuality.gigabytesPerHour(width: size.width, height: size.height).rounded())
+            text = "At \(size.width)×\(size.height): \(mbps) Mbps, about \(gb) GB per hour. " + text
+        }
+        return text
     }
 }
 

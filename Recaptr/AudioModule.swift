@@ -2,7 +2,7 @@
 //  AudioModule.swift
 //  Recaptr
 //
-//  Right-edge floating audio pill: the audio controls you need
+//  Right-edge floating audio card: the audio controls you need
 //  mid-session, readable at a glance.
 //
 //    Top       Monitor toggle (headphones). ⌘K does the same.
@@ -67,8 +67,10 @@ struct AudioModule: View {
             }
         }
         .padding(.vertical, 14)
-        .padding(.horizontal, 10)
-        .recaptrGlass()
+        .padding(.horizontal, 12)
+        // A card, not a capsule: with two or three columns the pill
+        // got wide enough that its fully rounded ends looked bloated.
+        .recaptrGlass(in: RoundedRectangle(cornerRadius: 22, style: .continuous))
         .onHover { isHovering = $0 }
         .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: showNumbers)
         .animation(reduceMotion ? nil : .easeOut(duration: 0.2), value: vm.hasMic)

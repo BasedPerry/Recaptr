@@ -92,11 +92,23 @@ final class DeviceCatalog: ObservableObject {
                     cameraUniqueID: nil
                 ))
             }
+            let myBundleID = Bundle.main.bundleIdentifier
             for w in content.windows {
-                guard let appName = w.owningApplication?.applicationName else { continue }
+                // Only windows a person would pick: normal-layer app
+                // windows with a title, a real size, not Recaptr's own.
+                // Without this the list filled with system surfaces
+                // (Notification Center, WindowManager, loginwindow,
+                // untitled helper windows).
+                guard let app = w.owningApplication,
+                      app.bundleIdentifier != myBundleID,
+                      w.windowLayer == 0,
+                      w.frame.width >= 200, w.frame.height >= 120,
+                      let title = w.title, !title.isEmpty
+                else { continue }
+                let appName = app.applicationName
                 screenSources.append(VideoSource(
                     id: "window:\(w.windowID)",
-                    name: "Window — \(appName) #\(w.windowID)",
+                    name: "Window — \(appName): \(title)",
                     kind: .screenWindow,
                     displayID: nil,
                     windowID: w.windowID,

@@ -33,6 +33,10 @@ struct ContentViewNext: View {
 
     @EnvironmentObject var vm: MainViewModel
 
+    /// Source sidebar open? While it is, the floating source pill
+    /// steps aside (the sidebar is its expanded form).
+    @Binding var sidebarVisible: Bool
+
     // Local UI state.
     @State private var activeMode: SourceMode = .camera
     @Environment(\.openSettings) private var openSettings
@@ -102,6 +106,7 @@ struct ContentViewNext: View {
         //   ⌘K   Toggle monitor mute
         //   ⌘B   Drop clip marker
         //   ⇧⌘R  Save instant replay (last 15 s, screen sources)
+        //   ⌃⌘S  Show / hide the source sidebar
         //   ⌘1   Switch to Window mode
         //   ⌘2   Switch to Screen mode
         //   ⌘3   Switch to Camera mode
@@ -143,12 +148,23 @@ struct ContentViewNext: View {
     private var chromeLayer: some View {
         Color.clear
             .overlay(alignment: .top) {
-                SourceSwitcherPill(
-                    activeMode: activeModeBinding,
-                    sourcesForActiveMode: pickableSources(for: activeMode),
-                    selectedSourceID: selectedSourceIDBinding
-                )
+                HStack(spacing: 10) {
+                    sidebarButton
+                    if !sidebarVisible {
+                        SourceSwitcherPill(
+                            activeMode: activeModeBinding,
+                            sourcesForActiveMode: pickableSources(for: activeMode),
+                            selectedSourceID: selectedSourceIDBinding
+                        )
+                        .transition(reduceMotion
+                                    ? .opacity
+                                    : .move(edge: .leading).combined(with: .opacity))
+                    }
+                }
                 .padding(.top, 14)
+                .frame(maxWidth: .infinity, alignment: sidebarVisible ? .leading : .center)
+                .padding(.leading, sidebarVisible ? 16 : 0)
+                .animation(reduceMotion ? nil : .smooth(duration: 0.35), value: sidebarVisible)
             }
             .overlay(alignment: .topTrailing) {
                 settingsButton
@@ -183,6 +199,24 @@ struct ContentViewNext: View {
                                     : .opacity.combined(with: .move(edge: .bottom)))
                 }
             }
+    }
+
+    // MARK: - Sidebar button
+
+    private var sidebarButton: some View {
+        Button {
+            sidebarVisible.toggle()
+        } label: {
+            Image(systemName: "sidebar.left")
+                .font(.system(size: 15, weight: .medium))
+                .frame(width: 28, height: 28)
+        }
+        .buttonStyle(.glass)
+        .buttonBorderShape(.circle)
+        .controlSize(.large)
+        .help(sidebarVisible ? "Hide sources (⌃⌘S)" : "Show sources and tuning (⌃⌘S)")
+        .accessibilityLabel(sidebarVisible ? "Hide sidebar" : "Show sidebar")
+        .accessibilityIdentifier("sidebarToggle")
     }
 
     // MARK: - Gear button
@@ -494,6 +528,8 @@ struct ContentViewNext: View {
                 .keyboardShortcut("2", modifiers: [.command])
             Button("") { selectMode(.camera) }
                 .keyboardShortcut("3", modifiers: [.command])
+            Button("") { sidebarVisible.toggle() }
+                .keyboardShortcut("s", modifiers: [.command, .control])
         }
         .hidden()
         .accessibilityHidden(true)
@@ -514,15 +550,45 @@ struct ContentViewNext: View {
 // MARK: - Preview
 
 #Preview("Main window, Dark") {
-    ContentViewNext()
+    ContentViewNext(sidebarVisible: .constant(false))
         .environmentObject(MainViewModel())
         .frame(width: 1100, height: 700)
         .preferredColorScheme(.dark)
 }
 
 #Preview("Main window, Light") {
-    ContentViewNext()
+    ContentViewNext(sidebarVisible: .constant(false))
         .environmentObject(MainViewModel())
         .frame(width: 1100, height: 700)
         .preferredColorScheme(.light)
+}
+
+// MARK: - Root
+
+/// Window content: the source sidebar (collapsed by default) and the
+/// capture surface.
+struct RecaptrRootView: View {
+    @EnvironmentObject var vm: MainViewModel
+    @AppStorage("RecaptrSidebarVisible") private var sidebarVisible = false
+
+    var body: some View {
+        NavigationSplitView(columnVisibility: Binding(
+            get: { sidebarVisible ? .all : .detailOnly },
+            set: { sidebarVisible = ($0 != .detailOnly) }
+        )) {
+            SourceSidebar(isVisible: $sidebarVisible)
+                .navigationSplitViewColumnWidth(min: 300, ideal: 310, max: 380)
+        } detail: {
+            ContentViewNext(sidebarVisible: $sidebarVisible)
+        }
+        .navigationSplitViewStyle(.prominentDetail)
+        .onAppear {
+            // UI tests start from a known layout: sidebar closed. (A
+            // launch argument can't do this: it would override the
+            // stored value for the whole run, so toggling would fail.)
+            if UserDefaults.standard.bool(forKey: "RecaptrUITesting") {
+                sidebarVisible = false
+            }
+        }
+    }
 }

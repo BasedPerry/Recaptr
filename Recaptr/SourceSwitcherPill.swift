@@ -41,6 +41,61 @@ enum SourceMode: String, CaseIterable, Identifiable, Hashable {
     }
 }
 
+// MARK: - Mode segments (shared with the sidebar)
+
+/// Window / Screen / Camera switcher. Used by the floating pill and,
+/// when the sidebar is open, at the top of the sidebar (the pill's
+/// expanded form), so both look and behave the same.
+struct SourceModeSegments: View {
+    @Binding var activeMode: SourceMode
+    /// Tighter spacing for the sidebar's width.
+    var compact = false
+
+    @Namespace private var selectionNamespace
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(SourceMode.allCases) { mode in
+                segment(for: mode)
+            }
+        }
+        .animation(reduceMotion ? nil : .snappy(duration: 0.22), value: activeMode)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Capture mode")
+        .accessibilityIdentifier("modePicker")
+    }
+
+    private func segment(for mode: SourceMode) -> some View {
+        let isActive = mode == activeMode
+        return Button {
+            activeMode = mode
+        } label: {
+            Label(mode.label, systemImage: mode.systemImage)
+                .labelStyle(.titleAndIcon)
+                .font(.system(size: compact ? 12 : 13, weight: .medium))
+                .lineLimit(1)
+                .fixedSize()
+                .foregroundStyle(isActive ? AnyShapeStyle(.white) : AnyShapeStyle(.secondary))
+                .padding(.horizontal, compact ? 6 : 12)
+                .padding(.vertical, 6)
+                .frame(maxWidth: compact ? .infinity : nil)
+                .background {
+                    if isActive {
+                        Capsule()
+                            .fill(Color.accentColor)
+                            .matchedGeometryEffect(id: "selection", in: selectionNamespace)
+                    }
+                }
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .help(mode.label)
+        .accessibilityAddTraits(isActive ? [.isSelected] : [])
+        .accessibilityIdentifier("mode-\(mode.rawValue)")
+    }
+}
+
 // MARK: - Source descriptor
 
 /// Minimal shape the switcher needs to render a source menu. The
@@ -71,45 +126,8 @@ struct SourceSwitcherPill: View {
 
     // MARK: Mode picker
 
-    @Namespace private var selectionNamespace
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
     private var modePicker: some View {
-        HStack(spacing: 2) {
-            ForEach(SourceMode.allCases) { mode in
-                modeSegment(for: mode)
-            }
-        }
-        .animation(reduceMotion ? nil : .snappy(duration: 0.22), value: activeMode)
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel("Capture mode")
-        .accessibilityIdentifier("modePicker")
-    }
-
-    private func modeSegment(for mode: SourceMode) -> some View {
-        let isActive = mode == activeMode
-        return Button {
-            activeMode = mode
-        } label: {
-            Label(mode.label, systemImage: mode.systemImage)
-                .labelStyle(.titleAndIcon)
-                .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(isActive ? AnyShapeStyle(.white) : AnyShapeStyle(.secondary))
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .background {
-                    if isActive {
-                        Capsule()
-                            .fill(Color.accentColor)
-                            .matchedGeometryEffect(id: "selection", in: selectionNamespace)
-                    }
-                }
-                .contentShape(Capsule())
-        }
-        .buttonStyle(.plain)
-        .help(mode.label)
-        .accessibilityAddTraits(isActive ? [.isSelected] : [])
-        .accessibilityIdentifier("mode-\(mode.rawValue)")
+        SourceModeSegments(activeMode: $activeMode)
     }
 
     /// Per-mode brand tint. Mode identity only (the dropdown icon);

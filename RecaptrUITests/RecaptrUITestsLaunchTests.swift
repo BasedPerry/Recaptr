@@ -44,7 +44,7 @@ final class RecaptrUITestsLaunchTests: XCTestCase {
 
         let settings = Self.settingsWindow(in: app)
         XCTAssertTrue(settings.waitForExistence(timeout: 5), "Settings window did not open")
-        for tab in ["Audio", "Video", "Recording", "Permissions"] {
+        for tab in ["Recording", "Permissions"] {
             settings.toolbars.buttons[tab].click()
             Thread.sleep(forTimeInterval: 0.5)
             let attachment = XCTAttachment(screenshot: settings.screenshot())
@@ -75,6 +75,42 @@ final class RecaptrUITestsLaunchTests: XCTestCase {
             shot.lifetime = .keepAlways
             add(shot)
         }
+    }
+
+    /// Main window with the source sidebar open (Elgato selected,
+    /// camera tuning showing).
+    @MainActor
+    func testSidebarScreenshot() throws {
+        let app = XCUIApplication()
+        app.launchArguments += ["-ApplePersistenceIgnoreState", "YES",
+                                "-RecaptrKeepChromeVisible", "YES",
+                                "-RecaptrUITesting", "YES"]
+        app.launch()
+        let toggle = app.buttons["sidebarToggle"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 10))
+        Thread.sleep(forTimeInterval: 3)
+        func capture(_ name: String) {
+            let shot = XCTAttachment(screenshot: app.windows.firstMatch.screenshot())
+            shot.name = "Launch, Sidebar \(name)"
+            shot.lifetime = .keepAlways
+            add(shot)
+        }
+        // Before / open / closed again: the preview must survive the
+        // sidebar moving it around.
+        capture("1 before")
+        toggle.click()
+        XCTAssertTrue(app.descendants(matching: .any)["sourceSidebar"].waitForExistence(timeout: 5))
+        Thread.sleep(forTimeInterval: 1.5)
+        capture("2 open")
+        // Switch type from the sidebar's own switcher.
+        app.buttons["mode-screen"].click()
+        Thread.sleep(forTimeInterval: 2)
+        capture("2b screen")
+        app.buttons["mode-camera"].click()
+        Thread.sleep(forTimeInterval: 2)
+        toggle.click()
+        Thread.sleep(forTimeInterval: 1.5)
+        capture("3 closed")
     }
 
     static func settingsWindow(in app: XCUIApplication) -> XCUIElement {

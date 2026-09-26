@@ -15,7 +15,7 @@ struct RecaptrApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ContentViewNext()
+            RecaptrRootView()
                 .environmentObject(vm)
         }
         // Hidden title bar so the preview surface extends edge-to-edge

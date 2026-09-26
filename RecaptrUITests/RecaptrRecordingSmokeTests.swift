@@ -74,29 +74,28 @@ final class RecaptrRecordingSmokeTests: XCTestCase {
         }
     }
 
-    /// The Settings device picker really changes the recorded audio:
-    /// pick a mic in Settings while previewing, record, and the mic
-    /// channel must capture and get its own track. (The old popover
-    /// picker was disabled whenever preview was running.)
+    /// The sidebar's mic picker really changes the recorded audio:
+    /// open the sidebar while previewing, pick a mic, record, and the
+    /// mic channel must capture and get its own track.
     @MainActor
-    func testMicChosenInSettingsIsRecorded() throws {
+    func testMicChosenInSidebarIsRecorded() throws {
         let probe = try record(modeKey: "3", seconds: 6) { app in
             Thread.sleep(forTimeInterval: 2)
-            app.buttons["settingsButton"].click()
-            let settings = app.windows.matching(NSPredicate(format: "identifier CONTAINS 'Settings'")).firstMatch
-            XCTAssertTrue(settings.waitForExistence(timeout: 5))
-            settings.toolbars.buttons["Audio"].click()
-            let picker = settings.popUpButtons["micDevicePicker"]
+            let toggle = app.buttons["sidebarToggle"]
+            toggle.click()
+            // Outside a Form the picker may not report as a pop-up
+            // button, so match the identifier on any element type.
+            let picker = app.descendants(matching: .any)["micDevicePicker"].firstMatch
             XCTAssertTrue(picker.waitForExistence(timeout: 5))
             XCTAssertTrue(picker.isEnabled, "Mic picker is disabled during preview")
             picker.click()
-            let item = settings.menuItems["Jump Desktop Microphone"]
+            let item = app.menuItems["Jump Desktop Microphone"]
             guard item.waitForExistence(timeout: 3) else {
-                settings.typeKey(.escape, modifierFlags: [])
+                app.typeKey(.escape, modifierFlags: [])
                 throw XCTSkip("Test mic input not available on this Mac")
             }
             item.click()
-            settings.typeKey("w", modifierFlags: .command)
+            toggle.click()
         }
         try assertChannelsCaptured(["Audio:", "Mic:"], in: probe)
         assertSourceTracks(probe)
