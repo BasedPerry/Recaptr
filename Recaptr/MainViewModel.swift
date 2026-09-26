@@ -183,6 +183,11 @@ final class MainViewModel: ObservableObject {
         audioMixer.onMixedSampleBuffer = { [weak self] sb in
             self?.recorder.appendAudio(sb)
         }
+        // Per-source tracks. The recorder drops these unless the
+        // recording was started with source tracks.
+        audioMixer.onChannelSampleBuffer = { [weak self] label, sb in
+            self?.recorder.appendAudio(sb, source: label)
+        }
 
         // Push live gain changes into the mixer. Gain is read on every
         // tap callback, so updating the channel.gain Float is enough —
@@ -1170,11 +1175,17 @@ final class MainViewModel: ObservableObject {
             print("Recaptr: disk space probe failed (continuing): \(error.localizedDescription)")
         }
 
+        // Two or more live sources: also write each one to its own
+        // track, so levels can be rebalanced in an editor.
+        let mixedSources = hasScreenAudio ? [] : audioMixer.runningChannelLabels
+        let sourceTracks = mixedSources.count >= 2 ? mixedSources : []
+
         do {
             let url = try await recorder.start(
                 width: activeDims.width,
                 height: activeDims.height,
                 withAudio: hasAudio,
+                sourceTracks: sourceTracks,
                 saveDirectory: saveDir
             )
             isRecording = true
@@ -1232,6 +1243,9 @@ final class MainViewModel: ObservableObject {
         if rec.videoDroppedNotReady > 0 || rec.videoAppendRejected > 0 {
             recPart += " vdrop(notReady/reject)=\(rec.videoDroppedNotReady)/\(rec.videoAppendRejected)"
         }
+        if rec.sourceTrackAccepted > 0 {
+            recPart += " src=\(rec.sourceTrackAccepted)"
+        }
         if let err = rec.lastAppendError {
             recPart += " appendErr=\(err)"
         }
@@ -1287,11 +1301,14 @@ final class MainViewModel: ObservableObject {
                 audioDetail = String(format: "audio: %.2fs / %@", aSeconds, fmtSummary)
             }
 
+            var enabledAudio = 0
+            for t in audioTracks where try await t.load(.isEnabled) { enabledAudio += 1 }
             var fps: Float = 0
             if let vTrack = videoTracks.first {
                 fps = try await vTrack.load(.nominalFrameRate)
             }
-            let probeSummary = String(format: "Probe → %.2fs total · video tracks=%d · fps=%.2f · %@", dur, videoTracks.count, fps, audioDetail)
+            let probeSummary = String(format: "Probe → %.2fs total · video tracks=%d · fps=%.2f · audio tracks=%d (enabled %d) · %@",
+                                      dur, videoTracks.count, fps, audioTracks.count, enabledAudio, audioDetail)
             lastFileProbeSummary = probeSummary
             // Combine with the recording summary so the final status
             // shows both "what we tried to record" and "what's actually

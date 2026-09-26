@@ -797,6 +797,11 @@ final class AudioMixer: @unchecked Sendable {
     /// Called on the mixer's emission queue with each mixed buffer.
     var onMixedSampleBuffer: ((CMSampleBuffer) -> Void)?
 
+    /// Called on the emission queue with each running channel's own
+    /// post-gain buffer (label, buffer), carrying the same PTS as the
+    /// mix. The recorder writes these as per-source tracks.
+    var onChannelSampleBuffer: ((String, CMSampleBuffer) -> Void)?
+
     private let emissionQueue = DispatchQueue(label: "recaptr.mixer.emission", qos: .userInitiated)
     private var timer: DispatchSourceTimer?
     private(set) var running = false
@@ -827,6 +832,11 @@ final class AudioMixer: @unchecked Sendable {
     }
 
     var allChannels: [AudioInputChannel] { channels }
+
+    /// Labels of channels currently feeding the mix.
+    var runningChannelLabels: [String] {
+        channels.filter { $0.enabled && $0.running }.map(\.label)
+    }
 
     var hasAnyEnabledChannel: Bool {
         channels.contains { $0.isArmed }
@@ -962,13 +972,19 @@ final class AudioMixer: @unchecked Sendable {
         // Working buffer, zeroed.
         var working = [Float](repeating: 0, count: sampleCount)
         var anyChannelActive = false
+        // Each channel is pulled into its own buffer so it can be
+        // emitted as a per-source track, then summed into the mix.
+        var isolated: [(label: String, samples: [Float])] = []
 
-        working.withUnsafeMutableBufferPointer { ptr in
-            guard let base = ptr.baseAddress else { return }
-            for ch in channels where ch.enabled && ch.running {
-                anyChannelActive = true
+        for ch in channels where ch.enabled && ch.running {
+            anyChannelActive = true
+            var own = [Float](repeating: 0, count: sampleCount)
+            own.withUnsafeMutableBufferPointer { ptr in
+                guard let base = ptr.baseAddress else { return }
                 _ = ch.pull(intoSummed: base, frames: frames)
             }
+            for i in 0..<sampleCount { working[i] += own[i] }
+            isolated.append((ch.label, own))
         }
 
         // If no channel is enabled+running, emit silence (still
@@ -978,12 +994,25 @@ final class AudioMixer: @unchecked Sendable {
         _ = anyChannelActive
 
         // Wrap in CMSampleBuffer.
+        // All buffers for this tick share one PTS, so build them all
+        // before advancing the sample clock.
         guard let fmt = formatDescription else { return }
         guard let sb = makeSampleBuffer(samples: working, frameCount: Int(frames), format: fmt) else { return }
+        var channelBuffers: [(String, CMSampleBuffer)] = []
+        if onChannelSampleBuffer != nil {
+            for (label, samples) in isolated {
+                if let csb = makeSampleBuffer(samples: samples, frameCount: Int(frames), format: fmt) {
+                    channelBuffers.append((label, csb))
+                }
+            }
+        }
         mixedFramesEmitted &+= Int(frames)
         sampleClock &+= Int64(frames)
 
         onMixedSampleBuffer?(sb)
+        for (label, csb) in channelBuffers {
+            onChannelSampleBuffer?(label, csb)
+        }
     }
 
     // MARK: - CMSampleBuffer construction

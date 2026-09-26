@@ -41,6 +41,7 @@ final class RecaptrRecordingSmokeTests: XCTestCase {
         // Capture cards and webcams run 30 or 60; anything lower means
         // the format lock regressed.
         XCTAssertGreaterThanOrEqual(probe.fps, 29)
+        XCTAssertEqual(probe.audioTracks, 1, "Single source should write one audio track")
         // An audio track full of zero-fill is a silent recording. The
         // channel must actually have pushed captured audio.
         if probe.status.contains("push=") {
@@ -59,6 +60,7 @@ final class RecaptrRecordingSmokeTests: XCTestCase {
                                extraArgs: ["-RecaptrUITestMicInput", "Jump Desktop Microphone"])
         XCTAssertGreaterThanOrEqual(probe.fps, 29)
         try assertChannelsCaptured(["Audio:", "Mic:"], in: probe)
+        assertSourceTracks(probe)
     }
 
     /// Narration over a screen capture: SCStream system audio and the
@@ -70,6 +72,14 @@ final class RecaptrRecordingSmokeTests: XCTestCase {
         XCTAssertEqual(probe.videoTracks, 1)
         XCTAssertTrue(probe.hasAudio)
         try assertChannelsCaptured(["System:", "Mic:"], in: probe)
+        assertSourceTracks(probe)
+    }
+
+    /// Two sources: the mix plus one track per source, with only the
+    /// mix enabled so players don't double the audio.
+    private func assertSourceTracks(_ probe: Probe) {
+        XCTAssertEqual(probe.audioTracks, 3, "Expected mix + 2 source tracks: \(probe.raw)")
+        XCTAssertEqual(probe.enabledAudioTracks, 1, "Only the mix should be enabled: \(probe.raw)")
     }
 
     /// Every named mixer channel is running and pushed real audio.
@@ -95,6 +105,8 @@ final class RecaptrRecordingSmokeTests: XCTestCase {
         var videoTracks: Int
         var fps: Double
         var hasAudio: Bool
+        var audioTracks: Int
+        var enabledAudioTracks: Int
     }
 
     @MainActor
@@ -152,7 +164,9 @@ final class RecaptrRecordingSmokeTests: XCTestCase {
             duration: number(in: raw, after: "Probe → ", until: "s") ?? 0,
             videoTracks: Int(number(in: raw, after: "video tracks=", until: " ") ?? 0),
             fps: number(in: raw, after: "fps=", until: " ") ?? 0,
-            hasAudio: !raw.contains("audio: NONE")
+            hasAudio: !raw.contains("audio: NONE"),
+            audioTracks: Int(number(in: raw, after: "audio tracks=", until: " ") ?? 0),
+            enabledAudioTracks: Int(number(in: raw, after: "(enabled ", until: ")") ?? 0)
         )
     }
 

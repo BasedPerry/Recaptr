@@ -63,6 +63,8 @@ struct RecorderStats: Equatable {
     var writerErrorDescription: String?
     /// Most recent append error thrown by either receiver.
     var lastAppendError: String?
+    /// Buffers accepted across the per-source audio tracks.
+    var sourceTrackAccepted: Int = 0
 }
 
 final class Recorder: @unchecked Sendable {
@@ -72,6 +74,9 @@ final class Recorder: @unchecked Sendable {
     private var writer: AVAssetWriter?
     private var videoReceiver: AVAssetWriterInput.SampleBufferReceiver?
     private var audioReceiver: AVAssetWriterInput.SampleBufferReceiver?
+    /// Per-source audio tracks keyed by mixer channel label ("Audio",
+    /// "Mic", "System"). Empty for single-source recordings.
+    private var sourceReceivers: [String: AVAssetWriterInput.SampleBufferReceiver] = [:]
     private var sessionStartTime: CMTime = .invalid
     private var isWriting = false
 
@@ -85,6 +90,7 @@ final class Recorder: @unchecked Sendable {
     private var videoAppendRejected: Int = 0
     private var videoDroppedPtsRegression: Int = 0
     private var lastAppendError: String?
+    private var sourceTrackAccepted: Int = 0
     /// Last accepted video PTS, used for the strict-monotonic guard
     /// in `appendVideo`. Reset to `.invalid` in `_startSync`.
     private var lastVideoPTS: CMTime = .invalid
@@ -94,15 +100,23 @@ final class Recorder: @unchecked Sendable {
     /// `start()`; `AVAssetWriter` doesn't allow inputs to be added
     /// afterward.
     ///
+    /// `sourceTracks` adds one extra audio track per named source
+    /// (mixer channel labels) for multi-source recordings. The mix
+    /// stays track 1 and the only enabled track; the source tracks are
+    /// grouped as its alternates, so players play the mix alone while
+    /// editors can still reach each source.
+    ///
     /// `saveDirectory` is the resolved folder (user-selected via
     /// `RecordingStorage`, with the sandbox container as a fallback).
     /// The caller is responsible for holding security scope on that
     /// directory for the lifetime of the write.
-    func start(width: Int32, height: Int32, withAudio: Bool, saveDirectory: URL) async throws -> URL {
+    func start(width: Int32, height: Int32, withAudio: Bool, sourceTracks: [String] = [],
+               saveDirectory: URL) async throws -> URL {
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<URL, Error>) in
             writerQueue.async {
                 do {
-                    let url = try self._startSync(width: width, height: height, withAudio: withAudio, saveDirectory: saveDirectory)
+                    let url = try self._startSync(width: width, height: height, withAudio: withAudio,
+                                                  sourceTracks: sourceTracks, saveDirectory: saveDirectory)
                     cont.resume(returning: url)
                 } catch {
                     cont.resume(throwing: error)
@@ -111,7 +125,8 @@ final class Recorder: @unchecked Sendable {
         }
     }
 
-    private func _startSync(width: Int32, height: Int32, withAudio: Bool, saveDirectory: URL) throws -> URL {
+    private func _startSync(width: Int32, height: Int32, withAudio: Bool, sourceTracks: [String],
+                            saveDirectory: URL) throws -> URL {
         guard !isWriting else {
             throw CaptureError.writerFailed("Recorder is already running")
         }
@@ -160,6 +175,34 @@ final class Recorder: @unchecked Sendable {
                 throw CaptureError.writerFailed("Cannot add audio input")
             }
             audioReceiver = writer.inputReceiver(for: ai)
+
+            var sourceInputs: [AVAssetWriterInput] = []
+            for label in sourceTracks {
+                let si = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
+                si.expectsMediaDataInRealTime = true  // see video input above
+                let name = AVMutableMetadataItem()
+                name.identifier = .quickTimeUserDataTrackName
+                name.value = label as NSString
+                si.metadata = [name]
+                guard writer.canAdd(si) else {
+                    throw CaptureError.writerFailed("Cannot add audio track \(label)")
+                }
+                sourceReceivers[label] = writer.inputReceiver(for: si)
+                sourceInputs.append(si)
+            }
+            if !sourceInputs.isEmpty {
+                // Mix is the default (enabled) track; sources are its
+                // alternates, disabled so they don't double the audio.
+                let mixName = AVMutableMetadataItem()
+                mixName.identifier = .quickTimeUserDataTrackName
+                mixName.value = "Mix" as NSString
+                ai.metadata = [mixName]
+                let group = AVAssetWriterInputGroup(inputs: [ai] + sourceInputs, defaultInput: ai)
+                guard writer.canAdd(group) else {
+                    throw CaptureError.writerFailed("Cannot group audio tracks")
+                }
+                writer.add(group)
+            }
         }
 
         do {
@@ -184,6 +227,7 @@ final class Recorder: @unchecked Sendable {
         self.videoAppendRejected = 0
         self.videoDroppedPtsRegression = 0
         self.lastAppendError = nil
+        self.sourceTrackAccepted = 0
         self.lastVideoPTS = .invalid
 
         return url
@@ -240,12 +284,22 @@ final class Recorder: @unchecked Sendable {
         }
     }
 
-    func appendAudio(_ sampleBuffer: CMSampleBuffer) {
+    /// Append audio to the mix track, or with `source` to that
+    /// source's own track. Buffers for sources without a track are
+    /// ignored (single-source recordings).
+    func appendAudio(_ sampleBuffer: CMSampleBuffer, source: String? = nil) {
         writerQueue.async { [weak self] in
             guard let self,
                   self.isWriting,
-                  let writer = self.writer,
-                  let receiver = self.audioReceiver else { return }
+                  let writer = self.writer else { return }
+            let receiver: AVAssetWriterInput.SampleBufferReceiver
+            if let source {
+                guard let r = self.sourceReceivers[source] else { return }
+                receiver = r
+            } else {
+                guard let r = self.audioReceiver else { return }
+                receiver = r
+            }
             guard writer.status == .writing else {
                 self.isWriting = false
                 return
@@ -268,7 +322,7 @@ final class Recorder: @unchecked Sendable {
 
             do {
                 if try receiver.appendImmediately(CMReadySampleBuffer(unsafeBuffer: sampleBuffer)) {
-                    self.audioAccepted &+= 1
+                    if source == nil { self.audioAccepted &+= 1 } else { self.sourceTrackAccepted &+= 1 }
                 } else {
                     self.audioDroppedNotReady &+= 1
                 }
@@ -299,7 +353,8 @@ final class Recorder: @unchecked Sendable {
                 videoAppendRejected: self.videoAppendRejected,
                 videoDroppedPtsRegression: self.videoDroppedPtsRegression,
                 writerErrorDescription: self.writer?.error?.localizedDescription,
-                lastAppendError: self.lastAppendError
+                lastAppendError: self.lastAppendError,
+                sourceTrackAccepted: self.sourceTrackAccepted
             )
         }
     }
@@ -314,6 +369,7 @@ final class Recorder: @unchecked Sendable {
                 self.isWriting = false
                 self.videoReceiver?.finish()
                 self.audioReceiver?.finish()
+                for r in self.sourceReceivers.values { r.finish() }
 
                 writer.finishWriting {
                     let url = writer.outputURL
@@ -321,6 +377,7 @@ final class Recorder: @unchecked Sendable {
                         self.writer = nil
                         self.videoReceiver = nil
                         self.audioReceiver = nil
+                        self.sourceReceivers = [:]
                         self.sessionStartTime = .invalid
                     }
                     cont.resume(returning: url)
