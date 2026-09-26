@@ -203,6 +203,9 @@ final class MainViewModel: ObservableObject {
     private var isStartingPreview = false
 
     private var recordingStartedAt: Date?
+    /// Held while recording so idle system sleep can't cut a long
+    /// capture short. The display may still sleep.
+    private var recordingActivity: NSObjectProtocol?
     private var recorderStatsTimer: Timer?
 
     init() {
@@ -1301,6 +1304,10 @@ final class MainViewModel: ObservableObject {
             )
             isRecording = true
             recordingStartedAt = Date()
+            recordingActivity = ProcessInfo.processInfo.beginActivity(
+                options: [.userInitiated, .idleSystemSleepDisabled],
+                reason: "Recaptr is recording"
+            )
             recordingElapsed = 0
             // Don't reset mixerStats — preview's VU/state continuity
             // is more useful than a clean slate at the moment record
@@ -1323,6 +1330,10 @@ final class MainViewModel: ObservableObject {
         // monitoring. Only the recorder stops here.
         let url = await recorder.stop()
         isRecording = false
+        if let activity = recordingActivity {
+            ProcessInfo.processInfo.endActivity(activity)
+            recordingActivity = nil
+        }
         recordingStartedAt = nil
         lastRecordedFile = url
 
