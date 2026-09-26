@@ -32,6 +32,15 @@ final class CameraCaptureService: NSObject, @unchecked Sendable, AVCaptureVideoD
     private let previewOutput = AVCaptureVideoDataOutput()
     private let recordOutput  = AVCaptureVideoDataOutput()
 
+    /// Opt-in low-light noise reduction (macOS 27). Set before
+    /// `start`. Applied to the record connection only: Apple allows
+    /// the feature on one output at a time, and the recording is what
+    /// matters. Off by default because it changes the image.
+    var lowLightNoiseReduction = false
+    /// Whether the active camera format supports it. Valid after
+    /// `start` returns.
+    private(set) var lowLightNoiseReductionSupported = false
+
     private weak var previewSinkLayer: SampleBufferPreviewLayer?
     private var activeDimensions: CMVideoDimensions = .init(width: 0, height: 0)
 
@@ -142,6 +151,16 @@ final class CameraCaptureService: NSObject, @unchecked Sendable, AVCaptureVideoD
             throw CaptureError.configurationFailed("Cannot add record output")
         }
         session.addOutput(recordOutput)
+
+        if let conn = recordOutput.connection(with: .video) {
+            lowLightNoiseReductionSupported = conn.isLowLightVideoNoiseReductionSupported
+            if lowLightNoiseReductionSupported {
+                // Explicit control: never let the system decide.
+                conn.automaticallyEnablesLowLightVideoNoiseReduction = false
+                conn.isLowLightVideoNoiseReductionEnabled = lowLightNoiseReduction
+            }
+            print("CameraCaptureService: low-light noise reduction supported=\(lowLightNoiseReductionSupported) enabled=\(lowLightNoiseReductionSupported && lowLightNoiseReduction)")
+        }
     }
 
     private func tryLockFormat(for device: AVCaptureDevice) {

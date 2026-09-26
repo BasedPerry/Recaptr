@@ -22,6 +22,7 @@ struct SettingsPopover: View {
     var body: some View {
         Form {
             audioSection
+            videoSection
             saveSection
             permissionsSection
             statusSection
@@ -65,6 +66,35 @@ struct SettingsPopover: View {
             )
         } header: {
             sectionHeader("AUDIO")
+        }
+    }
+
+    // MARK: Video
+
+    private var videoSection: some View {
+        Section {
+            Picker("Encoding", selection: $vm.videoQuality) {
+                ForEach(VideoQuality.allCases) { q in
+                    Text(q.label).tag(q)
+                }
+            }
+            .disabled(vm.isRecording)
+            .help("Constant quality keeps image quality steady and lets file size vary: smaller for static screens, larger for busy gameplay.")
+
+            // Only offered when the current camera supports it.
+            if vm.lowLightNoiseReductionSupported {
+                Toggle("Low-light noise reduction", isOn: $vm.lowLightNoiseReduction)
+                    .disabled(vm.isRecording)
+                    .help("Cleans up grain in dim webcam footage. Changes the image, so it's off by default. Applies to the recording.")
+                    .onChange(of: vm.lowLightNoiseReduction) { _, _ in
+                        // Applied when the camera session is built.
+                        if vm.isPreviewing, !vm.isRecording {
+                            Task { await vm.startPreview() }
+                        }
+                    }
+            }
+        } header: {
+            sectionHeader("VIDEO")
         }
     }
 

@@ -32,6 +32,25 @@
 import Foundation
 import AVFoundation
 import CoreMedia
+import VideoToolbox
+
+/// How the H.264 encoder spends bits.
+enum VideoQuality: String, CaseIterable, Identifiable {
+    /// 12 Mbps average. Predictable file sizes (~90 MB/min).
+    case standard
+    /// macOS 27 constant-quality encoding: the encoder keeps quality
+    /// steady and lets the bitrate move. Static screens get smaller,
+    /// busy gameplay gets larger. Capped at 40 Mbps.
+    case constantQuality
+
+    var id: Self { self }
+    var label: String {
+        switch self {
+        case .standard:        return "Standard (12 Mbps)"
+        case .constantQuality: return "Constant quality"
+        }
+    }
+}
 
 /// Live recorder telemetry for the UI, published from `MainViewModel`.
 struct RecorderStats: Equatable {
@@ -127,12 +146,14 @@ final class Recorder: @unchecked Sendable {
     /// The caller is responsible for holding security scope on that
     /// directory for the lifetime of the write.
     func start(width: Int32, height: Int32, withAudio: Bool, sourceTracks: [String] = [],
+               quality: VideoQuality = .standard,
                saveDirectory: URL) async throws -> URL {
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<URL, Error>) in
             writerQueue.async {
                 do {
                     let url = try self._startSync(width: width, height: height, withAudio: withAudio,
-                                                  sourceTracks: sourceTracks, saveDirectory: saveDirectory)
+                                                  sourceTracks: sourceTracks, quality: quality,
+                                                  saveDirectory: saveDirectory)
                     cont.resume(returning: url)
                 } catch {
                     cont.resume(throwing: error)
@@ -142,7 +163,7 @@ final class Recorder: @unchecked Sendable {
     }
 
     private func _startSync(width: Int32, height: Int32, withAudio: Bool, sourceTracks: [String],
-                            saveDirectory: URL) throws -> URL {
+                            quality: VideoQuality, saveDirectory: URL) throws -> URL {
         guard !isWriting else {
             throw CaptureError.writerFailed("Recorder is already running")
         }
@@ -155,12 +176,13 @@ final class Recorder: @unchecked Sendable {
             AVVideoCodecKey: AVVideoCodecType.h264,
             AVVideoWidthKey: NSNumber(value: width),
             AVVideoHeightKey: NSNumber(value: height),
-            AVVideoCompressionPropertiesKey: [
-                AVVideoAverageBitRateKey: NSNumber(value: 12_000_000),
-                AVVideoMaxKeyFrameIntervalKey: NSNumber(value: 60),
-                AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel
-            ]
+            AVVideoCompressionPropertiesKey: Self.compressionProperties(for: quality)
         ]
+        // A setting the encoder rejects would raise an uncatchable
+        // exception at input creation; check first.
+        guard writer.canApply(outputSettings: videoSettings, forMediaType: .video) else {
+            throw CaptureError.writerFailed("Encoder rejected the \(quality.label) settings")
+        }
         let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
         Self.markRealTime(videoInput)
         guard writer.canAdd(videoInput) else {
@@ -310,6 +332,21 @@ final class Recorder: @unchecked Sendable {
         item.extendedLanguageTag = "en"
         item.value = title as NSString
         return item
+    }
+
+    private static func compressionProperties(for quality: VideoQuality) -> [String: Any] {
+        var props: [String: Any] = [
+            AVVideoMaxKeyFrameIntervalKey: NSNumber(value: 60),
+            AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel,
+        ]
+        switch quality {
+        case .standard:
+            props[AVVideoAverageBitRateKey] = NSNumber(value: 12_000_000)
+        case .constantQuality:
+            props[kVTCompressionPropertyKey_ConstantQualityFactor as String] = NSNumber(value: 0.75)
+            props[AVVideoAverageBitRateKey] = NSNumber(value: 40_000_000)
+        }
+        return props
     }
 
     /// Every input runs in real-time mode. Swift marks this deprecated

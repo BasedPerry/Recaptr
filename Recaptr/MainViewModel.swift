@@ -85,6 +85,20 @@ final class MainViewModel: ObservableObject {
     @Published var ch2Gain: Double = 1.0
     @Published var ch2Enabled: Bool = true
 
+    // Video settings, remembered between launches.
+    @Published var videoQuality: VideoQuality =
+        VideoQuality(rawValue: UserDefaults.standard.string(forKey: "RecaptrVideoQuality") ?? "") ?? .standard {
+        didSet { UserDefaults.standard.set(videoQuality.rawValue, forKey: "RecaptrVideoQuality") }
+    }
+    /// Opt-in; changes the image, so off by default.
+    @Published var lowLightNoiseReduction: Bool =
+        UserDefaults.standard.bool(forKey: "RecaptrLowLightNoiseReduction") {
+        didSet { UserDefaults.standard.set(lowLightNoiseReduction, forKey: "RecaptrLowLightNoiseReduction") }
+    }
+    /// Whether the current camera supports low-light noise reduction.
+    /// The Settings toggle only appears when it does.
+    @Published var lowLightNoiseReductionSupported = false
+
     // Live audio monitor (foldback to the system default output).
     @Published var monitorEnabled: Bool = false
     @Published var monitorVolume: Double = 1.0  // 0…1.5
@@ -931,8 +945,10 @@ final class MainViewModel: ObservableObject {
                     }
                     self?.recorder.appendVideo(sb)
                 }
+                svc.lowLightNoiseReduction = lowLightNoiseReduction
                 dims = try await svc.start(cameraUniqueID: cameraID,
                                            previewSink: previewSinkLayer)
+                lowLightNoiseReductionSupported = svc.lowLightNoiseReductionSupported
                 cameraService = svc
 
             case .screenDisplay:
@@ -1098,6 +1114,7 @@ final class MainViewModel: ObservableObject {
 
         cameraService?.stop()
         cameraService = nil
+        lowLightNoiseReductionSupported = false
 
         // Tear down the screen service if one is active.
         // `SCStream.stopCapture` is async; hand it off to a Task so
@@ -1188,6 +1205,7 @@ final class MainViewModel: ObservableObject {
                 height: activeDims.height,
                 withAudio: hasAudio,
                 sourceTracks: sourceTracks,
+                quality: videoQuality,
                 saveDirectory: saveDir
             )
             isRecording = true
@@ -1316,11 +1334,13 @@ final class MainViewModel: ObservableObject {
             var enabledAudio = 0
             for t in audioTracks where try await t.load(.isEnabled) { enabledAudio += 1 }
             var fps: Float = 0
+            var videoMbps: Float = 0
             if let vTrack = videoTracks.first {
                 fps = try await vTrack.load(.nominalFrameRate)
+                videoMbps = try await vTrack.load(.estimatedDataRate) / 1_000_000
             }
-            let probeSummary = String(format: "Probe → %.2fs total · video tracks=%d · fps=%.2f · audio tracks=%d (enabled %d) · marker ranges=%d · %@",
-                                      dur, videoTracks.count, fps, audioTracks.count, enabledAudio, markerRanges, audioDetail)
+            let probeSummary = String(format: "Probe → %.2fs total · video tracks=%d · fps=%.2f · video %.1f Mbps · audio tracks=%d (enabled %d) · marker ranges=%d · %@",
+                                      dur, videoTracks.count, fps, videoMbps, audioTracks.count, enabledAudio, markerRanges, audioDetail)
             lastFileProbeSummary = probeSummary
             // Combine with the recording summary so the final status
             // shows both "what we tried to record" and "what's actually

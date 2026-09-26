@@ -60,6 +60,19 @@ final class RecaptrRecordingSmokeTests: XCTestCase {
         XCTAssertEqual(probe.markerRanges, 3, "Expected Start + 2 marker ranges: \(probe.raw)")
     }
 
+    /// macOS 27 constant-quality encoding records a valid file at
+    /// full frame rate.
+    @MainActor
+    func testCameraRecordingConstantQuality() throws {
+        let probe = try record(modeKey: "3", seconds: 6,
+                               extraArgs: ["-RecaptrVideoQuality", "constantQuality"])
+        XCTAssertEqual(probe.videoTracks, 1)
+        XCTAssertGreaterThan(probe.duration, 4)
+        XCTAssertGreaterThanOrEqual(probe.fps, 29)
+        XCTAssertTrue(probe.status.contains("Saved") || probe.status.contains("Probe"),
+                      "Recording did not complete: \(probe.status)")
+    }
+
     /// Capture card plus a second input on the mic channel. Uses the
     /// Jump Desktop virtual microphone so the test runs without a
     /// physical second mic; it delivers silence, which still proves
