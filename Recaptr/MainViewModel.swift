@@ -95,6 +95,15 @@ final class MainViewModel: ObservableObject {
         UserDefaults.standard.bool(forKey: "RecaptrLowLightNoiseReduction") {
         didSet { UserDefaults.standard.set(lowLightNoiseReduction, forKey: "RecaptrLowLightNoiseReduction") }
     }
+    /// Opt-in rolling 15 s buffer for screen and window sources.
+    /// Off by default: Recaptr doesn't keep capture around unasked.
+    @Published var instantReplay: Bool =
+        UserDefaults.standard.bool(forKey: "RecaptrInstantReplay") {
+        didSet { UserDefaults.standard.set(instantReplay, forKey: "RecaptrInstantReplay") }
+    }
+    /// True while the current screen source is buffering a replay.
+    @Published var replayAvailable = false
+
     /// Whether the current camera supports low-light noise reduction.
     /// The Settings toggle only appears when it does.
     @Published var lowLightNoiseReductionSupported = false
@@ -657,6 +666,31 @@ final class MainViewModel: ObservableObject {
     /// Append the current `recordingElapsed` time to `markers`. No-op
     /// when not recording. Markers live in memory and reset at the
     /// start of each new recording.
+    /// Save the last 15 seconds of the current screen source (instant
+    /// replay). Works whether or not a recording is running.
+    func saveReplay() async {
+        guard let svc = screenService, svc.isReplayBuffering else {
+            status = instantReplay
+                ? "Instant replay works with Screen and Window sources."
+                : "Turn on Instant replay in Settings to save the last 15 seconds."
+            return
+        }
+        do {
+            let dir = try recordingStorage.resolveSaveDirectory()
+            let url = try Recorder.makeOutputURL(in: dir, prefix: "Recaptr_Replay")
+            try await svc.exportReplay(to: url)
+            lastRecordedFile = url
+            lastFileProbeSummary = nil
+            // The status line should describe this clip, not the last
+            // recording.
+            lastRecordingSummary = nil
+            status = "Replay saved → \(url.lastPathComponent)"
+            await probeRecordedFile(url)
+        } catch {
+            status = "Replay failed: \(error.localizedDescription)"
+        }
+    }
+
     func dropMarker() {
         guard isRecording else { return }
         let t = recordingElapsed
@@ -999,6 +1033,7 @@ final class MainViewModel: ObservableObject {
 
             activeDims = dims
             isPreviewing = true
+            replayAvailable = screenService?.isReplayBuffering ?? false
 
             // Audio pipeline depends on source kind:
             //   .camera  → AudioMixer (mic capture)
@@ -1068,6 +1103,7 @@ final class MainViewModel: ObservableObject {
     ///   permission revoked while running).
     private func makeScreenService(audioViaMixer: Bool) -> ScreenCaptureService {
         let svc = ScreenCaptureService()
+        svc.instantReplay = instantReplay
         svc.onRecordBuffer = { [weak self] sb in
             // Cache the latest pixel buffer for the Screenshot button
             // (same pattern as the camera path).
@@ -1125,6 +1161,7 @@ final class MainViewModel: ObservableObject {
             Task { await svc.stop() }
         }
         hasScreenAudio = false
+        replayAvailable = false
         systemAudioMonitor.stop()
 
         previewSinkLayer.flush()

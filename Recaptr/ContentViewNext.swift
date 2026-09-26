@@ -101,6 +101,7 @@ struct ContentViewNext: View {
         //   ⌘R   Toggle record / stop
         //   ⌘K   Toggle monitor mute
         //   ⌘B   Drop clip marker
+        //   ⇧⌘R  Save instant replay (last 15 s, screen sources)
         //   ⌘1   Switch to Window mode
         //   ⌘2   Switch to Screen mode
         //   ⌘3   Switch to Camera mode
@@ -492,6 +493,8 @@ struct ContentViewNext: View {
                 .keyboardShortcut("k", modifiers: [.command])
             Button("") { handleMark() }
                 .keyboardShortcut("b", modifiers: [.command])
+            Button("") { Task { await vm.saveReplay() } }
+                .keyboardShortcut("r", modifiers: [.command, .shift])
             Button("") { selectMode(.window) }
                 .keyboardShortcut("1", modifiers: [.command])
             Button("") { selectMode(.screen) }

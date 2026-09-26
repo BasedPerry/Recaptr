@@ -119,6 +119,39 @@ final class RecaptrRecordingSmokeTests: XCTestCase {
         }
     }
 
+    /// Instant replay: with the option on, previewing a screen source
+    /// for a while and pressing Shift-Cmd-R saves a clip of the last
+    /// few seconds, without recording.
+    @MainActor
+    func testScreenInstantReplay() throws {
+        let app = XCUIApplication()
+        app.launchArguments += ["-ApplePersistenceIgnoreState", "YES",
+                                "-RecaptrUITesting", "YES",
+                                "-RecaptrKeepChromeVisible", "YES",
+                                "-RecaptrInstantReplay", "YES"]
+        app.launch()
+        let window = app.windows.firstMatch
+        XCTAssertTrue(window.waitForExistence(timeout: 10))
+        window.typeKey("2", modifierFlags: .command)
+        // Let the buffer fill.
+        Thread.sleep(forTimeInterval: 8)
+        window.typeKey("r", modifierFlags: [.command, .shift])
+
+        let probeText = app.staticTexts["lastProbe"]
+        let statusText = app.staticTexts["statusLine"]
+        XCTAssertTrue(probeText.waitForExistence(timeout: 5))
+        let gotProbe = waitUntil(timeout: 20, { text(of: probeText).hasPrefix("Probe →") })
+        let raw = text(of: probeText)
+        let attachment = XCTAttachment(string: raw + "\n" + text(of: statusText))
+        attachment.name = "Probe, Replay"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        XCTAssertTrue(gotProbe, "No replay probe. Status: \(text(of: statusText))")
+        XCTAssertEqual(Int(number(in: raw, after: "video tracks=", until: " ") ?? 0), 1)
+        XCTAssertGreaterThan(number(in: raw, after: "Probe → ", until: "s") ?? 0, 4,
+                             "Replay should hold several seconds: \(raw)")
+    }
+
     // MARK: - Helpers
 
     struct Probe {

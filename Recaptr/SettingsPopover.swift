@@ -81,6 +81,17 @@ struct SettingsPopover: View {
             .disabled(vm.isRecording)
             .help("Constant quality keeps image quality steady and lets file size vary: smaller for static screens, larger for busy gameplay.")
 
+            Toggle("Instant replay (Screen and Window)", isOn: $vm.instantReplay)
+                .disabled(vm.isRecording)
+                .help("Keeps the last 15 seconds of a screen or window source in memory. Press Shift-Command-R to save it as a clip.")
+                .onChange(of: vm.instantReplay) { _, _ in
+                    // The buffer is attached when the stream starts.
+                    if vm.isPreviewing, !vm.isRecording,
+                       vm.selectedMainSource?.kind != .camera {
+                        Task { await vm.startPreview() }
+                    }
+                }
+
             // Only offered when the current camera supports it.
             if vm.lowLightNoiseReductionSupported {
                 Toggle("Low-light noise reduction", isOn: $vm.lowLightNoiseReduction)

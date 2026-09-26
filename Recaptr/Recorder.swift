@@ -538,7 +538,7 @@ final class Recorder: @unchecked Sendable {
     /// inside the resolved directory. The folder is created if it
     /// doesn't already exist, in case it was removed between
     /// `resolveSaveDirectory` and the start of the write.
-    private static func makeOutputURL(in directory: URL) throws -> URL {
+    static func makeOutputURL(in directory: URL, prefix: String = "Recaptr") throws -> URL {
         let fm = FileManager.default
         if !fm.fileExists(atPath: directory.path) {
             try fm.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -548,6 +548,6 @@ final class Recorder: @unchecked Sendable {
         print("Recaptr recordings dir: \(directory.path)")
 
         let stamp = Date().ISO8601Format().replacingOccurrences(of: ":", with: "-")
-        return directory.appendingPathComponent("Recaptr_\(stamp).mov")
+        return directory.appendingPathComponent("\(prefix)_\(stamp).mov")
     }
 }

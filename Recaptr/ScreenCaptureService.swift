@@ -51,6 +51,13 @@ final class ScreenCaptureService: NSObject, @unchecked Sendable, SCStreamOutput,
     private let audioQueue = DispatchQueue(label: "recaptr.screen.audio", qos: .userInitiated)
 
     private var stream: SCStream?
+    /// Rolling instant-replay buffer (macOS 27). Only attached when
+    /// `instantReplay` is on.
+    private var clipBuffer: SCClipBufferingOutput?
+
+    /// Set before `start()`. Keeps the last 15 s of the stream in a
+    /// rolling buffer so `exportReplay` can save it on demand.
+    var instantReplay = false
     private weak var previewSinkLayer: SampleBufferPreviewLayer?
     private var activeDimensions: CMVideoDimensions = .init(width: 0, height: 0)
 
@@ -118,6 +125,19 @@ final class ScreenCaptureService: NSObject, @unchecked Sendable, SCStreamOutput,
 
         try await s.startCapture()
 
+        // The clip buffer can only be added to a running stream. If it
+        // fails, capture carries on without replay.
+        if instantReplay {
+            let clip = SCClipBufferingOutput(delegate: nil)
+            do {
+                try s.addClipBufferingOutput(clip)
+                clipBuffer = clip
+                print("ScreenCaptureService: instant replay buffering")
+            } catch {
+                print("ScreenCaptureService: instant replay unavailable: \(error.localizedDescription)")
+            }
+        }
+
         self.stream = s
         self.activeDimensions = CMVideoDimensions(width: Int32(config.width),
                                                   height: Int32(config.height))
@@ -135,7 +155,24 @@ final class ScreenCaptureService: NSObject, @unchecked Sendable, SCStreamOutput,
             print("ScreenCaptureService: stopCapture threw (likely already stopped): \(error)")
         }
         stream = nil
+        clipBuffer = nil  // stopping the stream stops buffering
         activeDimensions = .init(width: 0, height: 0)
+    }
+
+    /// True while a replay buffer is running.
+    var isReplayBuffering: Bool { clipBuffer != nil }
+
+    /// Save the most recent `duration` seconds (max 15) of the stream
+    /// to `url`. Buffering continues during the export.
+    func exportReplay(to url: URL, duration: TimeInterval = 15) async throws {
+        guard let clipBuffer else {
+            throw CaptureError.configurationFailed("Instant replay is not running")
+        }
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            clipBuffer.exportClip(to: url, duration: duration) { error in
+                if let error { cont.resume(throwing: error) } else { cont.resume() }
+            }
+        }
     }
 
     // MARK: - SCStreamOutput
