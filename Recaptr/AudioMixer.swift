@@ -353,6 +353,13 @@ nonisolated final class AudioInputChannel: @unchecked Sendable {
     }
     private var monitorConfigObserver: NSObjectProtocol?
 
+    /// Monitor audio scheduled but not yet played, and chunks skipped
+    /// to keep the monitor from drifting behind. Guarded by monitorLock
+    /// (completion handlers run on an audio thread).
+    private let monitorLock = NSLock()
+    private var monitorQueuedFrames = 0
+    private(set) var monitorSkips = 0
+
     /// Start the monitor engine if `monitorEnabled` is set. Called by
     /// `AudioMixer` after a successful capture engine start.
     /// Idempotent — safe to call when already running.
@@ -379,6 +386,7 @@ nonisolated final class AudioInputChannel: @unchecked Sendable {
 
     /// Stop the monitor engine.
     func stopMonitor() {
+        monitorLock.lock(); monitorQueuedFrames = 0; monitorLock.unlock()
         guard monitorRunning else { return }
         monitorPlayerNode.stop()
         monitorEngine.stop()
@@ -621,7 +629,26 @@ nonisolated final class AudioInputChannel: @unchecked Sendable {
                     dest[f] = interleavedSrc[f * channelCount + ch]
                 }
             }
-            monitorPlayerNode.scheduleBuffer(monitorBuf, completionHandler: nil)
+            // Bounded latency: the capture device and the output run
+            // on different clocks, so over a long session queued audio
+            // can pile up and the monitor drifts further behind the
+            // picture. Normally under one chunk is waiting; past 1.5
+            // chunks, skip this one to snap back (one brief blip
+            // instead of a delay that keeps growing).
+            let frames = Int(monitorBuf.frameLength)
+            monitorLock.lock()
+            let queued = monitorQueuedFrames
+            let skip = queued + frames > Int(Double(frames) * 2.5)
+            if !skip { monitorQueuedFrames += frames } else { monitorSkips &+= 1 }
+            monitorLock.unlock()
+            if !skip {
+                monitorPlayerNode.scheduleBuffer(monitorBuf, completionCallbackType: .dataPlayedBack) { [weak self] _ in
+                    guard let self else { return }
+                    self.monitorLock.lock()
+                    self.monitorQueuedFrames = max(0, self.monitorQueuedFrames - frames)
+                    self.monitorLock.unlock()
+                }
+            }
         }
 
         lock.lock()
