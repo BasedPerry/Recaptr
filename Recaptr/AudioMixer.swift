@@ -83,6 +83,9 @@ struct AudioInputChannelStats: Equatable {
     var convertedFramesPushed: Int = 0
     var framesPulledByMixer: Int = 0
     var zeroFillEvents: Int = 0
+    /// Frames dropped to keep this channel's backlog bounded (device
+    /// clock running ahead of the mixer). Zero in a normal session.
+    var trimmedFrames: Int = 0
     var lastError: String?
     /// RMS over the last converted buffer, in dBFS (-∞ … 0).
     /// Smoothed with a one-pole low-pass for a stable VU display.
@@ -149,6 +152,14 @@ nonisolated final class AudioInputChannel: @unchecked Sendable {
     private var pending: [AVAudioPCMBuffer] = []
     private var pendingFrameOffset: AVAudioFrameCount = 0  // index into pending.first
     private var pendingFrameCount: AVAudioFrameCount = 0
+    /// Backlog cap. Taps deliver ~100 ms per callback, so a healthy
+    /// backlog peaks a little above that. Past `maxPendingFrames`
+    /// (250 ms) the oldest audio is dropped back to
+    /// `trimTargetFrames`, so a device clock running ahead of the
+    /// mixer can't push this source further and further out of sync.
+    private let maxPendingFrames: AVAudioFrameCount = 12_000
+    private let trimTargetFrames: AVAudioFrameCount = 6_000
+    private var trimmedFrames: Int = 0
     private(set) var convertedFramesPushed: Int = 0
     private(set) var framesPulledByMixer: Int = 0
     private(set) var zeroFillEvents: Int = 0
@@ -164,6 +175,8 @@ nonisolated final class AudioInputChannel: @unchecked Sendable {
     /// tap). A plateauing counter is a strong signal that the tap
     /// stalled.
     private var tapCallCount: Int = 0
+    /// Set by the first tap callback after `start()`. Guarded by `lock`.
+    private var deliveredSinceStart = false
 
     // Live audio monitoring. A separate output-only `AVAudioEngine`
     // plays each post-gain buffer back to the system default output
@@ -336,6 +349,7 @@ nonisolated final class AudioInputChannel: @unchecked Sendable {
         try engine.start()
         running = true
         tapCallCount = 0
+        lock.lock(); deliveredSinceStart = false; lock.unlock()
         print("AudioInputChannel[\(label)]: engine started")
     }
 
@@ -368,6 +382,7 @@ nonisolated final class AudioInputChannel: @unchecked Sendable {
     // MARK: - Tap → converted buffer → pending queue
 
     private func handleTap(_ inBuf: AVAudioPCMBuffer) {
+        lock.lock(); deliveredSinceStart = true; lock.unlock()
         // Tap-firing diagnostic. First call + every 500th call get
         // logged (~1 log per 10 s at 48 kHz / 1024 frames per tap).
         // A plateauing counter pinpoints when the tap stopped firing.
@@ -462,6 +477,9 @@ nonisolated final class AudioInputChannel: @unchecked Sendable {
         pending.append(outBuf)
         pendingFrameCount &+= outBuf.frameLength
         convertedFramesPushed &+= Int(outBuf.frameLength)
+        if pendingFrameCount > maxPendingFrames {
+            trimmedFrames &+= Int(dropOldestLocked(pendingFrameCount - trimTargetFrames))
+        }
         // Smooth RMS for a stable VU display (one-pole low-pass).
         let alpha: Float = 0.4
         smoothedRmsDbfs = (alpha * rmsDb) + ((1 - alpha) * smoothedRmsDbfs)
@@ -478,6 +496,46 @@ nonisolated final class AudioInputChannel: @unchecked Sendable {
     }
 
     // MARK: - Mixer pull API
+
+    /// True once the tap has delivered at least one buffer since the
+    /// last `start()`. The mixer's start watchdog uses this to catch an
+    /// engine that reported "started" but never delivers audio.
+    var hasDeliveredAudio: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return deliveredSinceStart
+    }
+
+    /// Throw away everything captured so far. Called by the mixer once
+    /// all channels are running and the clock is anchored, so every
+    /// source starts in sync. Without this, a channel that started
+    /// earlier (the first engine up, while the next one spins up)
+    /// carries that head start as permanent latency.
+    func discardPending() {
+        lock.lock()
+        pending.removeAll()
+        pendingFrameOffset = 0
+        pendingFrameCount = 0
+        // Trims before alignment are the startup window, not drift.
+        trimmedFrames = 0
+        lock.unlock()
+    }
+
+    /// Drop up to `frames` of the oldest pending audio. Lock held.
+    private func dropOldestLocked(_ frames: AVAudioFrameCount) -> AVAudioFrameCount {
+        var dropped: AVAudioFrameCount = 0
+        while dropped < frames, let buf = pending.first {
+            let available = buf.frameLength - pendingFrameOffset
+            let take = min(available, frames - dropped)
+            dropped &+= take
+            pendingFrameOffset &+= take
+            pendingFrameCount &-= take
+            if pendingFrameOffset >= buf.frameLength {
+                pending.removeFirst()
+                pendingFrameOffset = 0
+            }
+        }
+        return dropped
+    }
 
     /// Pull up to `frames` frames into `dest`, summing into existing
     /// content. `dest` is interleaved Float32 stereo
@@ -532,6 +590,7 @@ nonisolated final class AudioInputChannel: @unchecked Sendable {
         let pushed = convertedFramesPushed
         let pulled = framesPulledByMixer
         let zf = zeroFillEvents
+        let trimmed = trimmedFrames
         let err = lastError
         let rmsDb = smoothedRmsDbfs
         let peakDb = lastPeakDbfs
@@ -547,6 +606,7 @@ nonisolated final class AudioInputChannel: @unchecked Sendable {
             convertedFramesPushed: pushed,
             framesPulledByMixer: pulled,
             zeroFillEvents: zf,
+            trimmedFrames: trimmed,
             lastError: err,
             rmsDbfs: rmsDb,
             peakDbfs: peakDb
@@ -736,7 +796,13 @@ final class AudioMixer: @unchecked Sendable {
             throw CaptureError.configurationFailed("No audio channels could start")
         }
 
-        // 3. Reset clocks. Capture the host clock so audio PTS shares
+        // 3. Align sources. Channels start one after another, so the
+        //    first one up has already buffered audio from before the
+        //    clock anchor below. Drop it so every source (and the
+        //    video) starts from the same moment.
+        for ch in channels { ch.discardPending() }
+
+        // 4. Reset clocks. Capture the host clock so audio PTS shares
         //    the time domain with `AVCaptureSession`'s video frames.
         sampleClock = 0
         mixedFramesEmitted = 0
@@ -745,7 +811,7 @@ final class AudioMixer: @unchecked Sendable {
         startClockTime = CMClockGetTime(hostClock)
         print("AudioMixer: start clock anchored at host time \(CMTimeGetSeconds(startClockTime))s")
 
-        // 4. Schedule the timer. 1024 / 48000 = ~21.3ms.
+        // 5. Schedule the timer. 1024 / 48000 = ~21.3ms.
         let interval = Double(chunkFrames) / outputFormat.sampleRate
         let t = DispatchSource.makeTimerSource(queue: emissionQueue)
         t.schedule(deadline: .now() + interval, repeating: interval, leeway: .milliseconds(2))
@@ -753,6 +819,53 @@ final class AudioMixer: @unchecked Sendable {
         timer = t
         running = true
         t.resume()
+
+        scheduleStartWatchdog(attempt: 1)
+    }
+
+    // MARK: - Start watchdog
+
+    /// With two input engines running, macOS 27 occasionally leaves
+    /// one "started" but silent after a stop/start (measured
+    /// 2026-09-26: roughly 1 in 4 source switches, either channel).
+    /// Taps deliver every ~100 ms, so a channel with nothing after
+    /// `watchdogDelay` is restarted, up to `maxWatchdogAttempts`
+    /// times. If it's still silent the channel records an error, which
+    /// shows in the status line, instead of silently recording zeros.
+    private let watchdogDelay: TimeInterval = 0.6
+    private let maxWatchdogAttempts = 3
+
+    private func scheduleStartWatchdog(attempt: Int) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + watchdogDelay) { [weak self] in
+            self?.checkStartWatchdog(attempt: attempt)
+        }
+    }
+
+    private func checkStartWatchdog(attempt: Int) {
+        guard running else { return }
+        let silent = channels.filter { $0.enabled && $0.running && !$0.hasDeliveredAudio }
+        guard !silent.isEmpty else { return }
+
+        for ch in silent {
+            guard attempt <= maxWatchdogAttempts else {
+                ch.stop()
+                ch.recordStartFailure("no audio from device after \(maxWatchdogAttempts) restarts")
+                print("AudioMixer: watchdog gave up on '\(ch.label)'")
+                continue
+            }
+            print("AudioMixer: watchdog restarting silent channel '\(ch.label)' (attempt \(attempt))")
+            ch.stop()
+            do {
+                try ch.start()
+                ch.startMonitorIfNeeded()
+                ch.discardPending()
+            } catch {
+                ch.recordStartFailure(error.localizedDescription)
+            }
+        }
+        if attempt <= maxWatchdogAttempts {
+            scheduleStartWatchdog(attempt: attempt + 1)
+        }
     }
 
     func stop() {

@@ -72,12 +72,18 @@ final class MainViewModel: ObservableObject {
     /// resolves the actual directory via `resolveSaveDirectory()`.
     @Published var recordingStorage = RecordingStorage()
 
-    // Single-source channel state. The AudioMixer is still N-channel
-    // internally so multi-source (aggregate device) support can land
-    // later without UI rework.
+    // Channel 1: source audio (capture card HDMI audio, or the
+    // camera's paired mic). Auto-selected to match the video source.
     @Published var ch1DeviceID: String?
     @Published var ch1Gain: Double = 1.0
     @Published var ch1Enabled: Bool = true
+
+    // Channel 2: commentary mic. Off until the user picks a device.
+    // Never auto-selected, and not routed to the monitor (hearing
+    // your own voice back with latency is distracting).
+    @Published var ch2DeviceID: String?
+    @Published var ch2Gain: Double = 1.0
+    @Published var ch2Enabled: Bool = true
 
     // Live audio monitor (foldback to the system default output).
     @Published var monitorEnabled: Bool = false
@@ -159,17 +165,16 @@ final class MainViewModel: ObservableObject {
     private var recorderStatsTimer: Timer?
 
     init() {
-        // Single-channel mixer. AudioMixer's N-channel architecture is
-        // preserved internally so multi-source (aggregate device)
-        // support can land later without UI rework.
+        // Two-channel mixer: source audio + commentary mic.
         let outputFormat = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
             sampleRate: 48_000,
             channels: 2,
             interleaved: true
         )!
-        let channel = AudioInputChannel(label: "Audio", outputFormat: outputFormat)
-        self.audioMixer = AudioMixer(channels: [channel])
+        let sourceChannel = AudioInputChannel(label: "Audio", outputFormat: outputFormat)
+        let micChannel = AudioInputChannel(label: "Mic", outputFormat: outputFormat)
+        self.audioMixer = AudioMixer(channels: [sourceChannel, micChannel])
 
         // Wire mixer → recorder.
         audioMixer.onMixedSampleBuffer = { [weak self] sb in
@@ -179,6 +184,11 @@ final class MainViewModel: ObservableObject {
         // Push live gain changes into the mixer. Gain is read on every
         // tap callback, so updating the channel.gain Float is enough —
         // no engine restart required.
+        $ch2Gain
+            .sink { [weak self] value in
+                self?.audioMixer.channel(at: 1)?.gain = Float(value)
+            }
+            .store(in: &cancellables)
         $ch1Gain
             .sink { [weak self] value in
                 self?.audioMixer.channel(at: 0)?.gain = Float(value)
@@ -285,7 +295,19 @@ final class MainViewModel: ObservableObject {
         // the picker sees a populated list.
         Task {
             await self.refreshCatalog()
-            await MainActor.run { self.autoSelectStartupSource() }
+            await MainActor.run {
+                self.autoSelectStartupSource()
+                // UI tests: `-RecaptrUITestMicInput <name>` binds the
+                // mic channel to the first input whose name contains
+                // <name>, so multi-source runs without clicking.
+                if UserDefaults.standard.bool(forKey: "RecaptrUITesting"),
+                   let want = UserDefaults.standard.string(forKey: "RecaptrUITestMicInput"),
+                   let match = self.availableAudioSources.first(where: {
+                       $0.name.localizedCaseInsensitiveContains(want)
+                   }) {
+                    self.ch2DeviceID = match.id
+                }
+            }
         }
         Task { await self.requestAudioPermissionIfNeeded() }
         // Screen Recording is requested on demand (see
@@ -481,7 +503,7 @@ final class MainViewModel: ObservableObject {
 
     /// Single-channel: armed when a device is selected and the toggle is on.
     private var anyChannelArmed: Bool {
-        ch1Enabled && ch1DeviceID != nil
+        (ch1Enabled && ch1DeviceID != nil) || (ch2Enabled && ch2DeviceID != nil)
     }
 
     // MARK: - Auto audio selection
@@ -701,6 +723,11 @@ final class MainViewModel: ObservableObject {
         if let currentCh1 = ch1DeviceID,
            !availableAudioSources.contains(where: { $0.id == currentCh1 }) {
             ch1DeviceID = availableAudioSources.first?.id
+        }
+        // The mic is never substituted: if it's gone, it's off.
+        if let currentCh2 = ch2DeviceID,
+           !availableAudioSources.contains(where: { $0.id == currentCh2 }) {
+            ch2DeviceID = nil
         }
     }
 
@@ -1197,6 +1224,9 @@ final class MainViewModel: ObservableObject {
                 s += " \(Int(ch.nativeSampleRate))Hz×\(ch.nativeChannels)"
             }
             s += " push=\(ch.convertedFramesPushed) pull=\(ch.framesPulledByMixer) zf=\(ch.zeroFillEvents)"
+            if ch.trimmedFrames > 0 {
+                s += " trim=\(ch.trimmedFrames)"
+            }
             if let err = ch.lastError {
                 s += " ERR=\(err)"
             }
@@ -1273,6 +1303,13 @@ final class MainViewModel: ObservableObject {
         ch1?.enabled = ch1Enabled && (ch1DeviceID != nil)
         ch1?.monitorEnabled = monitorEnabled
         ch1?.monitorVolume = Float(monitorVolume)
+
+        let ch2 = audioMixer.channel(at: 1)
+        ch2?.deviceUniqueID = ch2DeviceID
+        ch2?.deviceLabel = label(forAudioDeviceID: ch2DeviceID)
+        ch2?.gain = Float(ch2Gain)
+        ch2?.enabled = ch2Enabled && (ch2DeviceID != nil)
+        ch2?.monitorEnabled = false
     }
 
     private func label(forAudioDeviceID id: String?) -> String {

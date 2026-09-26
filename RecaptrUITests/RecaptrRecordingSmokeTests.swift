@@ -49,6 +49,27 @@ final class RecaptrRecordingSmokeTests: XCTestCase {
         }
     }
 
+    /// Capture card plus a second input on the mic channel. Uses the
+    /// Jump Desktop virtual microphone so the test runs without a
+    /// physical second mic; it delivers silence, which still proves
+    /// both channels capture and mix.
+    @MainActor
+    func testCameraRecordingWithMic() throws {
+        let probe = try record(modeKey: "3", seconds: 6,
+                               extraArgs: ["-RecaptrUITestMicInput", "Jump Desktop Microphone"])
+        XCTAssertGreaterThanOrEqual(probe.fps, 29)
+        guard probe.status.contains("Mic:[") else {
+            throw XCTSkip("Test mic input not available on this Mac")
+        }
+        for channel in ["Audio:", "Mic:"] {
+            let part = probe.status.components(separatedBy: " · ")
+                .first { $0.hasPrefix(channel) } ?? ""
+            XCTAssertTrue(part.contains("ON"), "\(channel) channel not running: \(part)")
+            XCTAssertGreaterThan(number(in: part, after: "push=", until: " ") ?? 0, 0,
+                                 "\(channel) channel captured nothing: \(part)")
+        }
+    }
+
     // MARK: - Helpers
 
     struct Probe {
@@ -61,13 +82,14 @@ final class RecaptrRecordingSmokeTests: XCTestCase {
     }
 
     @MainActor
-    private func record(modeKey: String, seconds: TimeInterval, monitor: Bool = false) throws -> Probe {
+    private func record(modeKey: String, seconds: TimeInterval, monitor: Bool = false,
+                        extraArgs: [String] = []) throws -> Probe {
         let app = XCUIApplication()
         // Ignore saved window state so every run starts with the
         // capture window open.
         app.launchArguments += ["-ApplePersistenceIgnoreState", "YES"]
         app.launchArguments += ["-RecaptrUITesting", "YES",
-                                "-RecaptrKeepChromeVisible", "YES"]
+                                "-RecaptrKeepChromeVisible", "YES"] + extraArgs
         app.launch()
         let window = app.windows.firstMatch
         XCTAssertTrue(window.waitForExistence(timeout: 10))
