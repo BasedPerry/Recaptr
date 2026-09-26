@@ -34,20 +34,46 @@ import AVFoundation
 import CoreMedia
 import VideoToolbox
 
-/// How the H.264 encoder spends bits.
+/// Recording presets. Chosen from a measured comparison on 1080p60
+/// gameplay (2026-09-26): HEVC gives about 2 dB PSNR more than H.264
+/// at the same size, and the macOS 27 constant-quality factor had no
+/// effect through AVAssetWriter, so presets are codec + bitrate.
 enum VideoQuality: String, CaseIterable, Identifiable {
-    /// 12 Mbps average. Predictable file sizes (~90 MB/min).
+    /// HEVC 20 Mbps (~8 GB/hour). Matches H.264 at 30 Mbps.
     case standard
-    /// macOS 27 constant-quality encoding: the encoder keeps quality
-    /// steady and lets the bitrate move. Static screens get smaller,
-    /// busy gameplay gets larger. Capped at 40 Mbps.
-    case constantQuality
+    /// HEVC 30 Mbps (~13 GB/hour). Matches H.264 at 40 Mbps.
+    case high
+    /// H.264 30 Mbps (~13 GB/hour) for tools that can't open HEVC.
+    case compatible
 
     var id: Self { self }
+
+    /// Saved choices from earlier builds map to the nearest preset.
+    init(savedValue: String?) {
+        switch savedValue {
+        case "constantQuality": self = .high
+        case let v?: self = VideoQuality(rawValue: v) ?? .standard
+        case nil: self = .standard
+        }
+    }
+
     var label: String {
         switch self {
-        case .standard:        return "Standard (12 Mbps)"
-        case .constantQuality: return "Constant quality"
+        case .standard:   return "Standard (HEVC, ~8 GB/hour)"
+        case .high:       return "High (HEVC, ~13 GB/hour)"
+        case .compatible: return "Compatible (H.264, ~13 GB/hour)"
+        }
+    }
+
+    var codec: AVVideoCodecType {
+        self == .compatible ? .h264 : .hevc
+    }
+
+    var bitrate: Int {
+        switch self {
+        case .standard:   return 20_000_000
+        case .high:       return 30_000_000
+        case .compatible: return 30_000_000
         }
     }
 }
@@ -171,12 +197,12 @@ final class Recorder: @unchecked Sendable {
         let url = try Self.makeOutputURL(in: saveDirectory)
         let writer = try AVAssetWriter(outputURL: url, fileType: .mov)
 
-        // Video — H.264 SDR.
+        // Video — HEVC or H.264 per preset, SDR.
         let videoSettings: [String: Any] = [
-            AVVideoCodecKey: AVVideoCodecType.h264,
+            AVVideoCodecKey: quality.codec,
             AVVideoWidthKey: NSNumber(value: width),
             AVVideoHeightKey: NSNumber(value: height),
-            AVVideoCompressionPropertiesKey: Self.compressionProperties(for: quality)
+            AVVideoCompressionPropertiesKey: Self.compressionProperties(for: quality),
         ]
         // A setting the encoder rejects would raise an uncatchable
         // exception at input creation; check first.
@@ -335,18 +361,13 @@ final class Recorder: @unchecked Sendable {
     }
 
     private static func compressionProperties(for quality: VideoQuality) -> [String: Any] {
-        var props: [String: Any] = [
+        [
+            AVVideoAverageBitRateKey: NSNumber(value: quality.bitrate),
             AVVideoMaxKeyFrameIntervalKey: NSNumber(value: 60),
-            AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel,
+            AVVideoProfileLevelKey: quality.codec == .hevc
+                ? kVTProfileLevel_HEVC_Main_AutoLevel as String
+                : AVVideoProfileLevelH264HighAutoLevel,
         ]
-        switch quality {
-        case .standard:
-            props[AVVideoAverageBitRateKey] = NSNumber(value: 12_000_000)
-        case .constantQuality:
-            props[kVTCompressionPropertyKey_ConstantQualityFactor as String] = NSNumber(value: 0.75)
-            props[AVVideoAverageBitRateKey] = NSNumber(value: 40_000_000)
-        }
-        return props
     }
 
     /// Every input runs in real-time mode. Swift marks this deprecated

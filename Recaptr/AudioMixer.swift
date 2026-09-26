@@ -88,6 +88,7 @@ struct AudioInputChannelStats: Equatable {
     var trimmedFrames: Int = 0
     /// Automatic restarts after a stall or audio hardware change.
     var recoveries: Int = 0
+    var lastRecoveryReason: String?
     var lastError: String?
     /// RMS over the last converted buffer, in dBFS (-∞ … 0).
     /// Smoothed with a one-pole low-pass for a stable VU display.
@@ -258,7 +259,14 @@ nonisolated final class AudioInputChannel: @unchecked Sendable {
                 queue: .main
             ) { [weak self] _ in
                 guard let self else { return }
-                print("AudioInputChannel[\(self.label)]: audio hardware configuration changed")
+                // The notice also fires for changes the engine rides
+                // through (for example another engine starting). Only
+                // a stopped engine needs recovering.
+                guard !self.engine.isRunning else {
+                    print("AudioInputChannel[\(self.label)]: audio configuration changed, engine still running")
+                    return
+                }
+                print("AudioInputChannel[\(self.label)]: audio hardware configuration changed, engine stopped")
                 self.onConfigurationChange?(self)
             }
         }
@@ -283,7 +291,11 @@ nonisolated final class AudioInputChannel: @unchecked Sendable {
 
     /// Recoveries after a stall or hardware change this session.
     private(set) var recoveryCount = 0
-    func noteRecovery() { recoveryCount += 1 }
+    private(set) var lastRecoveryReason: String?
+    func noteRecovery(reason: String) {
+        recoveryCount += 1
+        lastRecoveryReason = reason
+    }
 
     /// UI tests only: stop the engine the way macOS does on a hardware
     /// change, optionally without the notification (a silent stall).
@@ -748,6 +760,7 @@ nonisolated final class AudioInputChannel: @unchecked Sendable {
             zeroFillEvents: zf,
             trimmedFrames: trimmed,
             recoveries: recoveryCount,
+            lastRecoveryReason: lastRecoveryReason,
             lastError: err,
             rmsDbfs: rmsDb,
             peakDbfs: peakDb
@@ -1016,7 +1029,9 @@ final class AudioMixer: @unchecked Sendable {
         lastPushed = [:]
         failedRecoveries = [:]
         let t = DispatchSource.makeTimerSource(queue: .main)
-        t.schedule(deadline: .now() + 1, repeating: 0.5)
+        // Start after the startup watchdog's window (4 x 0.6 s) so the
+        // two never restart the same slow-starting channel.
+        t.schedule(deadline: .now() + 3, repeating: 0.5)
         t.setEventHandler { [weak self] in self?.checkForStalls() }
         runtimeWatchdog = t
         t.resume()
@@ -1060,7 +1075,7 @@ final class AudioMixer: @unchecked Sendable {
         do {
             try ch.start()
             ch.startMonitorIfNeeded()
-            ch.noteRecovery()
+            ch.noteRecovery(reason: reason)
             onChannelEvent?("\(ch.label) audio restarted (\(reason)).")
         } catch {
             ch.recordStartFailure(error.localizedDescription)

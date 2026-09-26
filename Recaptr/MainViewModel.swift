@@ -87,7 +87,7 @@ final class MainViewModel: ObservableObject {
 
     // Video settings, remembered between launches.
     @Published var videoQuality: VideoQuality =
-        VideoQuality(rawValue: UserDefaults.standard.string(forKey: "RecaptrVideoQuality") ?? "") ?? .standard {
+        VideoQuality(savedValue: UserDefaults.standard.string(forKey: "RecaptrVideoQuality")) {
         didSet { UserDefaults.standard.set(videoQuality.rawValue, forKey: "RecaptrVideoQuality") }
     }
     /// Opt-in; changes the image, so off by default.
@@ -1344,7 +1344,7 @@ final class MainViewModel: ObservableObject {
                 s += " trim=\(ch.trimmedFrames)"
             }
             if ch.recoveries > 0 {
-                s += " recovered=\(ch.recoveries)"
+                s += " recovered=\(ch.recoveries)(\(ch.lastRecoveryReason ?? "?"))"
             }
             if let err = ch.lastError {
                 s += " ERR=\(err)"
@@ -1398,12 +1398,21 @@ final class MainViewModel: ObservableObject {
             for t in audioTracks where try await t.load(.isEnabled) { enabledAudio += 1 }
             var fps: Float = 0
             var videoMbps: Float = 0
+            var transfer = "unset"
+            var codec = "?"
             if let vTrack = videoTracks.first {
                 fps = try await vTrack.load(.nominalFrameRate)
                 videoMbps = try await vTrack.load(.estimatedDataRate) / 1_000_000
+                if let desc = try await vTrack.load(.formatDescriptions).first {
+                    codec = CMFormatDescriptionGetMediaSubType(desc) == kCMVideoCodecType_HEVC ? "hevc" : "h264"
+                }
+                if let desc = try await vTrack.load(.formatDescriptions).first,
+                   let tf = CMFormatDescriptionGetExtension(desc, extensionKey: kCMFormatDescriptionExtension_TransferFunction) as? String {
+                    transfer = tf == (kCMFormatDescriptionTransferFunction_ITU_R_709_2 as String) ? "709" : tf
+                }
             }
-            let probeSummary = String(format: "Probe → %.2fs total · video tracks=%d · fps=%.2f · video %.1f Mbps · audio tracks=%d (enabled %d) · marker ranges=%d · %@",
-                                      dur, videoTracks.count, fps, videoMbps, audioTracks.count, enabledAudio, markerRanges, audioDetail)
+            let probeSummary = String(format: "Probe → %.2fs total · video tracks=%d · fps=%.2f · video %@ %.1f Mbps · transfer=%@ · audio tracks=%d (enabled %d) · marker ranges=%d · %@",
+                                      dur, videoTracks.count, fps, codec, videoMbps, transfer, audioTracks.count, enabledAudio, markerRanges, audioDetail)
             lastFileProbeSummary = probeSummary
             // Combine with the recording summary so the final status
             // shows both "what we tried to record" and "what's actually

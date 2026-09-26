@@ -356,7 +356,50 @@ final class CameraCaptureService: NSObject, @unchecked Sendable, AVCaptureVideoD
                 fpsLastReport = now
             }
         } else if output === recordOutput {
-            onRecordBuffer?(sampleBuffer)
+            onRecordBuffer?(relabeledAsRec709(sampleBuffer))
         }
+    }
+
+    /// Format description for relabeled frames, reused while frames
+    /// keep the same shape. Record queue only.
+    private var rec709Description: CMVideoFormatDescription?
+
+    /// Relabel a frame as standard HD (Rec. 709). Capture cards like
+    /// the Elgato 4K X tag HDMI video with the SMPTE 240M transfer
+    /// curve, which editors read as a different gamma. The pixels are
+    /// Rec. 709, so only the label changes.
+    ///
+    /// The writer takes the file's color tags from each sample
+    /// buffer's format description (fixed when the camera made it),
+    /// so the frame is rewrapped with a description built from the
+    /// relabeled pixel buffer. Asking the writer to convert to 709
+    /// instead cost up to 20% of frames at 1080p60 (tested
+    /// 2026-09-26). Falls back to the original frame on any failure.
+    private func relabeledAsRec709(_ sampleBuffer: CMSampleBuffer) -> CMSampleBuffer {
+        guard let pb = CMSampleBufferGetImageBuffer(sampleBuffer) else { return sampleBuffer }
+        CVBufferSetAttachment(pb, kCVImageBufferColorPrimariesKey, kCVImageBufferColorPrimaries_ITU_R_709_2, .shouldPropagate)
+        CVBufferSetAttachment(pb, kCVImageBufferTransferFunctionKey, kCVImageBufferTransferFunction_ITU_R_709_2, .shouldPropagate)
+        CVBufferSetAttachment(pb, kCVImageBufferYCbCrMatrixKey, kCVImageBufferYCbCrMatrix_ITU_R_709_2, .shouldPropagate)
+
+        if rec709Description == nil
+            || !CMVideoFormatDescriptionMatchesImageBuffer(rec709Description!, imageBuffer: pb) {
+            var desc: CMVideoFormatDescription?
+            guard CMVideoFormatDescriptionCreateForImageBuffer(
+                allocator: kCFAllocatorDefault, imageBuffer: pb, formatDescriptionOut: &desc
+            ) == noErr else { return sampleBuffer }
+            rec709Description = desc
+        }
+        guard let desc = rec709Description else { return sampleBuffer }
+
+        var timing = CMSampleTimingInfo()
+        guard CMSampleBufferGetSampleTimingInfo(sampleBuffer, at: 0, timingInfoOut: &timing) == noErr else {
+            return sampleBuffer
+        }
+        var relabeled: CMSampleBuffer?
+        guard CMSampleBufferCreateReadyWithImageBuffer(
+            allocator: kCFAllocatorDefault, imageBuffer: pb, formatDescription: desc,
+            sampleTiming: &timing, sampleBufferOut: &relabeled
+        ) == noErr, let relabeled else { return sampleBuffer }
+        return relabeled
     }
 }

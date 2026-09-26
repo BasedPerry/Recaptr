@@ -43,6 +43,7 @@ final class RecaptrRecordingSmokeTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(probe.fps, 29)
         XCTAssertEqual(probe.audioTracks, 1, "Single source should write one audio track")
         XCTAssertEqual(probe.markerRanges, 0, "No markers, so no marker ranges")
+        XCTAssertTrue(probe.raw.contains("transfer=709"), "Video should be tagged Rec. 709: \(probe.raw)")
         // An audio track full of zero-fill is a silent recording. The
         // channel must actually have pushed captured audio.
         if probe.status.contains("push=") {
@@ -60,17 +61,17 @@ final class RecaptrRecordingSmokeTests: XCTestCase {
         XCTAssertEqual(probe.markerRanges, 3, "Expected Start + 2 marker ranges: \(probe.raw)")
     }
 
-    /// macOS 27 constant-quality encoding records a valid file at
-    /// full frame rate.
+    /// Each encoding preset records a valid 60 fps file in the right
+    /// codec.
     @MainActor
-    func testCameraRecordingConstantQuality() throws {
-        let probe = try record(modeKey: "3", seconds: 6,
-                               extraArgs: ["-RecaptrVideoQuality", "constantQuality"])
-        XCTAssertEqual(probe.videoTracks, 1)
-        XCTAssertGreaterThan(probe.duration, 4)
-        XCTAssertGreaterThanOrEqual(probe.fps, 29)
-        XCTAssertTrue(probe.status.contains("Saved") || probe.status.contains("Probe"),
-                      "Recording did not complete: \(probe.status)")
+    func testCameraRecordingPresets() throws {
+        for (preset, codec) in [("high", "hevc"), ("compatible", "h264")] {
+            let probe = try record(modeKey: "3", seconds: 6,
+                                   extraArgs: ["-RecaptrVideoQuality", preset])
+            XCTAssertGreaterThanOrEqual(probe.fps, 59, "\(preset): \(probe.raw)")
+            XCTAssertTrue(probe.raw.contains("video \(codec)"), "\(preset) should be \(codec): \(probe.raw)")
+            XCTAssertTrue(probe.raw.contains("transfer=709"), "\(preset) should be Rec. 709: \(probe.raw)")
+        }
     }
 
     /// The Settings device picker really changes the recorded audio:
@@ -232,6 +233,15 @@ final class RecaptrRecordingSmokeTests: XCTestCase {
         app.launchArguments += ["-ApplePersistenceIgnoreState", "YES"]
         app.launchArguments += ["-RecaptrUITesting", "YES",
                                 "-RecaptrKeepChromeVisible", "YES"] + extraArgs
+        // Experiments: TEST_RUNNER_RECAPTR_EXTRA_ARGS="-Key value ..."
+        // on the xcodebuild command line adds launch arguments.
+        if let extra = ProcessInfo.processInfo.environment["RECAPTR_EXTRA_ARGS"] {
+            app.launchArguments += extra.split(separator: " ").map(String.init)
+        }
+        // Deterministic encoding: don't inherit the user's saved choice.
+        if !app.launchArguments.contains("-RecaptrVideoQuality") {
+            app.launchArguments += ["-RecaptrVideoQuality", "standard"]
+        }
         app.launch()
         let window = app.windows.firstMatch
         XCTAssertTrue(window.waitForExistence(timeout: 10))

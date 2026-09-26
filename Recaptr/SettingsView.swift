@@ -201,7 +201,7 @@ private struct VideoSettingsTab: View {
                 }
                 .disabled(vm.isRecording)
             } footer: {
-                Text("Constant quality keeps image quality steady and lets file size vary: smaller for static screens, larger for busy gameplay (up to 40 Mbps).")
+                Text("HEVC keeps more detail than H.264 at the same size and plays everywhere on Apple devices, including Final Cut. Use Compatible only for tools that can't open HEVC. Sizes are for 1080p60.")
             }
 
             Section {
