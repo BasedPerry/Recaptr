@@ -9,7 +9,7 @@
 //    2. Monitor volume — how loud the monitor is
 //    3. Input VU       — read-only level meter confirming mic is hot
 //
-//  Mic gain lives in the Settings popover (set-and-forget). The
+//  Mic gain lives in the Settings window (set-and-forget). The
 //  pill carries the dynamic controls.
 //
 //  VU update rate: the AudioMixer computes RMS + peak per buffer

@@ -33,6 +33,13 @@ struct RecaptrApp: App {
         // `isInserted` is a bidirectional binding by API contract,
         // but treating it as read-only here prevents a user-driven
         // menu-bar-hide from accidentally stopping the recording.
+        // Standard macOS Settings window: Recaptr > Settings… (⌘,) and
+        // the gear button in the main window both open it.
+        Settings {
+            SettingsView()
+                .environmentObject(vm)
+        }
+
         MenuBarExtra(isInserted: Binding(
             get: { vm.isRecording },
             set: { _ in }

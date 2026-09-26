@@ -184,6 +184,11 @@ final class MainViewModel: ObservableObject {
     /// `stopPreview`. Read by `startRecording` to populate `hasAudio`.
     @Published var hasScreenAudio: Bool = false
 
+    /// True while `startPreview` is building the session, so live
+    /// audio changes made during startup (auto-select) don't trigger a
+    /// second restart; startup applies the current selection anyway.
+    private var isStartingPreview = false
+
     private var recordingStartedAt: Date?
     private var recorderStatsTimer: Timer?
 
@@ -215,6 +220,18 @@ final class MainViewModel: ObservableObject {
         // Push live gain changes into the mixer. Gain is read on every
         // tap callback, so updating the channel.gain Float is enough —
         // no engine restart required.
+        // Device / enable changes apply live while previewing (the
+        // Settings pickers used to be locked during preview, which is
+        // always). Debounced so a burst of changes restarts once.
+        Publishers.Merge4(
+            $ch1DeviceID.map { _ in () }, $ch1Enabled.map { _ in () },
+            $ch2DeviceID.map { _ in () }, $ch2Enabled.map { _ in () }
+        )
+        .dropFirst(4)
+        .debounce(for: .milliseconds(200), scheduler: RunLoop.main)
+        .sink { [weak self] in self?.applyAudioSelectionChange() }
+        .store(in: &cancellables)
+
         $ch2Gain
             .sink { [weak self] value in
                 self?.audioMixer.channel(at: 1)?.gain = Float(value)
@@ -936,6 +953,8 @@ final class MainViewModel: ObservableObject {
     // MARK: - Preview
 
     func startPreview() async {
+        isStartingPreview = true
+        defer { isStartingPreview = false }
         stopPreview()
 
         // Recheck mic permission right before any capture work. If the
@@ -1381,8 +1400,8 @@ final class MainViewModel: ObservableObject {
             lastFileProbeSummary = probeSummary
             // Combine with the recording summary so the final status
             // shows both "what we tried to record" and "what's actually
-            // in the file." Newline separates them in the multi-line
-            // StatusBar.
+            // in the file." Newline separates them in the Diagnostics
+            // text in Settings > Recording.
             if let pre = lastRecordingSummary {
                 status = "\(pre)\n\(probeSummary)"
             } else {
@@ -1399,6 +1418,64 @@ final class MainViewModel: ObservableObject {
             }
             print("Recaptr file probe error: \(error)")
         }
+    }
+
+    // MARK: - Live audio device changes
+
+    /// Apply a changed device or enable selection while previewing.
+    /// Camera sources restart only the audio mixer, so video keeps
+    /// running. Screen sources route system audio differently with and
+    /// without a mic, so arming or disarming the mic restarts the
+    /// preview; changing which mic restarts only the mixer. Locked
+    /// while recording (Settings disables the pickers).
+    func applyAudioSelectionChange() {
+        guard isPreviewing, !isRecording, !isStartingPreview,
+              let src = selectedMainSource else { return }
+
+        let screenSource = src.kind != .camera
+        let wantsMixer = screenSource ? micArmed : true
+        let usesMixer = !hasScreenAudio
+        if screenSource, wantsMixer != usesMixer {
+            Task { await startPreview() }
+            return
+        }
+        guard !audioSelectionMatchesMixer(screenSource: screenSource) else { return }
+
+        if audioMixer.running { audioMixer.stop() }
+        configureMixerFromUIState(screenSource: screenSource)
+        guard audioMixer.hasAnyEnabledChannel else {
+            status = "Audio off"
+            return
+        }
+        do {
+            try audioMixer.start()
+            status = "Audio updated"
+        } catch {
+            status = "Audio restart failed: \(error.localizedDescription)"
+        }
+    }
+
+    /// True when the mixer already runs exactly the selected devices,
+    /// so an echoed change (auto-select) costs nothing.
+    private func audioSelectionMatchesMixer(screenSource: Bool) -> Bool {
+        guard audioMixer.running,
+              let ch1 = audioMixer.channel(at: 0),
+              let ch2 = audioMixer.channel(at: 1) else { return false }
+        let wantCh1 = !screenSource && ch1Enabled && ch1DeviceID != nil
+        return ch1.enabled == wantCh1
+            && (!wantCh1 || ch1.deviceUniqueID == ch1DeviceID)
+            && ch2.enabled == micArmed
+            && (!micArmed || ch2.deviceUniqueID == ch2DeviceID)
+    }
+
+    /// Live post-gain level for one mixer channel (0 = source audio,
+    /// 1 = mic), for Settings meters. Nil when that channel isn't
+    /// running.
+    func channelLevels(_ index: Int) -> (rms: Float, peak: Float)? {
+        guard audioMixer.running else { return nil }
+        let snap = audioMixer.snapshot()
+        guard snap.channels.indices.contains(index), snap.channels[index].running else { return nil }
+        return (snap.channels[index].rmsDbfs, snap.channels[index].peakDbfs)
     }
 
     /// True when a commentary mic is chosen and switched on.

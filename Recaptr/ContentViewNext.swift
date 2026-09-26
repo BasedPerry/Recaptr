@@ -9,7 +9,7 @@
 //  Surface plan (each overlay is positioned with alignment on the
 //  preview):
 //    Top center       — SourceSwitcherPill
-//    Top right        — Settings gear (opens SettingsPopover)
+//    Top right        — Settings gear (opens the Settings window)
 //    Right edge       — AudioModule (gain + VU + monitor toggle)
 //    Bottom center    — RecordingControlsPill
 //    Bottom left      — Recording telemetry pill (only while recording)
@@ -20,7 +20,7 @@
 //    - Mouse moves (`onContinuousHover .active`) → chrome wakes.
 //    - When no source is selected, chrome stays visible regardless.
 //    - When recording, fade still applies; click anywhere to wake.
-//    - ⌘, opens the settings popover (standard macOS shortcut).
+//    - The gear (and ⌘, from the app menu) opens the Settings window.
 //
 //  Paired with `.windowStyle(.hiddenTitleBar)` in RecaptrApp.swift so
 //  the preview runs edge-to-edge under the traffic lights.
@@ -35,7 +35,7 @@ struct ContentViewNext: View {
 
     // Local UI state.
     @State private var activeMode: SourceMode = .camera
-    @State private var showSettings: Bool = false
+    @Environment(\.openSettings) private var openSettings
 
     // Fade-out behavior.
     @State private var chromeOpacity: Double = 1.0
@@ -97,7 +97,7 @@ struct ContentViewNext: View {
             }
         }
         // Window-level keyboard shortcuts:
-        //   ⌘,   Settings (Apple convention)
+        //   ⌘,   Settings (provided by the Settings scene's app menu item)
         //   ⌘R   Toggle record / stop
         //   ⌘K   Toggle monitor mute
         //   ⌘B   Drop clip marker
@@ -185,11 +185,11 @@ struct ContentViewNext: View {
             }
     }
 
-    // MARK: - Gear button + popover
+    // MARK: - Gear button
 
     private var settingsButton: some View {
         Button {
-            showSettings.toggle()
+            openSettings()
         } label: {
             Image(systemName: "gearshape")
                 .font(.system(size: 15, weight: .medium))
@@ -203,11 +203,6 @@ struct ContentViewNext: View {
         .help("Settings (⌘,)")
         .accessibilityLabel("Settings")
         .accessibilityIdentifier("settingsButton")
-        .popover(isPresented: $showSettings, arrowEdge: .top) {
-            SettingsPopover()
-                .environmentObject(vm)
-                .frame(idealWidth: 420)
-        }
     }
 
     // MARK: - Telemetry float (only while recording)
@@ -485,8 +480,6 @@ struct ContentViewNext: View {
     // attach the modifier chain per-button correctly).
     private var shortcutCarrier: some View {
         Group {
-            Button("") { showSettings.toggle() }
-                .keyboardShortcut(",", modifiers: [.command])
             Button("") { handleToggleRecord() }
                 .keyboardShortcut("r", modifiers: [.command])
             Button("") { vm.monitorEnabled.toggle() }

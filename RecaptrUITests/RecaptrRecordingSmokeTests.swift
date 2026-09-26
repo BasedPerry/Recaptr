@@ -73,6 +73,34 @@ final class RecaptrRecordingSmokeTests: XCTestCase {
                       "Recording did not complete: \(probe.status)")
     }
 
+    /// The Settings device picker really changes the recorded audio:
+    /// pick a mic in Settings while previewing, record, and the mic
+    /// channel must capture and get its own track. (The old popover
+    /// picker was disabled whenever preview was running.)
+    @MainActor
+    func testMicChosenInSettingsIsRecorded() throws {
+        let probe = try record(modeKey: "3", seconds: 6) { app in
+            Thread.sleep(forTimeInterval: 2)
+            app.buttons["settingsButton"].click()
+            let settings = app.windows.matching(NSPredicate(format: "identifier CONTAINS 'Settings'")).firstMatch
+            XCTAssertTrue(settings.waitForExistence(timeout: 5))
+            settings.toolbars.buttons["Audio"].click()
+            let picker = settings.popUpButtons["micDevicePicker"]
+            XCTAssertTrue(picker.waitForExistence(timeout: 5))
+            XCTAssertTrue(picker.isEnabled, "Mic picker is disabled during preview")
+            picker.click()
+            let item = settings.menuItems["Jump Desktop Microphone"]
+            guard item.waitForExistence(timeout: 3) else {
+                settings.typeKey(.escape, modifierFlags: [])
+                throw XCTSkip("Test mic input not available on this Mac")
+            }
+            item.click()
+            settings.typeKey("w", modifierFlags: .command)
+        }
+        try assertChannelsCaptured(["Audio:", "Mic:"], in: probe)
+        assertSourceTracks(probe)
+    }
+
     /// Capture card plus a second input on the mic channel. Uses the
     /// Jump Desktop virtual microphone so the test runs without a
     /// physical second mic; it delivers silence, which still proves
@@ -168,7 +196,8 @@ final class RecaptrRecordingSmokeTests: XCTestCase {
 
     @MainActor
     private func record(modeKey: String, seconds: TimeInterval, monitor: Bool = false,
-                        markers: Int = 0, extraArgs: [String] = []) throws -> Probe {
+                        markers: Int = 0, extraArgs: [String] = [],
+                        beforeRecording: ((XCUIApplication) throws -> Void)? = nil) throws -> Probe {
         let app = XCUIApplication()
         // Ignore saved window state so every run starts with the
         // capture window open.
@@ -186,6 +215,7 @@ final class RecaptrRecordingSmokeTests: XCTestCase {
         guard waitUntil(timeout: 8, { record.isEnabled }) else {
             throw XCTSkip("No source available for mode Cmd+\(modeKey)")
         }
+        try beforeRecording?(app)
         // Let the preview settle so the format lock and audio are live.
         Thread.sleep(forTimeInterval: 3)
         if monitor {
