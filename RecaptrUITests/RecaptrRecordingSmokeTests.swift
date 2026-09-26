@@ -42,12 +42,22 @@ final class RecaptrRecordingSmokeTests: XCTestCase {
         // the format lock regressed.
         XCTAssertGreaterThanOrEqual(probe.fps, 29)
         XCTAssertEqual(probe.audioTracks, 1, "Single source should write one audio track")
+        XCTAssertEqual(probe.markerRanges, 0, "No markers, so no marker ranges")
         // An audio track full of zero-fill is a silent recording. The
         // channel must actually have pushed captured audio.
         if probe.status.contains("push=") {
             XCTAssertGreaterThan(number(in: probe.status, after: "push=", until: " ") ?? 0, 0,
                                  "Audio channel captured nothing: \(probe.status)")
         }
+    }
+
+    /// Two clip markers become three marker ranges (Start, Marker 1,
+    /// Marker 2) in the file's marker track, without costing frames.
+    @MainActor
+    func testCameraRecordingWithMarkers() throws {
+        let probe = try record(modeKey: "3", seconds: 6, markers: 2)
+        XCTAssertGreaterThanOrEqual(probe.fps, 29)
+        XCTAssertEqual(probe.markerRanges, 3, "Expected Start + 2 marker ranges: \(probe.raw)")
     }
 
     /// Capture card plus a second input on the mic channel. Uses the
@@ -107,11 +117,12 @@ final class RecaptrRecordingSmokeTests: XCTestCase {
         var hasAudio: Bool
         var audioTracks: Int
         var enabledAudioTracks: Int
+        var markerRanges: Int
     }
 
     @MainActor
     private func record(modeKey: String, seconds: TimeInterval, monitor: Bool = false,
-                        extraArgs: [String] = []) throws -> Probe {
+                        markers: Int = 0, extraArgs: [String] = []) throws -> Probe {
         let app = XCUIApplication()
         // Ignore saved window state so every run starts with the
         // capture window open.
@@ -139,7 +150,13 @@ final class RecaptrRecordingSmokeTests: XCTestCase {
         }
 
         window.typeKey("r", modifierFlags: .command)
-        Thread.sleep(forTimeInterval: seconds)
+        // Spread any markers evenly through the take (Cmd+B).
+        let slice = seconds / Double(markers + 1)
+        for _ in 0..<markers {
+            Thread.sleep(forTimeInterval: slice)
+            window.typeKey("b", modifierFlags: .command)
+        }
+        Thread.sleep(forTimeInterval: slice)
         window.typeKey("r", modifierFlags: .command)
 
         let probeText = app.staticTexts["lastProbe"]
@@ -166,7 +183,8 @@ final class RecaptrRecordingSmokeTests: XCTestCase {
             fps: number(in: raw, after: "fps=", until: " ") ?? 0,
             hasAudio: !raw.contains("audio: NONE"),
             audioTracks: Int(number(in: raw, after: "audio tracks=", until: " ") ?? 0),
-            enabledAudioTracks: Int(number(in: raw, after: "(enabled ", until: ")") ?? 0)
+            enabledAudioTracks: Int(number(in: raw, after: "(enabled ", until: ")") ?? 0),
+            markerRanges: Int(number(in: raw, after: "marker ranges=", until: " ") ?? 0)
         )
     }
 

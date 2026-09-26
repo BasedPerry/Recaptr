@@ -647,6 +647,8 @@ final class MainViewModel: ObservableObject {
         guard isRecording else { return }
         let t = recordingElapsed
         markers.append(t)
+        // Written into the file as a chapter.
+        recorder.addMarker()
         status = String(format: "Marker dropped at %02d:%02d", Int(t) / 60, Int(t) % 60)
     }
 
@@ -1301,14 +1303,24 @@ final class MainViewModel: ObservableObject {
                 audioDetail = String(format: "audio: %.2fs / %@", aSeconds, fmtSummary)
             }
 
+            // Clip markers live in a timed-metadata track (see
+            // Recorder); report how many marker ranges it holds.
+            var markerRanges = 0
+            if let markerTrack = try await asset.loadTracks(withMediaType: .metadata).first {
+                let reader = try AVAssetReader(asset: asset)
+                let output = AVAssetReaderTrackOutput(track: markerTrack, outputSettings: nil)
+                let provider = reader.outputMetadataProvider(for: output)
+                try reader.start()
+                while try await provider.next() != nil { markerRanges += 1 }
+            }
             var enabledAudio = 0
             for t in audioTracks where try await t.load(.isEnabled) { enabledAudio += 1 }
             var fps: Float = 0
             if let vTrack = videoTracks.first {
                 fps = try await vTrack.load(.nominalFrameRate)
             }
-            let probeSummary = String(format: "Probe → %.2fs total · video tracks=%d · fps=%.2f · audio tracks=%d (enabled %d) · %@",
-                                      dur, videoTracks.count, fps, audioTracks.count, enabledAudio, audioDetail)
+            let probeSummary = String(format: "Probe → %.2fs total · video tracks=%d · fps=%.2f · audio tracks=%d (enabled %d) · marker ranges=%d · %@",
+                                      dur, videoTracks.count, fps, audioTracks.count, enabledAudio, markerRanges, audioDetail)
             lastFileProbeSummary = probeSummary
             // Combine with the recording summary so the final status
             // shows both "what we tried to record" and "what's actually
