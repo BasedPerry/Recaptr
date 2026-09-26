@@ -160,6 +160,16 @@ nonisolated final class AudioInputChannel: @unchecked Sendable {
     private let maxPendingFrames: AVAudioFrameCount = 12_000
     private let trimTargetFrames: AVAudioFrameCount = 6_000
     private var trimmedFrames: Int = 0
+
+    /// Jitter buffer for externally fed channels. SCStream delivers
+    /// system audio in small, irregular chunks, so pulling from the
+    /// first frame starves the queue and each underrun inserts a
+    /// sliver of silence (audible crackle). An external channel waits
+    /// until `primeFrames` (~43 ms) are queued before feeding the mix,
+    /// and re-primes after an underrun. Tap channels deliver ~100 ms
+    /// at a time and don't need it, so they keep their timing.
+    private var primeFrames: AVAudioFrameCount { isExternal ? 2_048 : 0 }
+    private var primed = false
     private(set) var convertedFramesPushed: Int = 0
     private(set) var framesPulledByMixer: Int = 0
     private(set) var zeroFillEvents: Int = 0
@@ -204,9 +214,18 @@ nonisolated final class AudioInputChannel: @unchecked Sendable {
         didSet { monitorEngine.mainMixerNode.outputVolume = monitorVolume }
     }
 
-    init(label: String, outputFormat: AVAudioFormat) {
+    /// True for a channel fed from outside (SCStream system audio via
+    /// `pushExternal`) instead of its own input engine.
+    let isExternal: Bool
+
+    /// Armed channels are started by the mixer: enabled, and either
+    /// externally fed or bound to a device.
+    var isArmed: Bool { enabled && (isExternal || deviceUniqueID != nil) }
+
+    init(label: String, outputFormat: AVAudioFormat, isExternal: Bool = false) {
         self.label = label
         self.outputFormat = outputFormat
+        self.isExternal = isExternal
         // `standardFormatWithSampleRate:` produces a non-interleaved
         // Float32 format that `AVAudioEngine`'s mixer nodes accept on
         // bus connections. Each `outBuf` is de-interleaved into a
@@ -300,6 +319,16 @@ nonisolated final class AudioInputChannel: @unchecked Sendable {
 
     func start() throws {
         guard !running else { return }
+        if isExternal {
+            // No engine: buffers arrive through `pushExternal`. The
+            // converter is built from the first buffer's format.
+            converter = nil
+            nativeFormat = nil
+            running = true
+            tapCallCount = 0
+            lock.lock(); deliveredSinceStart = false; lock.unlock()
+            return
+        }
         guard let deviceUID = deviceUniqueID else {
             throw CaptureError.configurationFailed("\(label): no device selected")
         }
@@ -353,7 +382,43 @@ nonisolated final class AudioInputChannel: @unchecked Sendable {
         print("AudioInputChannel[\(label)]: engine started")
     }
 
+    /// Feed one externally captured buffer (SCStream system audio)
+    /// through the same convert, gain, meter, and queue path a tap
+    /// uses. Called on SCStream's audio queue.
+    func pushExternal(_ sampleBuffer: CMSampleBuffer) {
+        guard isExternal, running else { return }
+        guard let desc = CMSampleBufferGetFormatDescription(sampleBuffer),
+              let format = AVAudioFormat(formatDescription: desc) else { return }
+        let frames = CMSampleBufferGetNumSamples(sampleBuffer)
+        guard frames > 0,
+              let pcm = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frames))
+        else { return }
+        pcm.frameLength = AVAudioFrameCount(frames)
+        guard CMSampleBufferCopyPCMDataIntoAudioBufferList(
+            sampleBuffer, at: 0, frameCount: Int32(frames), into: pcm.mutableAudioBufferList
+        ) == noErr else { return }
+
+        if nativeFormat != format {
+            guard let conv = AVAudioConverter(from: format, to: outputFormat) else {
+                recordStartFailure("\(label): could not build converter \(format) → \(outputFormat)")
+                return
+            }
+            nativeFormat = format
+            converter = conv
+        }
+        handleTap(pcm)
+    }
+
     func stop() {
+        if isExternal {
+            lock.lock()
+            pending.removeAll()
+            pendingFrameOffset = 0
+            pendingFrameCount = 0
+            lock.unlock()
+            running = false
+            return
+        }
         if engine.isRunning { engine.stop() }
         if tapInstalled {
             engine.inputNode.removeTap(onBus: 0)
@@ -515,6 +580,7 @@ nonisolated final class AudioInputChannel: @unchecked Sendable {
         pending.removeAll()
         pendingFrameOffset = 0
         pendingFrameCount = 0
+        primed = false
         // Trims before alignment are the startup window, not drift.
         trimmedFrames = 0
         lock.unlock()
@@ -546,6 +612,13 @@ nonisolated final class AudioInputChannel: @unchecked Sendable {
     func pull(intoSummed dest: UnsafeMutablePointer<Float>, frames: AVAudioFrameCount) -> AVAudioFrameCount {
         lock.lock()
         defer { lock.unlock() }
+
+        // Jitter buffer: hold output until enough audio is queued.
+        // Waiting to prime isn't an underrun, so it isn't counted.
+        if !primed {
+            guard pendingFrameCount >= primeFrames else { return 0 }
+            primed = true
+        }
 
         var produced: AVAudioFrameCount = 0
         var destIdx = 0  // sample index (interleaved, so frame*kMixerChannels)
@@ -579,6 +652,7 @@ nonisolated final class AudioInputChannel: @unchecked Sendable {
         framesPulledByMixer &+= Int(produced)
         if produced < frames {
             zeroFillEvents &+= 1
+            primed = false
         }
         return produced
     }
@@ -755,7 +829,7 @@ final class AudioMixer: @unchecked Sendable {
     var allChannels: [AudioInputChannel] { channels }
 
     var hasAnyEnabledChannel: Bool {
-        channels.contains { $0.enabled && $0.deviceUniqueID != nil }
+        channels.contains { $0.isArmed }
     }
 
     // MARK: - Lifecycle
@@ -779,7 +853,7 @@ final class AudioMixer: @unchecked Sendable {
         // Instead, record the per-channel failure and continue —
         // the mixer succeeds as long as at least one channel started.
         var anyStarted = false
-        for ch in channels where ch.enabled && ch.deviceUniqueID != nil {
+        for ch in channels where ch.isArmed {
             do {
                 try ch.start()
                 anyStarted = true

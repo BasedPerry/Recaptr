@@ -58,10 +58,26 @@ final class RecaptrRecordingSmokeTests: XCTestCase {
         let probe = try record(modeKey: "3", seconds: 6,
                                extraArgs: ["-RecaptrUITestMicInput", "Jump Desktop Microphone"])
         XCTAssertGreaterThanOrEqual(probe.fps, 29)
+        try assertChannelsCaptured(["Audio:", "Mic:"], in: probe)
+    }
+
+    /// Narration over a screen capture: SCStream system audio and the
+    /// mic are mixed into the file.
+    @MainActor
+    func testScreenRecordingWithMic() throws {
+        let probe = try record(modeKey: "2", seconds: 6,
+                               extraArgs: ["-RecaptrUITestMicInput", "Jump Desktop Microphone"])
+        XCTAssertEqual(probe.videoTracks, 1)
+        XCTAssertTrue(probe.hasAudio)
+        try assertChannelsCaptured(["System:", "Mic:"], in: probe)
+    }
+
+    /// Every named mixer channel is running and pushed real audio.
+    private func assertChannelsCaptured(_ channels: [String], in probe: Probe) throws {
         guard probe.status.contains("Mic:[") else {
             throw XCTSkip("Test mic input not available on this Mac")
         }
-        for channel in ["Audio:", "Mic:"] {
+        for channel in channels {
             let part = probe.status.components(separatedBy: " · ")
                 .first { $0.hasPrefix(channel) } ?? ""
             XCTAssertTrue(part.contains("ON"), "\(channel) channel not running: \(part)")

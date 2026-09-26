@@ -174,7 +174,10 @@ final class MainViewModel: ObservableObject {
         )!
         let sourceChannel = AudioInputChannel(label: "Audio", outputFormat: outputFormat)
         let micChannel = AudioInputChannel(label: "Mic", outputFormat: outputFormat)
-        self.audioMixer = AudioMixer(channels: [sourceChannel, micChannel])
+        // SCStream system audio, fed in only when narrating over a
+        // screen or window capture (see `startPreview`).
+        let systemChannel = AudioInputChannel(label: "System", outputFormat: outputFormat, isExternal: true)
+        self.audioMixer = AudioMixer(channels: [sourceChannel, micChannel, systemChannel])
 
         // Wire mixer → recorder.
         audioMixer.onMixedSampleBuffer = { [weak self] sb in
@@ -947,7 +950,7 @@ final class MainViewModel: ObservableObject {
                     $0.owningApplication?.bundleIdentifier == myBundleID
                 }
                 let filter = SCContentFilter(display: display, excludingWindows: myWindows)
-                let svc = makeScreenService()
+                let svc = makeScreenService(audioViaMixer: micArmed)
                 dims = try await svc.start(filter: filter, previewSink: previewSinkLayer)
                 screenService = svc
 
@@ -966,7 +969,7 @@ final class MainViewModel: ObservableObject {
                 // No exclusion needed — only the chosen window is in
                 // the capture.
                 let filter = SCContentFilter(desktopIndependentWindow: window)
-                let svc = makeScreenService()
+                let svc = makeScreenService(audioViaMixer: micArmed)
                 dims = try await svc.start(filter: filter, previewSink: previewSinkLayer)
                 screenService = svc
             }
@@ -1004,13 +1007,23 @@ final class MainViewModel: ObservableObject {
                 }
 
             case .screenDisplay, .screenWindow:
-                hasScreenAudio = true
-                // SCStream's .audio output is wired via
-                // `onAudioBuffer → recorder.appendAudio`. The mixer
-                // stays off. Start the stats timer so recorder
-                // telemetry (audio frame counter, PTS regression
-                // counter) still ticks.
-                audioLabel = " · audio: SCStream system loopback"
+                if micArmed {
+                    // Narration: system audio + mic through the mixer.
+                    hasScreenAudio = false
+                    configureMixerFromUIState(screenSource: true)
+                    do {
+                        try audioMixer.start()
+                        audioLabel = " · audio: system + mic (mixer)"
+                    } catch {
+                        audioLabel = " · audio mixer failed: \(error.localizedDescription)"
+                    }
+                } else {
+                    // System audio only: SCStream's .audio output goes
+                    // straight to the recorder (`onAudioBuffer`).
+                    hasScreenAudio = true
+                    audioLabel = " · audio: SCStream system loopback"
+                }
+                // Recorder telemetry ticks either way.
                 startStatsTimer()
             }
 
@@ -1030,7 +1043,7 @@ final class MainViewModel: ObservableObject {
     /// - `onStreamStopped` tears down preview cleanly when the stream
     ///   dies (display disconnected, window closed mid-capture,
     ///   permission revoked while running).
-    private func makeScreenService() -> ScreenCaptureService {
+    private func makeScreenService(audioViaMixer: Bool) -> ScreenCaptureService {
         let svc = ScreenCaptureService()
         svc.onRecordBuffer = { [weak self] sb in
             // Cache the latest pixel buffer for the Screenshot button
@@ -1040,8 +1053,17 @@ final class MainViewModel: ObservableObject {
             }
             self?.recorder.appendVideo(sb)
         }
+        // Without a mic, system audio goes straight to the recorder
+        // with its own capture timestamps (tightest A/V sync). With a
+        // mic, it goes through the mixer's System channel so the two
+        // can be mixed.
+        let systemChannel = audioMixer.channel(at: 2)
         svc.onAudioBuffer  = { [weak self] sb in
-            self?.recorder.appendAudio(sb)
+            if audioViaMixer {
+                systemChannel?.pushExternal(sb)
+            } else {
+                self?.recorder.appendAudio(sb)
+            }
             self?.systemAudioMonitor.feed(sb)
         }
         svc.onStreamStopped = { [weak self] error in
@@ -1293,14 +1315,22 @@ final class MainViewModel: ObservableObject {
         }
     }
 
-    /// Snapshot UI state into the mixer's channel before
+    /// True when a commentary mic is chosen and switched on.
+    private var micArmed: Bool { ch2Enabled && ch2DeviceID != nil }
+
+    /// Snapshot UI state into the mixer's channels before
     /// `mixer.start()` (called from `startPreview`).
-    private func configureMixerFromUIState() {
+    ///
+    /// Camera sources mix source audio (channel 1) with the mic.
+    /// Screen sources mix SCStream system audio (the System channel)
+    /// with the mic; channel 1 stays off because its device belongs to
+    /// the camera path.
+    private func configureMixerFromUIState(screenSource: Bool = false) {
         let ch1 = audioMixer.channel(at: 0)
         ch1?.deviceUniqueID = ch1DeviceID
         ch1?.deviceLabel = label(forAudioDeviceID: ch1DeviceID)
         ch1?.gain = Float(ch1Gain)
-        ch1?.enabled = ch1Enabled && (ch1DeviceID != nil)
+        ch1?.enabled = !screenSource && ch1Enabled && (ch1DeviceID != nil)
         ch1?.monitorEnabled = monitorEnabled
         ch1?.monitorVolume = Float(monitorVolume)
 
@@ -1308,8 +1338,14 @@ final class MainViewModel: ObservableObject {
         ch2?.deviceUniqueID = ch2DeviceID
         ch2?.deviceLabel = label(forAudioDeviceID: ch2DeviceID)
         ch2?.gain = Float(ch2Gain)
-        ch2?.enabled = ch2Enabled && (ch2DeviceID != nil)
+        ch2?.enabled = micArmed
         ch2?.monitorEnabled = false
+
+        // System audio is monitored by SystemAudioMonitor, not here.
+        let system = audioMixer.channel(at: 2)
+        system?.deviceLabel = "System audio"
+        system?.enabled = screenSource && micArmed
+        system?.monitorEnabled = false
     }
 
     private func label(forAudioDeviceID id: String?) -> String {
