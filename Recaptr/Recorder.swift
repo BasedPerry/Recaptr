@@ -152,6 +152,9 @@ final class Recorder: @unchecked Sendable {
     /// Per-source audio tracks keyed by mixer channel label ("Audio",
     /// "Mic", "System"). Empty for single-source recordings.
     private var sourceReceivers: [String: AVAssetWriterInput.SampleBufferReceiver] = [:]
+    /// First source track; counted as the audio track in stats when
+    /// there is no separate mix track.
+    private var primarySource: String?
     private var sessionStartTime: CMTime = .invalid
     private var isWriting = false
 
@@ -175,11 +178,10 @@ final class Recorder: @unchecked Sendable {
     /// `start()`; `AVAssetWriter` doesn't allow inputs to be added
     /// afterward.
     ///
-    /// `sourceTracks` adds one extra audio track per named source
-    /// (mixer channel labels) for multi-source recordings. The mix
-    /// stays track 1 and the only enabled track; the source tracks are
-    /// grouped as its alternates, so players play the mix alone while
-    /// editors can still reach each source.
+    /// `sourceTracks` switches to one audio track per named source
+    /// (mixer channel labels) for multi-source recordings, all enabled
+    /// and without a separate mix track: editors get each source as its
+    /// own component and players sum them.
     ///
     /// `saveDirectory` is the resolved folder (user-selected via
     /// `RecordingStorage`, with the sandbox container as a fallback).
@@ -244,34 +246,28 @@ final class Recorder: @unchecked Sendable {
             guard writer.canAdd(ai) else {
                 throw CaptureError.writerFailed("Cannot add audio input")
             }
-            audioReceiver = writer.inputReceiver(for: ai)
-
-            var sourceInputs: [AVAssetWriterInput] = []
-            for label in sourceTracks {
-                let si = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
-                Self.markRealTime(si)
-                let name = AVMutableMetadataItem()
-                name.identifier = .quickTimeUserDataTrackName
-                name.value = label as NSString
-                si.metadata = [name]
-                guard writer.canAdd(si) else {
-                    throw CaptureError.writerFailed("Cannot add audio track \(label)")
+            if sourceTracks.isEmpty {
+                audioReceiver = writer.inputReceiver(for: ai)
+            } else {
+                // Multi-source: one enabled track per source and no
+                // separate mix. Final Cut shows each as its own audio
+                // component (it ignores disabled tracks, so the earlier
+                // mix + disabled-alternates layout showed only the
+                // mix), and players sum the enabled tracks into the
+                // mix. The mixer's linked limiter keeps that sum under
+                // full scale. Tested in Final Cut 2026-09-26.
+                for label in sourceTracks {
+                    let si = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
+                    Self.markRealTime(si)
+                    let name = AVMutableMetadataItem()
+                    name.identifier = .quickTimeUserDataTrackName
+                    name.value = label as NSString
+                    si.metadata = [name]
+                    guard writer.canAdd(si) else {
+                        throw CaptureError.writerFailed("Cannot add audio track \(label)")
+                    }
+                    sourceReceivers[label] = writer.inputReceiver(for: si)
                 }
-                sourceReceivers[label] = writer.inputReceiver(for: si)
-                sourceInputs.append(si)
-            }
-            if !sourceInputs.isEmpty {
-                // Mix is the default (enabled) track; sources are its
-                // alternates, disabled so they don't double the audio.
-                let mixName = AVMutableMetadataItem()
-                mixName.identifier = .quickTimeUserDataTrackName
-                mixName.value = "Mix" as NSString
-                ai.metadata = [mixName]
-                let group = AVAssetWriterInputGroup(inputs: [ai] + sourceInputs, defaultInput: ai)
-                guard writer.canAdd(group) else {
-                    throw CaptureError.writerFailed("Cannot group audio tracks")
-                }
-                writer.add(group)
             }
         }
 
@@ -314,6 +310,7 @@ final class Recorder: @unchecked Sendable {
         self.videoDroppedPtsRegression = 0
         self.lastAppendError = nil
         self.sourceTrackAccepted = 0
+        self.primarySource = sourceTracks.first
         self.lastVideoPTS = .invalid
 
         return url
@@ -497,7 +494,8 @@ final class Recorder: @unchecked Sendable {
 
             do {
                 if try receiver.appendImmediately(CMReadySampleBuffer(unsafeBuffer: sampleBuffer)) {
-                    if source == nil { self.audioAccepted &+= 1 } else { self.sourceTrackAccepted &+= 1 }
+                    if source == nil || source == self.primarySource { self.audioAccepted &+= 1 }
+                    if source != nil { self.sourceTrackAccepted &+= 1 }
                 } else {
                     self.audioDroppedNotReady &+= 1
                 }

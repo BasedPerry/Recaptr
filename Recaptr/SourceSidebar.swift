@@ -39,26 +39,30 @@ struct SourceSidebar: View {
     @State private var mode: SourceMode = .camera
 
     var body: some View {
-        // Switcher on top, that type's sources in the middle, that
-        // type's tuning at the bottom (not an overlay, which let list
-        // rows scroll under its text).
+        // Switcher on top, then one grouped, scrolling form: that
+        // type's sources, then that type's tuning. (A separate list
+        // and tuning area competed for height and pushed the tuning
+        // off the bottom of the window.)
         VStack(spacing: 0) {
             SourceModeSegments(activeMode: modeBinding, compact: true)
                 .padding(4)
                 .background(.quaternary.opacity(0.5), in: Capsule())
                 .padding(.horizontal, 12)
                 .padding(.top, 8)
-                .padding(.bottom, 6)
+                .padding(.bottom, 2)
 
-            List(selection: selectedID) {
-                sourceList
+            Form {
+                Section {
+                    sourceRows
+                } header: {
+                    Label("Source", systemImage: mode.systemImage)
+                }
+                TuningSections()
             }
-            .listStyle(.sidebar)
-            // On the list only: on the container it overrides every
-            // control's own identifier.
+            .formStyle(.grouped)
+            .scrollContentBackground(.hidden)
+            .controlSize(.small)
             .accessibilityIdentifier("sourceSidebar")
-
-            TuningPanel()
         }
         .toolbar(removing: .sidebarToggle)
         .onAppear { syncMode() }
@@ -81,30 +85,48 @@ struct SourceSidebar: View {
     }
 
     @ViewBuilder
-    private var sourceList: some View {
+    private var sourceRows: some View {
         let kind = mode.sourceKind
         let sources = vm.catalog.videoSources.filter { $0.kind == kind }
         if kind != .camera && !vm.screenCapturePermissionGranted {
-            Button {
-                vm.screenModeSelected()
-            } label: {
-                Label("Allow Screen Recording…", systemImage: "lock")
-            }
-            .buttonStyle(.borderless)
-            .selectionDisabled()
+            Button("Allow Screen Recording…") { vm.screenModeSelected() }
         } else if sources.isEmpty {
             Text(kind == .camera ? "No cameras connected" : kind == .screenDisplay ? "No displays" : "No windows open")
-                .foregroundStyle(.tertiary)
-                .selectionDisabled()
+                .foregroundStyle(.secondary)
+        } else if kind == .screenWindow {
+            // Windows can be many: a menu keeps the sidebar compact.
+            Picker("Window", selection: selectedID) {
+                ForEach(sources) { Text(Self.displayName($0)).tag(String?.some($0.id)) }
+            }
+            .accessibilityIdentifier("windowPicker")
         } else {
             ForEach(sources) { source in
+                sourceRow(source)
+            }
+        }
+    }
+
+    private func sourceRow(_ source: VideoSource) -> some View {
+        let isSelected = vm.selectedMainSource?.id == source.id
+        return Button {
+            vm.selectedMainSource = source
+        } label: {
+            HStack {
                 Label(Self.displayName(source), systemImage: mode.systemImage)
                     .lineLimit(1)
                     .truncationMode(.middle)
-                    .tag(source.id)
-                    .help(source.name)
+                Spacer()
+                if isSelected {
+                    Image(systemName: "checkmark")
+                        .foregroundStyle(Color.accentColor)
+                        .fontWeight(.semibold)
+                }
             }
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
+        .help(source.name)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 
     /// Catalog names carry a kind prefix ("Camera — Elgato 4K X")
@@ -119,87 +141,86 @@ struct SourceSidebar: View {
 
 // MARK: - Tuning
 
-/// Per-method tuning, pinned under the source list.
-private struct TuningPanel: View {
+/// Per-type tuning sections, grouped like System Settings: Video
+/// (camera), Audio (every type), Instant Replay (screen and window).
+/// Only the groups that apply are shown. Lives inside the sidebar's
+/// form, below the Source section.
+private struct TuningSections: View {
     @EnvironmentObject var vm: MainViewModel
 
-    private var kind: VideoSource.Kind? { vm.selectedMainSource?.kind }
+    private var kind: VideoSource.Kind { vm.selectedMainSource?.kind ?? .camera }
+    private var isCamera: Bool { kind == .camera }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Divider()
-            if let kind {
-                header(kind == .camera ? "Camera" : kind == .screenDisplay ? "Screen" : "Window")
-                if kind == .camera { cameraTuning } else { screenTuning }
+        Group {
+            if isCamera {
+                Section {
+                    Picker("Resolution", selection: $vm.captureResolution) {
+                        ForEach(CaptureResolution.allCases) { Text($0.shortLabel).tag($0) }
+                    }
+                    .onChange(of: vm.captureResolution) { _, _ in restartCameraPreview() }
+                    Toggle("Low-light cleanup", isOn: $vm.lowLightNoiseReduction)
+                        .disabled(!vm.lowLightNoiseReductionSupported)
+                        .onChange(of: vm.lowLightNoiseReduction) { _, _ in restartCameraPreview() }
+                } header: {
+                    Label("Video", systemImage: "video")
+                } footer: {
+                    Text(videoFooter)
+                }
             }
-            header("Commentary mic")
-            devicePicker(selection: $vm.ch2DeviceID, id: "micDevicePicker")
-            gainRow($vm.ch2Gain)
+
+            Section {
+                if isCamera {
+                    devicePicker("Source", selection: $vm.ch1DeviceID, id: "sourceDevicePicker")
+                    gainRow($vm.ch1Gain)
+                } else {
+                    LabeledContent("Source", value: "System audio")
+                }
+                LevelRow(levels: { vm.sourceLevels() })
+
+                devicePicker("Mic", selection: $vm.ch2DeviceID, id: "micDevicePicker")
+                if vm.hasMic {
+                    gainRow($vm.ch2Gain)
+                    LevelRow(levels: { vm.micLevels() })
+                }
+            } header: {
+                Label("Audio", systemImage: "waveform")
+            }
+
+            if !isCamera {
+                Section {
+                    Toggle("Keep last 15 seconds", isOn: $vm.instantReplay)
+                        .onChange(of: vm.instantReplay) { _, _ in
+                            if vm.isPreviewing, !vm.isRecording { Task { await vm.startPreview() } }
+                        }
+                } header: {
+                    Label("Instant Replay", systemImage: "gobackward.15")
+                } footer: {
+                    Text(vm.instantReplay ? "Press ⇧⌘R to save a clip, recording or not." : "Saves a clip of what just happened with ⇧⌘R.")
+                }
+            }
+
             if vm.isRecording {
-                Label("Locked while recording", systemImage: "lock.fill")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                Section {
+                    Label("Locked while recording", systemImage: "lock.fill")
+                        .foregroundStyle(.secondary)
+                }
             }
         }
-        .padding(.horizontal, 16)
-        .padding(.bottom, 16)
-        .controlSize(.small)
         .disabled(vm.isRecording)
     }
 
-    @ViewBuilder
-    private var cameraTuning: some View {
-        LabeledContent("Resolution") {
-            Picker("Resolution", selection: $vm.captureResolution) {
-                ForEach(CaptureResolution.allCases) { Text($0.shortLabel).tag($0) }
-            }
-            .labelsHidden()
+    private var videoFooter: String {
+        if !vm.lowLightNoiseReductionSupported {
+            if let size = vm.activeCaptureSize { return "Capturing \(size.width)×\(size.height). Low-light cleanup needs a webcam or Continuity Camera." }
+            return "Low-light cleanup needs a webcam or Continuity Camera."
         }
-        .onChange(of: vm.captureResolution) { _, _ in restartCameraPreview() }
-
-        if let size = vm.activeCaptureSize {
-            Text("Capturing \(size.width)×\(size.height)")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-
-        Toggle("Low-light noise reduction", isOn: $vm.lowLightNoiseReduction)
-            .disabled(!vm.lowLightNoiseReductionSupported)
-            .help(vm.lowLightNoiseReductionSupported
-                  ? "Cleans up grain in dim webcam footage. Changes the image."
-                  : "Not supported by this camera (capture cards don't offer it).")
-            .onChange(of: vm.lowLightNoiseReduction) { _, _ in restartCameraPreview() }
-
-        LabeledContent("Source audio") {
-            devicePicker(selection: $vm.ch1DeviceID, id: "sourceDevicePicker")
-                .labelsHidden()
-        }
-        gainRow($vm.ch1Gain)
+        if let size = vm.activeCaptureSize { return "Capturing \(size.width)×\(size.height)." }
+        return ""
     }
 
-    @ViewBuilder
-    private var screenTuning: some View {
-        Toggle("Instant replay", isOn: $vm.instantReplay)
-            .help("Keeps the last 15 seconds in memory. ⇧⌘R saves it as a clip.")
-            .onChange(of: vm.instantReplay) { _, _ in
-                if vm.isPreviewing, !vm.isRecording { Task { await vm.startPreview() } }
-            }
-        Text(vm.instantReplay ? "⇧⌘R saves the last 15 seconds." : "Records system audio from the shared screen or window.")
-            .font(.caption)
-            .foregroundStyle(.secondary)
-    }
-
-    // MARK: Pieces
-
-    private func header(_ title: String) -> some View {
-        Text(title)
-            .font(.caption.weight(.semibold))
-            .foregroundStyle(.secondary)
-            .textCase(.uppercase)
-    }
-
-    private func devicePicker(selection: Binding<String?>, id: String) -> some View {
-        Picker("Device", selection: selection) {
+    private func devicePicker(_ title: String, selection: Binding<String?>, id: String) -> some View {
+        Picker(title, selection: selection) {
             Text("None").tag(String?.none)
             ForEach(vm.availableAudioSources) { src in
                 Text(src.name).tag(String?.some(src.id))
@@ -209,17 +230,15 @@ private struct TuningPanel: View {
     }
 
     private func gainRow(_ gain: Binding<Double>) -> some View {
-        HStack {
-            Image(systemName: "speaker.wave.1")
-                .foregroundStyle(.secondary)
-            Slider(value: gain, in: 0...1.5)
-            Text("\(Int(gain.wrappedValue * 100))%")
-                .monospacedDigit()
-                .foregroundStyle(.secondary)
-                .frame(width: 38, alignment: .trailing)
+        LabeledContent("Gain") {
+            HStack(spacing: 6) {
+                Slider(value: gain, in: 0...1.5)
+                Text("\(Int(gain.wrappedValue * 100))%")
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+                    .frame(width: 34, alignment: .trailing)
+            }
         }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Gain")
     }
 
     private func restartCameraPreview() {
@@ -227,6 +246,39 @@ private struct TuningPanel: View {
             Task { await vm.startPreview() }
         }
     }
+}
+
+/// Live horizontal level meter, redrawn at 30 fps. Gradient pinned to
+/// the full width so red only shows near 0 dBFS.
+private struct LevelRow: View {
+    let levels: () -> (rms: Float, peak: Float)?
+
+    var body: some View {
+        LabeledContent("Level") {
+            TimelineView(.periodic(from: .now, by: 1.0 / 30.0)) { _ in
+                let l = levels()
+                GeometryReader { geo in
+                    let w = geo.size.width
+                    ZStack(alignment: .leading) {
+                        Capsule().fill(.quaternary)
+                        Capsule()
+                            .fill(LinearGradient(
+                                stops: [.init(color: .signal, location: 0), .init(color: .signal, location: 0.6),
+                                        .init(color: .warningAmber, location: 0.85), .init(color: .red, location: 1)],
+                                startPoint: .leading, endPoint: .trailing))
+                            .mask(alignment: .leading) {
+                                Rectangle().frame(width: w * CGFloat(fraction(l?.rms ?? -120)))
+                            }
+                    }
+                }
+                .frame(height: 6)
+            }
+        }
+        .accessibilityElement()
+        .accessibilityLabel("Level")
+    }
+
+    private func fraction(_ db: Float) -> Float { (min(max(db, -60), 0) + 60) / 60 }
 }
 
 extension CaptureResolution {

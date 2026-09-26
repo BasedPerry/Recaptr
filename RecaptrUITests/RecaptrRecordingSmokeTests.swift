@@ -154,11 +154,11 @@ final class RecaptrRecordingSmokeTests: XCTestCase {
         assertSourceTracks(probe)
     }
 
-    /// Two sources: the mix plus one track per source, with only the
-    /// mix enabled so players don't double the audio.
+    /// Two sources: one enabled track per source and no separate mix,
+    /// so Final Cut shows each as a component and players sum them.
     private func assertSourceTracks(_ probe: Probe) {
-        XCTAssertEqual(probe.audioTracks, 3, "Expected mix + 2 source tracks: \(probe.raw)")
-        XCTAssertEqual(probe.enabledAudioTracks, 1, "Only the mix should be enabled: \(probe.raw)")
+        XCTAssertEqual(probe.audioTracks, 2, "Expected one track per source: \(probe.raw)")
+        XCTAssertEqual(probe.enabledAudioTracks, 2, "Every source track should be enabled: \(probe.raw)")
     }
 
     /// Every named mixer channel is running and pushed real audio.

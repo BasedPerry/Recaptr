@@ -31,6 +31,18 @@ nonisolated struct PeakLimiter {
 
     /// Limit `sampleCount` interleaved samples (`channels` per frame).
     mutating func process(_ samples: UnsafeMutablePointer<Float>, sampleCount: Int, channels: Int) {
+        processLinked(sum: samples, sources: [], sampleCount: sampleCount, channels: channels)
+    }
+
+    /// Linked limiting: the gain is computed from `sum` (the sources
+    /// added together) and the same gain is applied to `sum` and to
+    /// every source. Used when a file carries one track per source and
+    /// players do the summing: the sum stays under the ceiling and the
+    /// balance between sources is unchanged. Each source is also
+    /// clamped on its own.
+    mutating func processLinked(sum samples: UnsafeMutablePointer<Float>,
+                                sources: [UnsafeMutablePointer<Float>],
+                                sampleCount: Int, channels: Int) {
         guard sampleCount > 0, channels > 0 else { return }
 
         var peak: Float = 0
@@ -53,6 +65,9 @@ nonisolated struct PeakLimiter {
                 let idx = f * channels + c
                 // Hard clamp as the last line of defense.
                 samples[idx] = min(max(samples[idx] * g, -ceiling), ceiling)
+                for src in sources {
+                    src[idx] = min(max(src[idx] * g, -ceiling), ceiling)
+                }
             }
         }
         gain = g

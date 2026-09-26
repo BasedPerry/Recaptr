@@ -899,10 +899,12 @@ final class AudioMixer: @unchecked Sendable {
 
     private var formatDescription: CMAudioFormatDescription?
 
-    /// Keep every emitted track under full scale: one limiter for the
-    /// mix and one per source track. Emission queue only.
-    private var mixLimiter = PeakLimiter()
-    private var sourceLimiters: [String: PeakLimiter] = [:]
+    /// One linked limiter: gain comes from the sum of all sources and
+    /// is applied to the sum and every source alike. Multi-source files
+    /// carry one track per source and players add them together, so
+    /// the sum must stay under full scale with the balance unchanged.
+    /// Emission queue only.
+    private var limiter = PeakLimiter()
 
     init(channels: [AudioInputChannel],
          outputFormat: AVAudioFormat = makeMixerFormat(),
@@ -974,8 +976,7 @@ final class AudioMixer: @unchecked Sendable {
             throw CaptureError.configurationFailed("No audio channels could start")
         }
 
-        mixLimiter = PeakLimiter()
-        sourceLimiters = [:]
+        limiter = PeakLimiter()
 
         // 3. Align sources. Channels start one after another, so the
         //    first one up has already buffered audio from before the
@@ -1155,32 +1156,26 @@ final class AudioMixer: @unchecked Sendable {
         let frames = chunkFrames
         let sampleCount = Int(frames) * Int(kMixerChannels)
 
-        // Working buffer, zeroed.
+        // Working buffer (the sum), zeroed.
         var working = [Float](repeating: 0, count: sampleCount)
         var anyChannelActive = false
         // Each channel is pulled into its own buffer so it can be
         // emitted as a per-source track, then summed into the mix.
-        var isolated: [(label: String, samples: [Float])] = []
+        // Raw buffers so the linked limiter can adjust them together.
+        var isolated: [(label: String, samples: UnsafeMutablePointer<Float>)] = []
+        defer { for item in isolated { item.samples.deallocate() } }
 
         for ch in channels where ch.enabled && ch.running {
             anyChannelActive = true
-            var own = [Float](repeating: 0, count: sampleCount)
-            own.withUnsafeMutableBufferPointer { ptr in
-                guard let base = ptr.baseAddress else { return }
-                _ = ch.pull(intoSummed: base, frames: frames)
-            }
+            let own = UnsafeMutablePointer<Float>.allocate(capacity: sampleCount)
+            own.initialize(repeating: 0, count: sampleCount)
+            _ = ch.pull(intoSummed: own, frames: frames)
             for i in 0..<sampleCount { working[i] += own[i] }
-            var limiter = sourceLimiters[ch.label] ?? PeakLimiter()
-            own.withUnsafeMutableBufferPointer {
-                limiter.process($0.baseAddress!, sampleCount: sampleCount, channels: Int(kMixerChannels))
-            }
-            sourceLimiters[ch.label] = limiter
             isolated.append((ch.label, own))
         }
-        // Limit the mix last, after summing the unlimited sources, so
-        // the sum can't clip either.
         working.withUnsafeMutableBufferPointer {
-            mixLimiter.process($0.baseAddress!, sampleCount: sampleCount, channels: Int(kMixerChannels))
+            limiter.processLinked(sum: $0.baseAddress!, sources: isolated.map(\.samples),
+                                  sampleCount: sampleCount, channels: Int(kMixerChannels))
         }
 
         // If no channel is enabled+running, emit silence (still
@@ -1197,7 +1192,8 @@ final class AudioMixer: @unchecked Sendable {
         var channelBuffers: [(String, CMSampleBuffer)] = []
         if onChannelSampleBuffer != nil {
             for (label, samples) in isolated {
-                if let csb = makeSampleBuffer(samples: samples, frameCount: Int(frames), format: fmt) {
+                let array = Array(UnsafeBufferPointer(start: samples, count: sampleCount))
+                if let csb = makeSampleBuffer(samples: array, frameCount: Int(frames), format: fmt) {
                     channelBuffers.append((label, csb))
                 }
             }
