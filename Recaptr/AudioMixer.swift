@@ -86,6 +86,8 @@ struct AudioInputChannelStats: Equatable {
     /// Frames dropped to keep this channel's backlog bounded (device
     /// clock running ahead of the mixer). Zero in a normal session.
     var trimmedFrames: Int = 0
+    /// Automatic restarts after a stall or audio hardware change.
+    var recoveries: Int = 0
     var lastError: String?
     /// RMS over the last converted buffer, in dBFS (-∞ … 0).
     /// Smoothed with a one-pole low-pass for a stable VU display.
@@ -243,6 +245,54 @@ nonisolated final class AudioInputChannel: @unchecked Sendable {
         // toggle-on so the `outputNode` binds to the *then-current*
         // default output device.
         buildMonitorEngine()
+
+        // macOS stops a running engine when the audio hardware setup
+        // changes (for example the default output switching from
+        // AirPods to speakers). Without handling this, capture dies
+        // silently and the mixer records zeros. The mixer restarts
+        // the channel when this fires.
+        if !isExternal {
+            configObserver = NotificationCenter.default.addObserver(
+                forName: .AVAudioEngineConfigurationChange,
+                object: engine,
+                queue: .main
+            ) { [weak self] _ in
+                guard let self else { return }
+                print("AudioInputChannel[\(self.label)]: audio hardware configuration changed")
+                self.onConfigurationChange?(self)
+            }
+        }
+    }
+
+    deinit {
+        if let configObserver { NotificationCenter.default.removeObserver(configObserver) }
+        if let monitorConfigObserver { NotificationCenter.default.removeObserver(monitorConfigObserver) }
+    }
+
+    /// Set by the mixer. Called on the main queue when macOS reports
+    /// an audio hardware change for this channel's engine.
+    var onConfigurationChange: ((AudioInputChannel) -> Void)?
+    private var configObserver: NSObjectProtocol?
+
+    /// Frames captured so far (monotonic). The runtime watchdog
+    /// compares successive readings to spot a stalled channel.
+    var pushedFrameCount: Int {
+        lock.lock(); defer { lock.unlock() }
+        return convertedFramesPushed
+    }
+
+    /// Recoveries after a stall or hardware change this session.
+    private(set) var recoveryCount = 0
+    func noteRecovery() { recoveryCount += 1 }
+
+    /// UI tests only: stop the engine the way macOS does on a hardware
+    /// change, optionally without the notification (a silent stall).
+    func simulateEngineStopForTesting(notify: Bool) {
+        guard !isExternal, running else { return }
+        engine.stop()
+        if notify {
+            NotificationCenter.default.post(name: .AVAudioEngineConfigurationChange, object: engine)
+        }
     }
 
     /// (Re)build the monitor engine + player node from scratch and
@@ -269,7 +319,23 @@ nonisolated final class AudioInputChannel: @unchecked Sendable {
         engine.mainMixerNode.outputVolume = monitorVolume
         self.monitorEngine = engine
         self.monitorPlayerNode = player
+
+        // Output device changed (AirPods to speakers, etc.): macOS
+        // stops this engine. Rebuild it so monitoring continues on the
+        // new default output.
+        if let monitorConfigObserver { NotificationCenter.default.removeObserver(monitorConfigObserver) }
+        monitorConfigObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange,
+            object: engine,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self, self.monitorRunning else { return }
+            print("AudioInputChannel[\(self.label)]: output changed, rebuilding monitor")
+            self.stopMonitor()
+            self.startMonitorIfNeeded()
+        }
     }
+    private var monitorConfigObserver: NSObjectProtocol?
 
     /// Start the monitor engine if `monitorEnabled` is set. Called by
     /// `AudioMixer` after a successful capture engine start.
@@ -681,6 +747,7 @@ nonisolated final class AudioInputChannel: @unchecked Sendable {
             framesPulledByMixer: pulled,
             zeroFillEvents: zf,
             trimmedFrames: trimmed,
+            recoveries: recoveryCount,
             lastError: err,
             rmsDbfs: rmsDb,
             peakDbfs: peakDb
@@ -825,7 +892,16 @@ final class AudioMixer: @unchecked Sendable {
         self.channels = channels
         self.outputFormat = outputFormat
         self.chunkFrames = chunkFrames
+        for ch in channels {
+            ch.onConfigurationChange = { [weak self] ch in
+                self?.recover(ch, reason: "audio hardware changed")
+            }
+        }
     }
+
+    /// Called with a human-readable note whenever a channel is
+    /// recovered or given up on, so the UI can say so.
+    var onChannelEvent: ((String) -> Void)?
 
     func channel(at index: Int) -> AudioInputChannel? {
         channels.indices.contains(index) ? channels[index] : nil
@@ -905,6 +981,91 @@ final class AudioMixer: @unchecked Sendable {
         t.resume()
 
         scheduleStartWatchdog(attempt: 1)
+        startRuntimeWatchdog()
+
+        // UI tests: `-RecaptrUITestSimulateAudioReset notify|silent`
+        // stops the device engines 6 s after start, as macOS does on
+        // an audio hardware change, with or without the notification.
+        if UserDefaults.standard.bool(forKey: "RecaptrUITesting"),
+           let mode = UserDefaults.standard.string(forKey: "RecaptrUITestSimulateAudioReset") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 6) { [weak self] in
+                guard let self, self.running else { return }
+                print("AudioMixer: TEST simulating audio reset (\(mode))")
+                for ch in self.channels where ch.running {
+                    ch.simulateEngineStopForTesting(notify: mode == "notify")
+                }
+            }
+        }
+    }
+
+    // MARK: - Runtime watchdog
+
+    /// Once running, a device channel that captures nothing for
+    /// `stallTimeout` is restarted, at any point in the session (the
+    /// start watchdog only covers startup). External channels are
+    /// skipped: their audio comes from SCStream, which this can't
+    /// restart. After `maxConsecutiveRecoveries` restarts without
+    /// progress, the channel is flagged instead of retried forever.
+    private var runtimeWatchdog: DispatchSourceTimer?
+    private var lastPushed: [ObjectIdentifier: (frames: Int, since: Date)] = [:]
+    private var failedRecoveries: [ObjectIdentifier: Int] = [:]
+    private let stallTimeout: TimeInterval = 1.5
+    private let maxConsecutiveRecoveries = 5
+
+    private func startRuntimeWatchdog() {
+        lastPushed = [:]
+        failedRecoveries = [:]
+        let t = DispatchSource.makeTimerSource(queue: .main)
+        t.schedule(deadline: .now() + 1, repeating: 0.5)
+        t.setEventHandler { [weak self] in self?.checkForStalls() }
+        runtimeWatchdog = t
+        t.resume()
+    }
+
+    private func checkForStalls() {
+        guard running else { return }
+        let now = Date()
+        for ch in channels where ch.enabled && ch.running && !ch.isExternal {
+            let id = ObjectIdentifier(ch)
+            let pushed = ch.pushedFrameCount
+            guard let last = lastPushed[id], last.frames == pushed else {
+                if lastPushed[id] != nil { failedRecoveries[id] = 0 }
+                lastPushed[id] = (pushed, now)
+                continue
+            }
+            if now.timeIntervalSince(last.since) >= stallTimeout {
+                lastPushed[id] = (pushed, now)
+                recover(ch, reason: "no audio for \(stallTimeout) s")
+            }
+        }
+    }
+
+    /// Restart one channel in place. Main queue.
+    private func recover(_ ch: AudioInputChannel, reason: String) {
+        guard running, ch.enabled, !ch.isExternal else { return }
+        let id = ObjectIdentifier(ch)
+        let failures = (failedRecoveries[id] ?? 0) + 1
+        failedRecoveries[id] = failures
+        guard failures <= maxConsecutiveRecoveries else {
+            if failures == maxConsecutiveRecoveries + 1 {
+                ch.stop()
+                ch.recordStartFailure("stopped delivering audio and could not be restarted")
+                print("AudioMixer: giving up on '\(ch.label)'")
+                onChannelEvent?("\(ch.label) audio stopped and could not be restarted. Check the device.")
+            }
+            return
+        }
+        print("AudioMixer: recovering '\(ch.label)' (\(reason))")
+        ch.stop()
+        do {
+            try ch.start()
+            ch.startMonitorIfNeeded()
+            ch.noteRecovery()
+            onChannelEvent?("\(ch.label) audio restarted (\(reason)).")
+        } catch {
+            ch.recordStartFailure(error.localizedDescription)
+            onChannelEvent?("\(ch.label) audio failed to restart: \(error.localizedDescription)")
+        }
     }
 
     // MARK: - Start watchdog
@@ -955,6 +1116,8 @@ final class AudioMixer: @unchecked Sendable {
     func stop() {
         timer?.cancel()
         timer = nil
+        runtimeWatchdog?.cancel()
+        runtimeWatchdog = nil
         for ch in channels { ch.stop() }
         running = false
         startClockTime = .invalid  // reset for the next start()

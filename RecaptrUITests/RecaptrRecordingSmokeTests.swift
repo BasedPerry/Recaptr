@@ -101,6 +101,34 @@ final class RecaptrRecordingSmokeTests: XCTestCase {
         assertSourceTracks(probe)
     }
 
+    /// Audio hardware change mid-recording (macOS stops the capture
+    /// engine and posts a configuration change, as when the output
+    /// switches from AirPods to speakers). Capture must recover.
+    @MainActor
+    func testAudioRecoversFromHardwareChange() throws {
+        try assertAudioRecovers(mode: "notify")
+    }
+
+    /// Engine stops with no notification at all: the runtime
+    /// watchdog must notice the stall and recover.
+    @MainActor
+    func testAudioRecoversFromSilentStall() throws {
+        try assertAudioRecovers(mode: "silent")
+    }
+
+    @MainActor
+    private func assertAudioRecovers(mode: String) throws {
+        let probe = try record(modeKey: "3", seconds: 8,
+                               extraArgs: ["-RecaptrUITestSimulateAudioReset", mode])
+        let part = probe.status.components(separatedBy: " · ").first { $0.hasPrefix("Audio:") } ?? ""
+        XCTAssertTrue(part.contains("recovered="), "No recovery happened: \(part)")
+        // Captured audio must keep pace with the mixer after recovery:
+        // a dead channel would stop pushing at the 6 s mark.
+        let pushed = number(in: part, after: "push=", until: " ") ?? 0
+        let pulled = number(in: part, after: "pull=", until: " ") ?? 1
+        XCTAssertGreaterThan(pushed / pulled, 0.85, "Audio stopped after the reset: \(part)")
+    }
+
     /// Capture card plus a second input on the mic channel. Uses the
     /// Jump Desktop virtual microphone so the test runs without a
     /// physical second mic; it delivers silence, which still proves

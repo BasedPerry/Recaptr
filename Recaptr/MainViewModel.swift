@@ -211,6 +211,10 @@ final class MainViewModel: ObservableObject {
         audioMixer.onMixedSampleBuffer = { [weak self] sb in
             self?.recorder.appendAudio(sb)
         }
+        // Recoveries and failures surface on the status line.
+        audioMixer.onChannelEvent = { [weak self] message in
+            self?.status = message
+        }
         // Per-source tracks. The recorder drops these unless the
         // recording was started with source tracks.
         audioMixer.onChannelSampleBuffer = { [weak self] label, sb in
@@ -1338,6 +1342,9 @@ final class MainViewModel: ObservableObject {
             s += " push=\(ch.convertedFramesPushed) pull=\(ch.framesPulledByMixer) zf=\(ch.zeroFillEvents)"
             if ch.trimmedFrames > 0 {
                 s += " trim=\(ch.trimmedFrames)"
+            }
+            if ch.recoveries > 0 {
+                s += " recovered=\(ch.recoveries)"
             }
             if let err = ch.lastError {
                 s += " ERR=\(err)"

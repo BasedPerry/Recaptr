@@ -38,6 +38,8 @@ nonisolated final class SystemAudioMonitor: @unchecked Sendable {
     private var queuedFrames: Int = 0
     private let maxQueuedSeconds: Double = 0.15
 
+    private var configObserver: NSObjectProtocol?
+
     /// Buffers skipped to keep latency bounded. Diagnostic only.
     private(set) var skippedBuffers: Int = 0
 
@@ -143,6 +145,19 @@ nonisolated final class SystemAudioMonitor: @unchecked Sendable {
         self.player = player
         self.format = format
         self.queuedFrames = 0
+        // Output device changed: macOS stops this engine. Drop it; the
+        // next buffer rebuilds it on the new default output.
+        configObserver.map { NotificationCenter.default.removeObserver($0) }
+        configObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil
+        ) { [weak self] _ in
+            guard let self else { return }
+            print("SystemAudioMonitor: output changed, rebuilding")
+            self.lock.lock()
+            let old = self.detachLocked()
+            self.lock.unlock()
+            Self.stop(old)
+        }
         print("SystemAudioMonitor: started — \(format)")
         return true
     }
