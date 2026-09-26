@@ -59,6 +59,7 @@ final class RecaptrRecordingSmokeTests: XCTestCase {
         let probe = try record(modeKey: "3", seconds: 6, markers: 2)
         XCTAssertGreaterThanOrEqual(probe.fps, 29)
         XCTAssertEqual(probe.markerRanges, 3, "Expected Start + 2 marker ranges: \(probe.raw)")
+        XCTAssertTrue(probe.raw.contains(".fcpxml"), "Expected a Final Cut marker file: \(probe.raw)")
     }
 
     /// Each encoding preset records a valid 60 fps file in the right
@@ -276,6 +277,10 @@ final class RecaptrRecordingSmokeTests: XCTestCase {
         let statusText = app.staticTexts["statusLine"]
         XCTAssertTrue(probeText.waitForExistence(timeout: 5))
         let gotProbe = waitUntil(timeout: 20, { text(of: probeText).hasPrefix("Probe →") })
+        if markers > 0 {
+            // The Final Cut marker file is noted after the probe.
+            _ = waitUntil(timeout: 10, { text(of: probeText).contains(".fcpxml") })
+        }
         let status = XCTAttachment(string: text(of: statusText))
         status.name = "Status, Cmd+\(modeKey)"
         status.lifetime = .keepAlways

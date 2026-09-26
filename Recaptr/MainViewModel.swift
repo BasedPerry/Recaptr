@@ -1353,7 +1353,10 @@ final class MainViewModel: ObservableObject {
         // silent-recording case where the file lands but has no audio
         // track.
         if let url {
-            Task { await self.probeRecordedFile(url) }
+            Task {
+                await self.probeRecordedFile(url)
+                await self.writeFinalCutMarkers(for: url)
+            }
         }
     }
 
@@ -1394,6 +1397,23 @@ final class MainViewModel: ObservableObject {
             return s
         }.joined(separator: " · ")
         return "\(recPart) · \(mixPart) · \(chPart)"
+    }
+
+    /// Final Cut doesn't read the markers stored in the .mov, so a
+    /// recording with markers also gets a .fcpxml beside it.
+    private func writeFinalCutMarkers(for url: URL) async {
+        do {
+            if let xml = try await FinalCutMarkers.writeIfNeeded(for: url) {
+                if UserDefaults.standard.bool(forKey: "RecaptrUITesting"),
+                   let text = try? String(contentsOf: xml, encoding: .utf8) {
+                    print("RecaptrUITest: fcpxml BEGIN\n\(text)RecaptrUITest: fcpxml END")
+                }
+                status += "\nFinal Cut markers → \(xml.lastPathComponent) (double-click to import)"
+                lastFileProbeSummary = (lastFileProbeSummary ?? "") + " · fcpxml=\(xml.lastPathComponent)"
+            }
+        } catch {
+            status += "\nCouldn't write Final Cut markers: \(error.localizedDescription)"
+        }
     }
 
     /// Open the saved .mov and report what's actually in it.
@@ -1501,7 +1521,15 @@ final class MainViewModel: ObservableObject {
         Task { @MainActor in
             try? await Task.sleep(for: .seconds(3))
             await startRecording()
-            try? await Task.sleep(for: .seconds(seconds))
+            // `-RecaptrUITestAutoMarkers <n>` drops n markers spread
+            // evenly through the take.
+            let markerCount = max(0, d.integer(forKey: "RecaptrUITestAutoMarkers"))
+            let slice = seconds / Double(markerCount + 1)
+            for _ in 0..<markerCount {
+                try? await Task.sleep(for: .seconds(slice))
+                dropMarker()
+            }
+            try? await Task.sleep(for: .seconds(slice))
             await stopRecording()
             try? await Task.sleep(for: .seconds(4))  // let the probe print
             print("RecaptrUITest: status → \(status)")
