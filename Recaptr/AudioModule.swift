@@ -291,6 +291,9 @@ private struct MeterReading {
 
 // MARK: - Preview
 
+// Debug only: ChromePreviewStage (Glass.swift) is a debug helper.
+#if DEBUG
+
 #Preview("Audio Module, Dark") {
     ChromePreviewStage { AudioModule().environmentObject(MainViewModel()) }
         .frame(width: 600, height: 400)
@@ -302,3 +305,4 @@ private struct MeterReading {
         .frame(width: 600, height: 400)
         .preferredColorScheme(.light)
 }
+#endif

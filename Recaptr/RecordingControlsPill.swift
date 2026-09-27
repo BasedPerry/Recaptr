@@ -140,6 +140,9 @@ struct RecordingControlsPill: View {
 
 // MARK: - Preview
 
+// Debug only: ChromePreviewStage (Glass.swift) is a debug helper.
+#if DEBUG
+
 #Preview("Recording Controls, Dark") {
     ChromePreviewStage { RecordingControlsPreview() }
         .frame(width: 1200, height: 300)
@@ -167,3 +170,4 @@ private struct RecordingControlsPreview: View {
         }
     }
 }
+#endif

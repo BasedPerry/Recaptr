@@ -189,6 +189,9 @@ struct SourceSwitcherPill: View {
 
 // MARK: - Preview
 
+// Debug only: ChromePreviewStage (Glass.swift) is a debug helper.
+#if DEBUG
+
 #Preview("Source Switcher, Dark") {
     ChromePreviewStage { SourceSwitcherPreview() }
         .frame(width: 1800, height: 360)
@@ -225,3 +228,4 @@ private struct SourceSwitcherPreview: View {
         }
     }
 }
+#endif
