@@ -51,13 +51,14 @@ struct SourceSidebar: View {
                 .padding(.top, 8)
                 .padding(.bottom, 2)
 
+            // Apple's order: what you're capturing, then how it's
+            // named, then how it's tuned. Plain-text section headers,
+            // as in System Settings and Finder.
             Form {
-                NamingSection()
-                Section {
+                Section("Source") {
                     sourceRows
-                } header: {
-                    Label("Source", systemImage: mode.systemImage)
                 }
+                NamingSection()
                 TuningSections()
             }
             .formStyle(.grouped)
@@ -199,7 +200,7 @@ private struct NamingSection: View {
                 .disabled(vm.seriesName.trimmingCharacters(in: .whitespaces).isEmpty)
                 .accessibilityIdentifier("episodeField")
         } header: {
-            Label("Recording", systemImage: "record.circle")
+            Text("Recording")
         } footer: {
             Text(footer)
         }
@@ -208,17 +209,18 @@ private struct NamingSection: View {
     private var aiNaming: Bool { vm.aiNamingEnabled && MarkerNamer.isAvailable }
 
     private var episodePrompt: String {
-        aiNaming ? "Auto: number + title from markers" : "Auto: next number"
+        "Auto"
     }
 
     private var footer: String {
         let series = SessionNaming.sanitize(vm.seriesName)
+        let ai = "Markers are named with Apple Intelligence after you stop."
         guard !series.isEmpty else {
-            return aiNaming ? "Markers are named with Apple Intelligence after you stop." : "Add a series to file recordings together."
+            return "Add a series to file recordings together." + (aiNaming ? " " + ai : "")
         }
-        let episode = SessionNaming.sanitize(vm.episodeName)
-        let name = SessionNaming.baseName(series: series, episode: episode.isEmpty ? "Ep N" : episode)
-        return "Saves as \(series)/\(name).mov"
+        let typed = SessionNaming.sanitize(vm.episodeName)
+        let episode = !typed.isEmpty ? typed : aiNaming ? "Ep N – Title" : "Ep N"
+        return "Saves as \(series)/\(SessionNaming.baseName(series: series, episode: episode)).mov"
     }
 }
 
@@ -249,7 +251,7 @@ private struct TuningSections: View {
                             .onChange(of: vm.lowLightNoiseReduction) { _, _ in restartCameraPreview() }
                     }
                 } header: {
-                    Label("Video", systemImage: "video")
+                    Text("Video")
                 } footer: {
                     Text(videoFooter)
                 }
@@ -269,7 +271,7 @@ private struct TuningSections: View {
                     // Never recorded; green while previewing, red while recording.
                     Toggle("Outline what's captured", isOn: $vm.showCaptureOutline)
                 } header: {
-                    Label("Video", systemImage: "video")
+                    Text("Video")
                 } footer: {
                     Text(screenVideoFooter)
                 }
@@ -292,7 +294,7 @@ private struct TuningSections: View {
                     LevelRow(levels: { vm.micLevels() })
                 }
             } header: {
-                Label("Audio", systemImage: "waveform")
+                Text("Audio")
             }
 
             if !isCamera {
@@ -302,7 +304,7 @@ private struct TuningSections: View {
                             if vm.isPreviewing, !vm.isRecording { Task { await vm.startPreview() } }
                         }
                 } header: {
-                    Label("Instant Replay", systemImage: "gobackward.15")
+                    Text("Instant Replay")
                 } footer: {
                     Text(vm.instantReplay ? "Press ⇧⌘R to save a clip, recording or not." : "Saves a clip of what just happened with ⇧⌘R.")
                 }
@@ -348,7 +350,9 @@ private struct TuningSections: View {
     /// Auto keeps the source's own size up to 4K; the note says what
     /// that came to.
     private var screenVideoFooter: String {
-        guard let size = vm.activeCaptureSize else { return "Auto records at the source's own size, up to 4K." }
+        // Nothing until capture starts, rather than a generic line
+        // that flashes on every source switch.
+        guard let size = vm.activeCaptureSize else { return "" }
         return "Capturing \(size.width)×\(size.height) at \(vm.screenFrameRate) fps."
     }
 

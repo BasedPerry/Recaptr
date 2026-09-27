@@ -22,15 +22,54 @@ final class RecaptrRecordingSmokeTests: XCTestCase {
 
     @MainActor
     func testScreenRecording() throws {
-        // Monitor on, so system-audio playback runs alongside the
-        // recorder for the whole take.
-        let probe = try record(modeKey: "2", seconds: 6, monitor: true)
+        let probe = try record(modeKey: "2", seconds: 6)
         XCTAssertEqual(probe.videoTracks, 1)
         XCTAssertGreaterThan(probe.duration, 4)
-        // SCStream only delivers frames when the screen changes, so a
-        // static desktop can legitimately land well under 60.
-        XCTAssertGreaterThan(probe.fps, 0)
+        // Constant frame rate even on a still desktop (the grid fills
+        // frames SCStream doesn't send).
+        XCTAssertGreaterThanOrEqual(probe.fps, 59, "Screen capture isn't a steady 60: \(probe.raw)")
+        XCTAssertTrue(probe.raw.contains("transfer=709"), "Screen capture should be Rec. 709: \(probe.raw)")
         XCTAssertTrue(probe.hasAudio, "Screen capture should carry the system audio track")
+    }
+
+    @MainActor
+    func testWindowRecording() throws {
+        let probe = try record(modeKey: "1", seconds: 6)
+        XCTAssertEqual(probe.videoTracks, 1)
+        XCTAssertGreaterThanOrEqual(probe.fps, 59, "Window capture isn't a steady 60: \(probe.raw)")
+        XCTAssertTrue(probe.raw.contains("transfer=709"), "Window capture should be Rec. 709: \(probe.raw)")
+    }
+
+    /// Screen capture without a mic has nothing to monitor (the system
+    /// audio already plays through the speakers), so the monitor
+    /// button is disabled.
+    @MainActor
+    func testScreenMonitorNeedsAMic() throws {
+        let app = XCUIApplication()
+        app.launchArguments += ["-ApplePersistenceIgnoreState", "YES", "-RecaptrUITesting", "YES",
+                                "-RecaptrKeepChromeVisible", "YES", "-RecaptrUITestMicInput", "NoSuchMic"]
+        app.launch()
+        let window = app.windows.firstMatch
+        XCTAssertTrue(window.waitForExistence(timeout: 10))
+        window.typeKey("2", modifierFlags: .command)
+        let record = app.buttons["recordButton"]
+        guard waitUntil(timeout: 8, { record.isEnabled }) else { throw XCTSkip("No screen source") }
+        let monitor = app.buttons["monitorToggle"]
+        XCTAssertTrue(monitor.waitForExistence(timeout: 5))
+        XCTAssertTrue(waitUntil(timeout: 5, { !monitor.isEnabled }), "Monitor should be disabled for screen without a mic")
+    }
+
+    /// With a series and episode set, the take is filed as
+    /// "Series/Series – Episode.mov" and its markers go in the .fcpxml.
+    @MainActor
+    func testSeriesRecordingIsFiled() throws {
+        let probe = try record(modeKey: "3", seconds: 6, markers: 1,
+                               extraArgs: ["-RecaptrUITestSeries", "UITest Series",
+                                           "-RecaptrUITestEpisode", "Smoke"],
+                               waitForFiling: true)
+        XCTAssertTrue(probe.status.contains("Saved as UITest Series/UITest Series – Smoke"),
+                      "Not filed under the series: \(probe.status)")
+        XCTAssertEqual(probe.markers, 1)
     }
 
     @MainActor
@@ -225,7 +264,7 @@ final class RecaptrRecordingSmokeTests: XCTestCase {
 
     @MainActor
     private func record(modeKey: String, seconds: TimeInterval, monitor: Bool = false,
-                        markers: Int = 0, extraArgs: [String] = [],
+                        markers: Int = 0, extraArgs: [String] = [], waitForFiling: Bool = false,
                         beforeRecording: ((XCUIApplication) throws -> Void)? = nil) throws -> Probe {
         let app = XCUIApplication()
         // Ignore saved window state so every run starts with the
@@ -277,9 +316,10 @@ final class RecaptrRecordingSmokeTests: XCTestCase {
         let statusText = app.staticTexts["statusLine"]
         XCTAssertTrue(probeText.waitForExistence(timeout: 5))
         let gotProbe = waitUntil(timeout: 20, { text(of: probeText).hasPrefix("Probe →") })
-        if markers > 0 {
-            // The Final Cut marker file is noted after the probe.
-            _ = waitUntil(timeout: 10, { text(of: probeText).contains(".fcpxml") })
+        if markers > 0 || waitForFiling {
+            // The Final Cut file is noted after the probe, and after
+            // marker naming (Apple Intelligence can take a while).
+            _ = waitUntil(timeout: 60, { text(of: probeText).contains(".fcpxml") })
         }
         let status = XCTAttachment(string: text(of: statusText))
         status.name = "Status, Cmd+\(modeKey)"

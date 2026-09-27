@@ -37,6 +37,25 @@ final class RecaptrUITests: XCTestCase {
         XCTAssertNotNil(volume.value)
     }
 
+    /// Typing a series in the sidebar shows where the next recording
+    /// will be saved.
+    @MainActor
+    func testSeriesFieldShowsSaveName() throws {
+        let app = launchApp()
+        element("sidebarToggle", in: app).click()
+        let series = app.textFields["seriesField"]
+        XCTAssertTrue(series.waitForExistence(timeout: 5))
+        series.click()
+        series.typeText("UITest Series")
+        let episode = app.textFields["episodeField"]
+        XCTAssertTrue(episode.isEnabled, "Episode stays disabled with a series set")
+        episode.click()
+        episode.typeText("Pilot")
+        let note = app.staticTexts.containing(NSPredicate(format: "value CONTAINS %@ OR label CONTAINS %@",
+                                                          "UITest Series – Pilot.mov", "UITest Series – Pilot.mov")).firstMatch
+        XCTAssertTrue(note.waitForExistence(timeout: 3), "Save-name note didn't update")
+    }
+
     @MainActor
     func testLaunchPerformance() throws {
         measure(metrics: [XCTApplicationLaunchMetric()]) {
@@ -52,7 +71,8 @@ final class RecaptrUITests: XCTestCase {
         // Ignore saved window state so every run starts with the
         // capture window open.
         app.launchArguments += ["-ApplePersistenceIgnoreState", "YES"]
-        app.launchArguments += ["-RecaptrKeepChromeVisible", "YES"]
+        // Testing mode keeps typed names out of the user's settings.
+        app.launchArguments += ["-RecaptrUITesting", "YES", "-RecaptrKeepChromeVisible", "YES"]
         app.launch()
         return app
     }

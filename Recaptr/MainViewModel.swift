@@ -447,6 +447,13 @@ final class MainViewModel: ObservableObject {
                 // UI tests: `-RecaptrUITestMicInput <name>` binds the
                 // mic channel to the first input whose name contains
                 // <name>, so multi-source runs without clicking.
+                // `-RecaptrUITestSeries <name>` / `-RecaptrUITestEpisode
+                // <name>` preset the naming fields (not saved; see
+                // isUITesting).
+                if Self.isUITesting {
+                    if let series = UserDefaults.standard.string(forKey: "RecaptrUITestSeries") { self.seriesName = series }
+                    if let episode = UserDefaults.standard.string(forKey: "RecaptrUITestEpisode") { self.episodeName = episode }
+                }
                 if UserDefaults.standard.bool(forKey: "RecaptrUITesting"),
                    let want = UserDefaults.standard.string(forKey: "RecaptrUITestMicInput"),
                    let match = self.availableAudioSources.first(where: {
@@ -1686,10 +1693,6 @@ final class MainViewModel: ObservableObject {
             seriesHistory = []
             print("RecaptrUITest: naming reset")
         }
-        // `-RecaptrUITestSeries <name>` / `-RecaptrUITestEpisode <name>`
-        // (not saved; see isUITesting).
-        if let series = d.string(forKey: "RecaptrUITestSeries") { seriesName = series }
-        if let episode = d.string(forKey: "RecaptrUITestEpisode") { episodeName = episode }
         Task { @MainActor in
             try? await Task.sleep(for: .seconds(3))
             await startRecording()
