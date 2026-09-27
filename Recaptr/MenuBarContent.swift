@@ -21,7 +21,7 @@ struct MenuBarContent: View {
 
         Divider()
 
-        Button("Drop Marker (⌘B)") {
+        Button("Drop Marker (⌘B, or ⌃⌥⌘B from any app)") {
             vm.dropMarker()
         }
 

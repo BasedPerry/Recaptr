@@ -207,6 +207,8 @@ private struct TuningSections: View {
                     .onChange(of: vm.screenFrameRate) { _, _ in restartScreenPreview() }
                     Toggle("Show cursor", isOn: $vm.screenShowsCursor)
                         .onChange(of: vm.screenShowsCursor) { _, _ in restartScreenPreview() }
+                    // Never recorded; green while previewing, red while recording.
+                    Toggle("Outline what's captured", isOn: $vm.showCaptureOutline)
                 } header: {
                     Label("Video", systemImage: "video")
                 } footer: {

@@ -106,6 +106,27 @@ final class MainViewModel: ObservableObject {
         UserDefaults.standard.integer(forKey: "RecaptrScreenFrameRate") == 30 ? 30 : 60 {
         didSet { UserDefaults.standard.set(screenFrameRate, forKey: "RecaptrScreenFrameRate") }
     }
+    /// Outline the display or window being captured (never recorded).
+    @Published var showCaptureOutline: Bool =
+        UserDefaults.standard.object(forKey: "RecaptrShowCaptureOutline") as? Bool ?? true {
+        didSet {
+            UserDefaults.standard.set(showCaptureOutline, forKey: "RecaptrShowCaptureOutline")
+            if !showCaptureOutline { captureOutline.hide() }
+            else if isPreviewing, let src = selectedMainSource { showOutline(for: src) }
+        }
+    }
+    private let captureOutline = CaptureOutline()
+
+    private func showOutline(for source: VideoSource) {
+        guard showCaptureOutline else { return }
+        if let id = source.displayID, source.kind == .screenDisplay {
+            captureOutline.show(display: id)
+        } else if let id = source.windowID, source.kind == .screenWindow {
+            captureOutline.show(window: id)
+        }
+        captureOutline.setRecording(isRecording)
+    }
+
     @Published var screenShowsCursor: Bool =
         UserDefaults.standard.object(forKey: "RecaptrScreenShowsCursor") as? Bool ?? true {
         didSet { UserDefaults.standard.set(screenShowsCursor, forKey: "RecaptrScreenShowsCursor") }
@@ -223,6 +244,9 @@ final class MainViewModel: ObservableObject {
     private var isStartingPreview = false
 
     private var recordingStartedAt: Date?
+    /// ⌃⌥⌘B drops a marker from any app, registered only while
+    /// recording so the combo is free the rest of the time.
+    private var markerHotKey: GlobalHotKey?
     /// Held while recording so idle sleep can't cut a long capture
     /// short. Keeps the display awake too: with only system sleep
     /// blocked, the display slept after 10 idle minutes and the
@@ -1107,11 +1131,16 @@ final class MainViewModel: ObservableObject {
                 // frame. Without this, capturing the display Recaptr
                 // is running on creates an infinite-mirror artifact
                 // (preview shows itself showing itself…).
+                // Excluding the app rather than its current windows also
+                // keeps out windows opened later (the capture outline).
                 let myBundleID = Bundle.main.bundleIdentifier
-                let myWindows = content.windows.filter {
-                    $0.owningApplication?.bundleIdentifier == myBundleID
+                let filter: SCContentFilter
+                if let me = content.applications.first(where: { $0.bundleIdentifier == myBundleID }) {
+                    filter = SCContentFilter(display: display, excludingApplications: [me], exceptingWindows: [])
+                } else {
+                    let myWindows = content.windows.filter { $0.owningApplication?.bundleIdentifier == myBundleID }
+                    filter = SCContentFilter(display: display, excludingWindows: myWindows)
                 }
-                let filter = SCContentFilter(display: display, excludingWindows: myWindows)
                 let svc = makeScreenService(audioViaMixer: micArmed)
                 let size = screenResolution.fit(ScreenResolution.pixelSize(of: display))
                 dims = try await svc.start(filter: filter, previewSink: previewSinkLayer, size: size,
@@ -1142,6 +1171,7 @@ final class MainViewModel: ObservableObject {
 
             activeDims = dims
             isPreviewing = true
+            showOutline(for: src)
             scheduleUITestAutoRecordIfRequested()
             replayAvailable = screenService?.isReplayBuffering ?? false
 
@@ -1272,6 +1302,7 @@ final class MainViewModel: ObservableObject {
         }
         hasScreenAudio = false
         replayAvailable = false
+        captureOutline.hide()
 
         previewSinkLayer.flush()
         // Clear the cached preview frame so a stale frame from this
@@ -1356,6 +1387,8 @@ final class MainViewModel: ObservableObject {
             )
             isRecording = true
             recordingStartedAt = Date()
+            markerHotKey = GlobalHotKey.marker { [weak self] in self?.dropMarker() }
+            captureOutline.setRecording(true)
             recordingURL = url
             recordingBytes = 0
             recordingActivity = ProcessInfo.processInfo.beginActivity(
@@ -1384,6 +1417,9 @@ final class MainViewModel: ObservableObject {
         // monitoring. Only the recorder stops here.
         let url = await recorder.stop()
         isRecording = false
+        markerHotKey?.unregister()
+        markerHotKey = nil
+        captureOutline.setRecording(false)
         if let activity = recordingActivity {
             ProcessInfo.processInfo.endActivity(activity)
             recordingActivity = nil
@@ -1574,6 +1610,11 @@ final class MainViewModel: ObservableObject {
             await startRecording()
             // `-RecaptrUITestMonitor YES` monitors the source during
             // the take (latency tests: the mic hears the speakers).
+            // Outline check: is a Recaptr window up at status-bar level?
+            let mine = (CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? [])
+                .filter { ($0[kCGWindowOwnerPID as String] as? Int32) == ProcessInfo.processInfo.processIdentifier }
+                .compactMap { $0[kCGWindowLayer as String] as? Int }
+            print("RecaptrUITest: own window layers \(mine.sorted())")
             if d.bool(forKey: "RecaptrUITestMonitor") {
                 // `-RecaptrUITestMonitorVolume 0` keeps a mic monitor
                 // silent (no feedback through speakers).
@@ -1609,6 +1650,10 @@ final class MainViewModel: ObservableObject {
             await stopRecording()
             try? await Task.sleep(for: .seconds(4))  // let the probe print
             #if DEBUG
+            if let url = lastRecordedFile {
+                print("RecaptrUITest: " + (await MonitorLagProbe.videoGaps(url)))
+                print("RecaptrUITest: " + (await MonitorLagProbe.greenEdge(url)))
+            }
             if d.bool(forKey: "RecaptrUITestMeasureMonitorLag"), let url = lastRecordedFile {
                 if let ring = audioMixer.channel(at: 0)?.monitorRing {
                     print("RecaptrUITest: monitor ring skips=\(ring.skips) underruns=\(ring.underruns)")

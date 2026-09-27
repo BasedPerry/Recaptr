@@ -218,6 +218,7 @@ final class ScreenCaptureService: NSObject, @unchecked Sendable, SCStreamOutput,
             print("ScreenCaptureService: stopCapture threw (likely already stopped): \(error)")
         }
         stream = nil
+        stopFrameGrid()
         clipBuffer = nil  // stopping the stream stops buffering
         activeDimensions = .init(width: 0, height: 0)
     }
@@ -265,6 +266,13 @@ final class ScreenCaptureService: NSObject, @unchecked Sendable, SCStreamOutput,
                 previewSinkLayer?.enqueue(sampleBuffer)
                 if let image = CMSampleBufferGetImageBuffer(sampleBuffer) { lastImage = image }
             }
+            #if DEBUG
+            if !gridNext.isValid, isComplete {
+                let now = CMClockGetTime(CMClockGetHostTimeClock()).seconds
+                print(String(format: "ScreenCaptureService: first frame PTS is %.1f ms behind the host clock",
+                             (now - CMSampleBufferGetPresentationTimeStamp(sampleBuffer).seconds) * 1000))
+            }
+            #endif
             if status == SCFrameStatus.complete.rawValue || status == SCFrameStatus.idle.rawValue {
                 emitGrid(upTo: CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
             }
@@ -298,39 +306,70 @@ final class ScreenCaptureService: NSObject, @unchecked Sendable, SCStreamOutput,
     // the first frame, each showing the newest real frame. Repeated
     // frames cost the HEVC encoder almost nothing.
     //
-    // Idle frames arrive ~47 times a second even on a still screen,
-    // so every arrival fills in the grid ticks up to its time. Video
-    // queue only.
+    // Two things fill the grid: each arriving frame (real or idle)
+    // fills ticks up to its own time, and a timer fills ticks when
+    // nothing arrives. The timer matters: on a fully still screen
+    // SCStream sends nothing at all, and relying on arrivals left a
+    // 38 s freeze where a movie was paused (30-minute test,
+    // 2026-09-27); after a gap, arrivals also dumped a burst of frames
+    // that the real-time encoder partly dropped. Video queue only.
     private var lastImage: CVImageBuffer?
     private var gridNext: CMTime = .invalid
     private var gridStep = CMTime(value: 1, timescale: 60)
-    /// A gap longer than this (screen locked, stream stalled) is
-    /// skipped rather than filled, so the writer isn't flooded.
-    private let maxGridFill = 30
+    private var gridTimer: DispatchSourceTimer?
+    /// How far the timer lets the grid run behind the clock before it
+    /// fills in, so it doesn't race a real frame still in flight.
+    private let fillLatency = CMTime(value: 50, timescale: 1000)
+    /// Most frames emitted in one go. More than this behind (the Mac
+    /// stalled) and the grid jumps ahead instead of flooding the writer.
+    private let maxBurst = 3
 
     private func resetFrameGrid(frameRate: Int) {
         videoQueue.async {
             self.lastImage = nil
             self.gridNext = .invalid
             self.gridStep = CMTime(value: 1, timescale: CMTimeScale(frameRate))
+            self.gridTimer?.cancel()
+            let timer = DispatchSource.makeTimerSource(queue: self.videoQueue)
+            let interval = 1.0 / Double(frameRate)
+            timer.schedule(deadline: .now() + interval, repeating: interval, leeway: .milliseconds(2))
+            timer.setEventHandler { [weak self] in self?.fillFromClock() }
+            timer.resume()
+            self.gridTimer = timer
         }
+    }
+
+    private func stopFrameGrid() {
+        videoQueue.async {
+            self.gridTimer?.cancel()
+            self.gridTimer = nil
+            self.lastImage = nil
+            self.gridNext = .invalid
+        }
+    }
+
+    /// Timer tick: fill grid ticks older than `fillLatency`. SCStream
+    /// stamps frames on the host clock, so the grid is too.
+    private func fillFromClock() {
+        guard gridNext.isValid else { return }
+        let now = CMClockGetTime(CMClockGetHostTimeClock())
+        emitGrid(upTo: CMTimeSubtract(now, fillLatency))
     }
 
     private func emitGrid(upTo time: CMTime) {
         guard let image = lastImage, time.isValid else { return }
         if !gridNext.isValid { gridNext = time }
-        var filled = 0
+        // Too far behind: skip ahead, keeping the grid phase.
+        let behind = CMTimeSubtract(time, gridNext)
+        let steps = Int(behind.seconds / gridStep.seconds)
+        if steps > maxBurst {
+            gridNext = CMTimeAdd(gridNext, CMTimeMultiply(gridStep, multiplier: Int32(steps - maxBurst + 1)))
+        }
         while CMTimeCompare(gridNext, time) <= 0 {
-            if filled == maxGridFill {
-                // Long gap: jump the grid to now.
-                gridNext = time
-                filled = 0
-            }
             if let frame = Self.makeFrame(image, at: gridNext, duration: gridStep) {
                 onRecordBuffer?(frame)
             }
             gridNext = CMTimeAdd(gridNext, gridStep)
-            filled += 1
         }
     }
 

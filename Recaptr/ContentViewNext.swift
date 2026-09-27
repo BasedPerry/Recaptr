@@ -61,7 +61,17 @@ struct ContentViewNext: View {
             Color.recaptrBackground.ignoresSafeArea()
 
             // Layer 1 — Preview surface (edge to edge).
+            // Inside a black device-style bezel (rounded picture, black
+            // surround), like a MacBook display. Preview only: the
+            // recording is untouched.
+            // The view takes the picture's own shape first, so the
+            // rounded corners land on the picture, not the letterbox.
             SampleBufferPreviewRepresentable(vm: vm)
+                .aspectRatio(previewAspect, contentMode: .fit)
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .padding(10)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color.black)
                 .ignoresSafeArea()
 
             // Layer 2 — Hint shown only when nothing is selected.
@@ -130,7 +140,8 @@ struct ContentViewNext: View {
         //   ⌘,   Settings (provided by the Settings scene's app menu item)
         //   ⌘R   Toggle record / stop
         //   ⌘K   Toggle monitor mute
-        //   ⌘B   Drop clip marker
+        //   ⌘B   Drop clip marker (⌃⌥⌘B from any app while recording,
+        //        see GlobalHotKey)
         //   ⇧⌘R  Save instant replay (last 15 s, screen sources)
         //   ⌃⌘S  Show / hide the source sidebar
         //   ⌘1   Switch to Window mode
@@ -215,6 +226,12 @@ struct ContentViewNext: View {
                 )
                 .padding(.bottom, 28)
             }
+    }
+
+    /// Width ÷ height of what's being captured (16:9 until known).
+    private var previewAspect: CGFloat {
+        guard let size = vm.activeCaptureSize, size.height > 0 else { return 16.0 / 9.0 }
+        return CGFloat(size.width) / CGFloat(size.height)
     }
 
     // MARK: - Sidebar button

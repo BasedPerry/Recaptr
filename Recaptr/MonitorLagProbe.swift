@@ -37,6 +37,56 @@ enum MonitorLagProbe {
         return "monitor lag: " + parts.joined(separator: " ")
     }
 
+    /// Video frame spacing: frame count, gaps over 25 ms with their
+    /// times, and the longest gap.
+    static func videoGaps(_ url: URL) async -> String {
+        let asset = AVURLAsset(url: url)
+        guard let track = try? await asset.loadTracks(withMediaType: .video).first,
+              let reader = try? AVAssetReader(asset: asset) else { return "video gaps: unreadable" }
+        let out = AVAssetReaderTrackOutput(track: track, outputSettings: nil)
+        out.alwaysCopiesSampleData = false
+        reader.add(out)
+        guard reader.startReading() else { return "video gaps: unreadable" }
+        var times: [Double] = []
+        while let buffer = out.copyNextSampleBuffer() {
+            if CMSampleBufferGetNumSamples(buffer) > 0 { times.append(CMSampleBufferGetPresentationTimeStamp(buffer).seconds) }
+        }
+        times.sort()
+        var gaps: [String] = []
+        var longest = 0.0
+        for i in 1..<max(1, times.count) {
+            let gap = times[i] - times[i - 1]
+            longest = max(longest, gap)
+            if gap > 0.025 { gaps.append(String(format: "%.0fms@%.2fs", gap * 1000, times[i - 1] - (times.first ?? 0))) }
+        }
+        return String(format: "video gaps: frames=%d longest=%.0fms gaps>25ms=%d ", times.count, longest * 1000, gaps.count)
+            + gaps.prefix(12).joined(separator: " ")
+    }
+
+    /// Share of edge pixels (3 px border of a frame 5 s in) that are
+    /// strongly green, to prove the capture outline isn't recorded.
+    static func greenEdge(_ url: URL) async -> String {
+        let generator = AVAssetImageGenerator(asset: AVURLAsset(url: url))
+        generator.requestedTimeToleranceBefore = .zero
+        generator.requestedTimeToleranceAfter = .zero
+        guard let image = try? await generator.image(at: CMTime(seconds: 5, preferredTimescale: 600)).image,
+              let data = image.dataProvider?.data, let bytes = CFDataGetBytePtr(data) else {
+            return "green edge: no frame"
+        }
+        let w = image.width, h = image.height, row = image.bytesPerRow, bpp = image.bitsPerPixel / 8
+        var edge = 0, green = 0
+        for y in 0..<h {
+            for x in 0..<w where x < 3 || y < 3 || x >= w - 3 || y >= h - 3 {
+                let p = bytes + y * row + x * bpp
+                // BGRA or RGBA: green is byte 1 either way.
+                let (c0, g, c2) = (Int(p[0]), Int(p[1]), Int(p[2]))
+                edge += 1
+                if g > 120, g > c0 + 50, g > c2 + 50 { green += 1 }
+            }
+        }
+        return String(format: "green edge: %.1f%% of %d edge pixels", 100 * Double(green) / Double(max(edge, 1)), edge)
+    }
+
     private static func mono(_ asset: AVAsset, _ track: AVAssetTrack, _ start: Double, _ dur: Double) -> [Float]? {
         guard let reader = try? AVAssetReader(asset: asset) else { return nil }
         reader.timeRange = CMTimeRange(start: CMTime(seconds: start, preferredTimescale: 48_000),

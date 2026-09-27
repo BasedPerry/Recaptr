@@ -42,7 +42,7 @@ struct RecordingControlsPill: View {
             recordButton
             sideButton(
                 icon: "bookmark.fill",
-                label: "Clip Marker",
+                label: "Clip Marker (⌘B, or ⌃⌥⌘B from any app)",
                 enabled: isRecording,
                 disabledHelp: "Clip markers are available while recording",
                 id: "markerButton",
