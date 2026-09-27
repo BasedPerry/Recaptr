@@ -44,14 +44,18 @@ struct RecordingControlsPill: View {
                 icon: "bookmark.fill",
                 label: "Clip Marker",
                 enabled: isRecording,
+                disabledHelp: "Clip markers are available while recording",
                 id: "markerButton",
                 action: onMark
             )
         }
         .padding(.horizontal, 22)
         .padding(.vertical, 12)
-        // Neutral glass so the record button stays the loudest element.
-        .recaptrGlass()
+        // Neutral glass so the record button stays the loudest element;
+        // a faint red tint while recording says "live" from across the
+        // room.
+        .recaptrGlass(tint: isRecording ? Color.red.opacity(0.12) : nil)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: isRecording)
     }
 
     // MARK: Side button (Screenshot / Marker)
@@ -61,19 +65,22 @@ struct RecordingControlsPill: View {
         icon: String,
         label: String,
         enabled: Bool,
+        disabledHelp: String? = nil,
         id: String,
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
+            // Disabled is .secondary, not fainter: over dark video
+            // anything dimmer looked like a rendering glitch.
             Image(systemName: icon)
-                .font(.system(size: 16, weight: .medium))
-                .foregroundStyle(enabled ? .secondary : .quaternary)
-                .frame(width: 36, height: 36)
+                .font(.system(size: 19, weight: .medium))
+                .foregroundStyle(enabled ? .primary : .secondary)
+                .frame(width: 40, height: 40)
                 .contentShape(Circle())
         }
         .buttonStyle(.plain)
         .disabled(!enabled)
-        .help(label)
+        .help(enabled ? label : (disabledHelp ?? label))
         .accessibilityLabel(label)
         .accessibilityIdentifier(id)
     }
@@ -99,7 +106,7 @@ struct RecordingControlsPill: View {
                             )
                     } else {
                         Circle()
-                            .stroke(.secondary, lineWidth: 2.5)
+                            .stroke(.primary, lineWidth: 2.5)
                     }
                 }
                 .frame(width: 60, height: 60)

@@ -48,10 +48,11 @@ struct ContentViewNext: View {
 
     // Soft brand-gradient halo pulsed on a successful screenshot.
     @State private var screenshotFlashOpacity: Double = 0
+    // Green edge glow pulsed when a clip marker lands.
+    @State private var markerFlashOpacity: Double = 0
 
     // System state the chrome follows.
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Environment(\.appearsActive) private var appearsActive
 
     var body: some View {
         ZStack {
@@ -71,15 +72,29 @@ struct ContentViewNext: View {
             // Layer 3 — Floating chrome (fades on idle).
             // One container for every floating glass surface so the
             // system renders them as a single glass layer.
+            // No extra dimming when the window is inactive: the glass
+            // already takes the system's inactive look, and dimming on
+            // top of it made the controls nearly invisible whenever
+            // another app (Final Cut) had focus.
             GlassEffectContainer {
                 chromeLayer
             }
-                // Dim when the window is inactive, like system chrome.
-                .opacity(chromeOpacity * (appearsActive ? 1.0 : 0.6))
+                .opacity(chromeOpacity)
                 .allowsHitTesting(chromeOpacity > 0.05)
                 .animation(reduceMotion ? .linear(duration: 0.1) : .easeInOut(duration: 0.35),
                            value: chromeOpacity)
-                .animation(.easeInOut(duration: 0.2), value: appearsActive)
+
+            // Layer 3b — recording status. Outside the fading chrome
+            // so the elapsed time is always visible while recording.
+            if vm.isRecording {
+                telemetryFloating
+                    .padding(.bottom, 28)
+                    .padding(.leading, 20)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+                    .transition(reduceMotion
+                                ? .opacity
+                                : .opacity.combined(with: .move(edge: .bottom)))
+            }
 
             // Layer 4 — screenshot flash. Brand-gradient angular
             // border, blurred for glow, pulses once on a successful
@@ -87,6 +102,17 @@ struct ContentViewNext: View {
             // recording).
             screenshotFlashOverlay
                 .allowsHitTesting(false)
+
+            // Layer 5 — marker glow. Only in the hierarchy while it
+            // plays, so it costs nothing the rest of the time.
+            if markerFlashOpacity > 0 {
+                markerFlashOverlay
+                    .allowsHitTesting(false)
+            }
+        }
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: vm.isRecording)
+        .onChange(of: vm.markers.count) { old, new in
+            if new > old { triggerMarkerFlash() }
         }
         .frame(minWidth: 980, minHeight: 620)
         // Mouse-move tracking that wakes the chrome and resets the
@@ -189,16 +215,6 @@ struct ContentViewNext: View {
                 )
                 .padding(.bottom, 28)
             }
-            .overlay(alignment: .bottomLeading) {
-                if vm.isRecording {
-                    telemetryFloating
-                        .padding(.bottom, 28)
-                        .padding(.leading, 20)
-                        .transition(reduceMotion
-                                    ? .opacity
-                                    : .opacity.combined(with: .move(edge: .bottom)))
-                }
-            }
     }
 
     // MARK: - Sidebar button
@@ -239,21 +255,26 @@ struct ContentViewNext: View {
         .accessibilityIdentifier("settingsButton")
     }
 
-    // MARK: - Telemetry float (only while recording)
+    // MARK: - Recording status (always visible while recording)
 
+    /// Small and quiet on purpose: red dot, elapsed time, file size,
+    /// and the marker count once there is one. Stays up while the rest
+    /// of the chrome fades, so the time is readable without hovering.
     private var telemetryFloating: some View {
         HStack(spacing: 10) {
             Circle()
                 .fill(.red)
                 .frame(width: 8, height: 8)
                 .opacity(vm.liveStats.sessionAnchored ? 1.0 : 0.45)
-                .shadow(color: .red.opacity(0.65), radius: 4)
             Text(formattedElapsed)
                 .font(BrandFont.mono(weight: .medium, size: 13).swiftUI)
                 .foregroundStyle(.primary)
-            Text("v=\(vm.liveStats.videoAccepted) a=\(vm.liveStats.audioAccepted)")
-                .font(BrandFont.mono(weight: .regular, size: 11).swiftUI)
-                .foregroundStyle(.tertiary)
+                .monospacedDigit()
+            if vm.recordingBytes > 0 {
+                Text(formattedSize)
+                    .font(BrandFont.mono(weight: .regular, size: 11).swiftUI)
+                    .foregroundStyle(.secondary)
+            }
 
             // Markers count surface. Renders once at least one marker
             // has been dropped. Signal-green bookmark icon + count,
@@ -279,6 +300,10 @@ struct ContentViewNext: View {
         .recaptrGlass()
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("telemetryPill")
+    }
+
+    private var formattedSize: String {
+        ByteCountFormatter.string(fromByteCount: vm.recordingBytes, countStyle: .file)
     }
 
     private var formattedElapsed: String {
@@ -383,7 +408,9 @@ struct ContentViewNext: View {
     private func pickableSources(for mode: SourceMode) -> [PickableSource] {
         vm.catalog.videoSources
             .filter { matchesMode(mode, kind: $0.kind) }
-            .map { PickableSource(id: $0.id, name: $0.name) }
+            // The mode segment already says the kind, so drop the
+            // "Camera — " style prefix.
+            .map { PickableSource(id: $0.id, name: SourceSidebar.displayName($0)) }
     }
 
     private func matchesMode(_ mode: SourceMode, kind: VideoSource.Kind) -> Bool {
@@ -462,6 +489,51 @@ struct ContentViewNext: View {
             withAnimation(.easeInOut(duration: 0.50)) {
                 screenshotFlashOpacity = 0
             }
+        }
+    }
+
+    // MARK: - Marker flash
+
+    /// Green edge glow when a marker lands. Three plain strokes stacked
+    /// at falling opacity instead of a blur: a full-window blur runs a
+    /// filter pass every frame of the fade, stacked strokes are drawn
+    /// once and only their opacity animates.
+    private var markerFlashOverlay: some View {
+        ZStack {
+            Rectangle().strokeBorder(Color.signal.opacity(0.16), lineWidth: 30)
+            Rectangle().strokeBorder(Color.signal.opacity(0.30), lineWidth: 14)
+            Rectangle().strokeBorder(Color.signal.opacity(0.85), lineWidth: 4)
+        }
+        .compositingGroup()
+        .opacity(markerFlashOpacity)
+        .ignoresSafeArea()
+        .accessibilityHidden(true)
+    }
+
+    /// ~0.1 s in, short hold, ~0.45 s out. Reduce Motion: a brief
+    /// static glow with no ramp.
+    private func triggerMarkerFlash() {
+        Task { @MainActor in
+            // Screenshot passes: `-RecaptrUITestHoldMarkerFlash YES`
+            // holds the glow for 4 s so it can be captured.
+            let d = UserDefaults.standard
+            if d.bool(forKey: "RecaptrUITesting"), d.bool(forKey: "RecaptrUITestHoldMarkerFlash") {
+                markerFlashOpacity = 1
+                try? await Task.sleep(for: .seconds(4))
+                markerFlashOpacity = 0
+                return
+            }
+            if reduceMotion {
+                markerFlashOpacity = 1
+                try? await Task.sleep(for: .milliseconds(350))
+                markerFlashOpacity = 0
+                return
+            }
+            withAnimation(.easeOut(duration: 0.1)) { markerFlashOpacity = 1 }
+            try? await Task.sleep(for: .milliseconds(180))
+            withAnimation(.easeIn(duration: 0.45)) { markerFlashOpacity = 0.0001 }
+            try? await Task.sleep(for: .milliseconds(460))
+            markerFlashOpacity = 0
         }
     }
 

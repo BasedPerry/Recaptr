@@ -17,8 +17,12 @@
 //    - `interactive: true` only when the glass itself is the control
 //      (for example a standalone icon button), not for a container
 //      that merely holds controls.
-//    - Do not add tints or overlays. Color belongs to content (record
-//      red, meters), not to the glass.
+//    - No decorative tints or overlays. Color belongs to content
+//      (record red, meters). The one exception is state: a faint tint
+//      may say "this is live" (the controls pill while recording).
+//    - Content on glass uses full-strength styles (`.primary`) for
+//      controls. Over dark video, `.secondary` and fainter read as
+//      disabled; keep them for supporting text.
 //
 
 import SwiftUI
@@ -27,9 +31,10 @@ extension View {
     /// Apply Recaptr's standard Liquid Glass background in `shape`.
     func recaptrGlass(
         in shape: some Shape = Capsule(),
-        interactive: Bool = false
+        interactive: Bool = false,
+        tint: Color? = nil
     ) -> some View {
-        glassEffect(.regular.interactive(interactive), in: shape)
+        glassEffect(.regular.tint(tint).interactive(interactive), in: shape)
     }
 }
 

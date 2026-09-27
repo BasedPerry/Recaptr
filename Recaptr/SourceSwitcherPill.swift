@@ -76,7 +76,7 @@ struct SourceModeSegments: View {
                 .font(.system(size: compact ? 12 : 13, weight: .medium))
                 .lineLimit(1)
                 .fixedSize()
-                .foregroundStyle(isActive ? AnyShapeStyle(.white) : AnyShapeStyle(.secondary))
+                .foregroundStyle(isActive ? AnyShapeStyle(.white) : AnyShapeStyle(.primary))
                 .padding(.horizontal, compact ? 6 : 12)
                 .padding(.vertical, 6)
                 .frame(maxWidth: compact ? .infinity : nil)

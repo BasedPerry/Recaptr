@@ -129,6 +129,10 @@ final class MainViewModel: ObservableObject {
 
     // Telemetry surfaced to the UI.
     @Published var recordingElapsed: TimeInterval = 0
+    /// Size of the file being written, refreshed once a second.
+    @Published var recordingBytes: Int64 = 0
+    /// File being written, for `recordingBytes`.
+    private var recordingURL: URL?
     @Published var liveStats: RecorderStats = RecorderStats()
     @Published var mixerStats: AudioMixerStats = AudioMixerStats()
 
@@ -1312,6 +1316,8 @@ final class MainViewModel: ObservableObject {
             )
             isRecording = true
             recordingStartedAt = Date()
+            recordingURL = url
+            recordingBytes = 0
             recordingActivity = ProcessInfo.processInfo.beginActivity(
                 options: [.userInitiated, .idleSystemSleepDisabled, .idleDisplaySleepDisabled],
                 reason: "Recaptr is recording"
@@ -1343,6 +1349,7 @@ final class MainViewModel: ObservableObject {
             recordingActivity = nil
         }
         recordingStartedAt = nil
+        recordingURL = nil
         lastRecordedFile = url
 
         // Take one final stats snapshot AFTER stop() so accurate
@@ -1666,6 +1673,12 @@ final class MainViewModel: ObservableObject {
 
         guard let started = recordingStartedAt else { return }
         recordingElapsed = Date().timeIntervalSince(started)
+        // One stat() a second; the writer appends, so this tracks the
+        // file as it grows.
+        if let path = recordingURL?.path,
+           let size = (try? FileManager.default.attributesOfItem(atPath: path))?[.size] as? NSNumber {
+            recordingBytes = size.int64Value
+        }
         let snapshot = recorder.stats()
         liveStats = snapshot
 

@@ -95,11 +95,11 @@ struct AudioModule: View {
                 .frame(width: columnWidth, height: trackHeight)
             Image(systemName: icon)
                 .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.primary)
                 .frame(height: 14)
             Text(readout)
                 .font(BrandFont.mono(weight: .medium, size: 9).swiftUI)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.primary)
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
                 .frame(width: columnWidth + 6, height: 11)
@@ -115,7 +115,7 @@ struct AudioModule: View {
             Image(systemName: vm.monitorEnabled ? "headphones" : "headphones.slash")
                 .font(.system(size: 18, weight: .medium))
                 .foregroundStyle(vm.monitorEnabled ? AnyShapeStyle(Color.signal)
-                                                   : AnyShapeStyle(.secondary))
+                                                   : AnyShapeStyle(.primary))
                 .frame(width: 32, height: 32)
                 .background(
                     Circle()
@@ -229,7 +229,7 @@ struct AudioModule: View {
     /// Empty-track fill; one step stronger under Increase Contrast.
     private var trackBackground: some View {
         Capsule()
-            .fill(contrast == .increased ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.quaternary))
+            .fill(contrast == .increased ? AnyShapeStyle(.secondary) : AnyShapeStyle(.tertiary))
             .frame(width: trackWidth)
     }
 
