@@ -106,7 +106,11 @@ final class DeviceCatalog: ObservableObject {
                       app.bundleIdentifier != myBundleID,
                       w.windowLayer == 0,
                       w.frame.width >= 200, w.frame.height >= 120,
-                      let title = w.title, !title.isEmpty
+                      let title = w.title, !title.isEmpty,
+                      // Only apps with a Dock presence. Background
+                      // agents own titled windows too (a hidden
+                      // "universalAccessAuthWarn: Screen Recording").
+                      NSRunningApplication(processIdentifier: app.processID)?.activationPolicy == .regular
                 else { continue }
                 let appName = app.applicationName
                 screenSources.append(VideoSource(

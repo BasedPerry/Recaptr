@@ -94,9 +94,16 @@ struct SourceSidebar: View {
             Text(kind == .camera ? "No cameras connected" : kind == .screenDisplay ? "No displays" : "No windows open")
                 .foregroundStyle(.secondary)
         } else if kind == .screenWindow {
-            // Windows can be many: a menu keeps the sidebar compact.
+            // Windows can be many: a menu keeps the sidebar compact,
+            // grouped by app with just the window title in each group.
             Picker("Window", selection: selectedID) {
-                ForEach(sources) { Text(Self.displayName($0)).tag(String?.some($0.id)) }
+                ForEach(Self.windowGroups(sources), id: \.app) { group in
+                    Section(group.app) {
+                        ForEach(group.windows) { window in
+                            Text(Self.windowTitle(window)).tag(String?.some(window.id))
+                        }
+                    }
+                }
             }
             .accessibilityIdentifier("windowPicker")
         } else {
@@ -127,6 +134,23 @@ struct SourceSidebar: View {
         .buttonStyle(.plain)
         .help(source.name)
         .accessibilityAddTraits(isSelected ? .isSelected : [])
+    }
+
+    /// Window names are "App: Title" after the prefix. Split on the
+    /// first ": " (titles may contain more).
+    private static func splitWindow(_ source: VideoSource) -> (app: String, title: String) {
+        let name = displayName(source)
+        guard let range = name.range(of: ": ") else { return (name, name) }
+        return (String(name[..<range.lowerBound]), String(name[range.upperBound...]))
+    }
+
+    static func windowTitle(_ source: VideoSource) -> String { splitWindow(source).title }
+
+    /// Windows grouped by app, apps and titles alphabetical.
+    static func windowGroups(_ sources: [VideoSource]) -> [(app: String, windows: [VideoSource])] {
+        Dictionary(grouping: sources) { splitWindow($0).app }
+            .map { (app: $0.key, windows: $0.value.sorted { windowTitle($0) < windowTitle($1) }) }
+            .sorted { $0.app.localizedCaseInsensitiveCompare($1.app) == .orderedAscending }
     }
 
     /// Catalog names carry a kind prefix ("Camera — Elgato 4K X")
@@ -169,6 +193,24 @@ private struct TuningSections: View {
                     Label("Video", systemImage: "video")
                 } footer: {
                     Text(videoFooter)
+                }
+            } else {
+                Section {
+                    Picker("Resolution", selection: $vm.screenResolution) {
+                        ForEach(ScreenResolution.allCases) { Text($0.shortLabel).tag($0) }
+                    }
+                    .onChange(of: vm.screenResolution) { _, _ in restartScreenPreview() }
+                    Picker("Frame rate", selection: $vm.screenFrameRate) {
+                        Text("60 fps").tag(60)
+                        Text("30 fps").tag(30)
+                    }
+                    .onChange(of: vm.screenFrameRate) { _, _ in restartScreenPreview() }
+                    Toggle("Show cursor", isOn: $vm.screenShowsCursor)
+                        .onChange(of: vm.screenShowsCursor) { _, _ in restartScreenPreview() }
+                } header: {
+                    Label("Video", systemImage: "video")
+                } footer: {
+                    Text(screenVideoFooter)
                 }
             }
 
@@ -239,6 +281,19 @@ private struct TuningSections: View {
                     .foregroundStyle(.secondary)
                     .frame(width: 34, alignment: .trailing)
             }
+        }
+    }
+
+    /// Auto keeps the source's own size up to 4K; the note says what
+    /// that came to.
+    private var screenVideoFooter: String {
+        guard let size = vm.activeCaptureSize else { return "Auto records at the source's own size, up to 4K." }
+        return "Capturing \(size.width)×\(size.height) at \(vm.screenFrameRate) fps."
+    }
+
+    private func restartScreenPreview() {
+        if vm.isPreviewing, !vm.isRecording, vm.selectedMainSource?.kind != .camera {
+            Task { await vm.startPreview() }
         }
     }
 
