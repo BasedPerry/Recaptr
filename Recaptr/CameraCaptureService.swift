@@ -390,9 +390,11 @@ final class CameraCaptureService: NSObject, @unchecked Sendable, AVCaptureVideoD
             if fpsLastReport == 0 {
                 fpsLastReport = now
             } else if now - fpsLastReport >= 1.0 {
+                #if DEBUG
                 let elapsed = now - fpsLastReport
                 let observed = Double(fpsCountFrames) / elapsed
                 print(String(format: "CameraCaptureService: observed %.2f fps (preview path, %d frames in %.3fs)", observed, fpsCountFrames, elapsed))
+                #endif
                 fpsCountFrames = 0
                 fpsLastReport = now
             }

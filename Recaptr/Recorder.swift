@@ -172,7 +172,17 @@ final class Recorder: @unchecked Sendable {
     private var sourceTrackAccepted: Int = 0
     /// Last accepted video PTS, used for the strict-monotonic guard
     /// in `appendVideo`. Reset to `.invalid` in `_startSync`.
+    /// Newest video PTS accepted into `pendingVideo` (or written).
     private var lastVideoPTS: CMTime = .invalid
+    /// Video frames waiting for the encoder. In real-time mode the
+    /// encoder is occasionally "not ready" for a moment; dropping those
+    /// frames cost ~2 fps under load (a UI test run measured 57.7 fps,
+    /// 2026-09-27). Holding a few and appending them as soon as it's
+    /// ready turns a brief stall into a few ms of delay. Capped so a
+    /// stuck encoder can't hold camera buffers the capture pool needs.
+    /// writerQueue only.
+    private var pendingVideo: [CMSampleBuffer] = []
+    private static let maxPendingVideo = 4
 
     /// Configure and start the writer. Pass `withAudio: true` to add
     /// the AAC audio input. The decision must be made before
@@ -213,6 +223,18 @@ final class Recorder: @unchecked Sendable {
 
         let url = try Self.makeOutputURL(in: saveDirectory)
         let writer = try AVAssetWriter(outputURL: url, fileType: .mov)
+        // Crash safety: write the movie in fragments, so if the Mac
+        // crashes, loses power or Recaptr is force-quit mid-take, the
+        // file still opens with everything up to the last fragment.
+        // Without this the index is only written at stop, and an
+        // interrupted take was unreadable.
+        writer.movieFragmentInterval = Self.fragmentInterval
+        #if DEBUG
+        if UserDefaults.standard.bool(forKey: "RecaptrUITesting"),
+           UserDefaults.standard.bool(forKey: "RecaptrUITestNoFragments") {
+            writer.movieFragmentInterval = .invalid
+        }
+        #endif
 
         // Video — HEVC or H.264 per preset, SDR.
         let videoSettings: [String: Any] = [
@@ -298,6 +320,7 @@ final class Recorder: @unchecked Sendable {
         self.sourceTrackAccepted = 0
         self.primarySource = sourceTracks.first
         self.lastVideoPTS = .invalid
+        self.pendingVideo = []
 
         return url
     }
@@ -327,6 +350,9 @@ final class Recorder: @unchecked Sendable {
             self.markerTimes.append(now)
         }
     }
+
+    /// How much a crash can cost at most.
+    static let fragmentInterval = CMTime(seconds: 5, preferredTimescale: 600)
 
     private static func compressionProperties(for quality: VideoQuality,
                                               width: Int32, height: Int32) -> [String: Any] {
@@ -390,17 +416,28 @@ final class Recorder: @unchecked Sendable {
                 return
             }
 
-            do {
-                if try receiver.appendImmediately(CMReadySampleBuffer(unsafeBuffer: sampleBuffer)) {
-                    self.videoAccepted &+= 1
-                    self.lastVideoPTS = pts
-                } else {
-                    self.videoDroppedNotReady &+= 1
-                }
-            } catch {
-                self.videoAppendRejected &+= 1
-                self.lastAppendError = "video: \(Self.describe(error)) writer=\(writer.status.rawValue) \(writer.error.map { Self.describe($0) } ?? "")"
+            self.lastVideoPTS = pts
+            self.pendingVideo.append(sampleBuffer)
+            if self.pendingVideo.count > Self.maxPendingVideo {
+                self.pendingVideo.removeFirst()
+                self.videoDroppedNotReady &+= 1
             }
+            self.drainPendingVideo(receiver: receiver, writer: writer)
+        }
+    }
+
+    /// Append queued video frames, oldest first, until the encoder
+    /// says it isn't ready. writerQueue only.
+    private func drainPendingVideo(receiver: AVAssetWriterInput.SampleBufferReceiver, writer: AVAssetWriter) {
+        while let next = pendingVideo.first {
+            do {
+                guard try receiver.appendImmediately(CMReadySampleBuffer(unsafeBuffer: next)) else { return }
+                videoAccepted &+= 1
+            } catch {
+                videoAppendRejected &+= 1
+                lastAppendError = "video: \(Self.describe(error)) writer=\(writer.status.rawValue) \(writer.error.map { Self.describe($0) } ?? "")"
+            }
+            pendingVideo.removeFirst()
         }
     }
 
@@ -488,6 +525,15 @@ final class Recorder: @unchecked Sendable {
                     return
                 }
                 self.isWriting = false
+                // Hand over any frames still waiting (brief retries).
+                if let receiver = self.videoReceiver {
+                    for _ in 0..<20 where !self.pendingVideo.isEmpty {
+                        self.drainPendingVideo(receiver: receiver, writer: writer)
+                        if !self.pendingVideo.isEmpty { Thread.sleep(forTimeInterval: 0.005) }
+                    }
+                    self.videoDroppedNotReady &+= self.pendingVideo.count
+                    self.pendingVideo = []
+                }
                 let start = self.sessionStartTime
                 self.lastMarkerSeconds = start.isValid
                     ? self.markerTimes.map { CMTimeGetSeconds(CMTimeSubtract($0, start)) }

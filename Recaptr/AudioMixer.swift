@@ -67,6 +67,7 @@
 
 import Foundation
 import AVFoundation
+import Accelerate
 import CoreAudio
 import CoreMedia
 
@@ -800,19 +801,15 @@ nonisolated final class AudioInputChannel: @unchecked Sendable {
         var peak: Float = 0
         if let raw = outBuf.floatChannelData?.pointee {
             let totalSamples = Int(outBuf.frameLength) * Int(kMixerChannels)
-            let g = gain
-            if g != 1.0 {
-                for i in 0..<totalSamples { raw[i] *= g }
+            var g = gain
+            let n = vDSP_Length(totalSamples)
+            // Vectorised (Accelerate): gain, then RMS and peak for the
+            // meters, over post-gain samples.
+            if g != 1.0 { vDSP_vsmul(raw, 1, &g, raw, 1, n) }
+            if totalSamples > 0 {
+                vDSP_rmsqv(raw, 1, &rms, n)
+                vDSP_maxmgv(raw, 1, &peak, n)
             }
-            // VU meter — RMS + peak over post-gain samples.
-            var sumSq: Float = 0
-            for i in 0..<totalSamples {
-                let s = raw[i]
-                sumSq += s * s
-                let a = s < 0 ? -s : s
-                if a > peak { peak = a }
-            }
-            rms = totalSamples > 0 ? (sumSq / Float(totalSamples)).squareRoot() : 0
         }
 
         // Convert linear amplitude → dBFS, clamp.
@@ -1016,6 +1013,14 @@ nonisolated final class AudioInputChannel: @unchecked Sendable {
     }
 
     // MARK: - Stats
+
+    /// Current meter levels (dBFS), or nil when not running. A cheap
+    /// read for 30 Hz meters; `snapshot()` copies every counter.
+    func levels() -> (rms: Float, peak: Float)? {
+        guard running else { return nil }
+        lock.lock(); defer { lock.unlock() }
+        return (smoothedRmsDbfs, lastPeakDbfs)
+    }
 
     func snapshot() -> AudioInputChannelStats {
         lock.lock()

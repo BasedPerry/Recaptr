@@ -117,7 +117,15 @@ nonisolated enum MarkerNamer {
     static func clean(_ text: String, maxWords: Int) -> String? {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines.union(CharacterSet(charactersIn: "\"'.!")))
         let words = trimmed.split(separator: " ").prefix(maxWords)
-        let result = words.joined(separator: " ")
+        // Title case (brand voice), leaving words that already have
+        // capitals ("HP", "iPhone") as they are.
+        let small: Set<String> = ["a", "an", "and", "at", "for", "in", "of", "on", "or", "the", "to", "vs"]
+        let result = words.enumerated().map { index, word -> String in
+            let w = String(word)
+            guard w == w.lowercased() else { return w }
+            if index > 0, small.contains(w) { return w }
+            return w.prefix(1).uppercased() + w.dropFirst()
+        }.joined(separator: " ")
         return result.isEmpty ? nil : result
     }
 

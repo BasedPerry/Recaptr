@@ -28,12 +28,15 @@ final class DeviceCatalog: ObservableObject {
         }
 
         print("DeviceCatalog: \(videoSources.count) video source(s), \(audioSources.count) audio source(s)")
+        // The full list (every window title on the Mac) is debug-only.
+        #if DEBUG
         for s in videoSources {
             print("  · [\(s.kind.rawValue)] \(s.name)  (id=\(s.id))")
         }
         for s in audioSources {
             print("  · [audio] \(s.name)")
         }
+        #endif
     }
 
     private func loadCamerasAndMics() async {

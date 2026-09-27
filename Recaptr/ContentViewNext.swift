@@ -280,59 +280,7 @@ struct ContentViewNext: View {
     /// and the marker count once there is one. Stays up while the rest
     /// of the chrome fades, so the time is readable without hovering.
     private var telemetryFloating: some View {
-        HStack(spacing: 10) {
-            Circle()
-                .fill(.red)
-                .frame(width: 8, height: 8)
-                .opacity(vm.liveStats.sessionAnchored ? 1.0 : 0.45)
-            Text(formattedElapsed)
-                .font(BrandFont.mono(weight: .medium, size: 13).swiftUI)
-                .foregroundStyle(.primary)
-                .monospacedDigit()
-            if vm.recordingBytes > 0 {
-                Text(formattedSize)
-                    .font(BrandFont.mono(weight: .regular, size: 11).swiftUI)
-                    .foregroundStyle(.secondary)
-            }
-
-            // Markers count surface. Renders once at least one marker
-            // has been dropped. Signal-green bookmark icon + count,
-            // animates in with opacity+scale so each drop reads as a
-            // visible acknowledgment.
-            if !vm.markers.isEmpty {
-                HStack(spacing: 3) {
-                    Image(systemName: "bookmark.fill")
-                        .font(.system(size: 10))
-                        .foregroundStyle(Color.signal)
-                    Text("\(vm.markers.count)")
-                        .font(BrandFont.mono(weight: .medium, size: 11).swiftUI)
-                        .foregroundStyle(.primary)
-                }
-                .transition(reduceMotion ? .opacity : .opacity.combined(with: .scale))
-            }
-        }
-        .animation(reduceMotion ? nil : .spring(duration: 0.28, bounce: 0.35),
-                   value: vm.markers.count)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        // Plain glass: the red dot already says "recording".
-        .recaptrGlass()
-        .accessibilityElement(children: .combine)
-        .accessibilityIdentifier("telemetryPill")
-    }
-
-    private var formattedSize: String {
-        ByteCountFormatter.string(fromByteCount: vm.recordingBytes, countStyle: .file)
-    }
-
-    private var formattedElapsed: String {
-        let t = Int(vm.recordingElapsed)
-        let h = t / 3600
-        let m = (t % 3600) / 60
-        let s = t % 60
-        return h > 0
-            ? String(format: "%d:%02d:%02d", h, m, s)
-            : String(format: "%02d:%02d", m, s)
+        RecordingPill(clock: vm.clock, markerCount: vm.markers.count)
     }
 
     // MARK: - "Select a source" hint (center, no source picked)
@@ -688,4 +636,52 @@ extension EnvironmentValues {
     /// Whether the floating chrome is showing. Live meters pause when
     /// it isn't.
     @Entry var chromeVisible: Bool = true
+}
+
+/// The recording status pill: red dot, elapsed time, file size, and
+/// the marker count once there is one. Observes only the recording
+/// clock, so its once-a-second update touches nothing else.
+private struct RecordingPill: View {
+    @ObservedObject var clock: RecordingClock
+    let markerCount: Int
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Circle()
+                .fill(.red)
+                .frame(width: 8, height: 8)
+                .opacity(clock.anchored ? 1.0 : 0.45)
+            Text(clock.formattedElapsed)
+                .font(BrandFont.mono(weight: .medium, size: 13).swiftUI)
+                .foregroundStyle(.primary)
+                .monospacedDigit()
+            if clock.bytes > 0 {
+                Text(ByteCountFormatter.string(fromByteCount: clock.bytes, countStyle: .file))
+                    .font(BrandFont.mono(weight: .regular, size: 11).swiftUI)
+                    .foregroundStyle(.secondary)
+            }
+            // Marker count, once there is one; animates in so each
+            // drop reads as an acknowledgment.
+            if markerCount > 0 {
+                HStack(spacing: 3) {
+                    Image(systemName: "bookmark.fill")
+                        .font(.system(size: 10))
+                        .foregroundStyle(Color.signal)
+                    Text("\(markerCount)")
+                        .font(BrandFont.mono(weight: .medium, size: 11).swiftUI)
+                        .foregroundStyle(.primary)
+                }
+                .transition(reduceMotion ? .opacity : .opacity.combined(with: .scale))
+            }
+        }
+        .animation(reduceMotion ? nil : .spring(duration: 0.28, bounce: 0.35), value: markerCount)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        // Plain glass: the red dot already says "recording".
+        .recaptrGlass()
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("telemetryPill")
+    }
 }

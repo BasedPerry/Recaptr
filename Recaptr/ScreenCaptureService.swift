@@ -336,7 +336,13 @@ final class ScreenCaptureService: NSObject, @unchecked Sendable, SCStreamOutput,
     private let fillLatency = CMTime(value: 50, timescale: 1000)
     /// Most frames emitted in one go. More than this behind (the Mac
     /// stalled) and the grid jumps ahead instead of flooding the writer.
-    private let maxBurst = 3
+    ///
+    /// Must be well above `fillLatency` (3 frames at 60 fps): at 3,
+    /// ordinary timer jitter tripped the skip and dropped 2 frames
+    /// about once a second under load (a UI test measured 57.7 fps).
+    /// 8 frames (133 ms) only skips on a real stall, and a burst that
+    /// size is still small enough for the real-time encoder.
+    private let maxBurst = 8
 
     private func resetFrameGrid(frameRate: Int) {
         videoQueue.async {
@@ -414,18 +420,26 @@ final class ScreenCaptureService: NSObject, @unchecked Sendable, SCStreamOutput,
             gridNext = CMTimeAdd(gridNext, CMTimeMultiply(gridStep, multiplier: Int32(steps - maxBurst + 1)))
         }
         while CMTimeCompare(gridNext, time) <= 0 {
-            if let frame = Self.makeFrame(image, at: gridNext, duration: gridStep) {
+            if let frame = makeFrame(image, at: gridNext, duration: gridStep) {
                 onRecordBuffer?(frame)
             }
             gridNext = CMTimeAdd(gridNext, gridStep)
         }
     }
 
-    private static func makeFrame(_ image: CVImageBuffer, at pts: CMTime, duration: CMTime) -> CMSampleBuffer? {
-        var format: CMVideoFormatDescription?
-        guard CMVideoFormatDescriptionCreateForImageBuffer(allocator: nil, imageBuffer: image,
-                                                           formatDescriptionOut: &format) == noErr,
-              let format else { return nil }
+    /// Format description for grid frames, reused while it still
+    /// matches the image (it only changes if the capture does), rather
+    /// than rebuilt 60 times a second. Video queue only.
+    private var gridFormat: CMVideoFormatDescription?
+
+    private func makeFrame(_ image: CVImageBuffer, at pts: CMTime, duration: CMTime) -> CMSampleBuffer? {
+        if gridFormat == nil || !CMVideoFormatDescriptionMatchesImageBuffer(gridFormat!, imageBuffer: image) {
+            var made: CMVideoFormatDescription?
+            guard CMVideoFormatDescriptionCreateForImageBuffer(allocator: nil, imageBuffer: image,
+                                                               formatDescriptionOut: &made) == noErr else { return nil }
+            gridFormat = made
+        }
+        guard let format = gridFormat else { return nil }
         var timing = CMSampleTimingInfo(duration: duration, presentationTimeStamp: pts, decodeTimeStamp: .invalid)
         var sample: CMSampleBuffer?
         guard CMSampleBufferCreateReadyWithImageBuffer(allocator: nil, imageBuffer: image,

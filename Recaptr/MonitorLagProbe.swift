@@ -87,6 +87,34 @@ enum MonitorLagProbe {
         return String(format: "green edge: %.1f%% of %d edge pixels", 100 * Double(green) / Double(max(edge, 1)), edge)
     }
 
+    /// Top-level atoms of a movie file, e.g. "ftyp wide mdat moov",
+    /// with repeats counted ("moof×12").
+    static func atoms(_ url: URL) -> String {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return "atoms: unreadable" }
+        defer { try? handle.close() }
+        var types: [String] = []
+        var offset: UInt64 = 0
+        while types.count < 2000 {
+            try? handle.seek(toOffset: offset)
+            guard let header = try? handle.read(upToCount: 16), header.count >= 8 else { break }
+            var size = UInt64(header.prefix(4).reduce(0) { $0 << 8 | UInt32($1) })
+            let type = String(bytes: header[4..<8], encoding: .ascii) ?? "????"
+            if size == 1, header.count == 16 { size = header[8..<16].reduce(0) { $0 << 8 | UInt64($1) } }
+            if size == 0 { types.append(type + "(to end)"); break }
+            guard size >= 8 else { types.append("bad"); break }
+            types.append(type)
+            offset += size
+        }
+        var out: [String] = []
+        for t in types {
+            if let last = out.last, last.hasPrefix(t + "×") || last == t {
+                let n = (Int(last.split(separator: "×").last ?? "1") ?? 1) + (last == t ? 1 : 1)
+                out[out.count - 1] = "\(t)×\(last == t ? 2 : n)"
+            } else { out.append(t) }
+        }
+        return "atoms: " + out.joined(separator: " ")
+    }
+
     private static func mono(_ asset: AVAsset, _ track: AVAssetTrack, _ start: Double, _ dur: Double) -> [Float]? {
         guard let reader = try? AVAssetReader(asset: asset) else { return nil }
         reader.timeRange = CMTimeRange(start: CMTime(seconds: start, preferredTimescale: 48_000),

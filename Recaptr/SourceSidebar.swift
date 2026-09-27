@@ -62,6 +62,9 @@ struct SourceSidebar: View {
                 TuningSections()
             }
             .formStyle(.grouped)
+            // Sidebar meters stop while the sidebar is collapsed (its
+            // views stay alive when hidden).
+            .environment(\.chromeVisible, isVisible)
             .scrollContentBackground(.hidden)
             .controlSize(.small)
             .accessibilityIdentifier("sourceSidebar")
@@ -378,10 +381,11 @@ private struct TuningSections: View {
 /// LevelMeter.swift).
 private struct LevelRow: View {
     let levels: () -> (rms: Float, peak: Float)?
+    @Environment(\.chromeVisible) private var visible
 
     var body: some View {
         LabeledContent("Level") {
-            LevelMeter(levels: levels, vertical: false, thickness: 6, showsPeak: false, label: "Level")
+            LevelMeter(levels: levels, active: visible, vertical: false, thickness: 6, showsPeak: false, label: "Level")
                 .frame(height: 6)
         }
     }

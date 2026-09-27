@@ -16,7 +16,7 @@ struct MenuBarContent: View {
     @EnvironmentObject var vm: MainViewModel
 
     var body: some View {
-        Text("Recording · \(formattedElapsed)")
+        MenuElapsed(clock: vm.clock)
             .font(.system(size: 13, weight: .medium))
 
         Divider()
@@ -36,16 +36,6 @@ struct MenuBarContent: View {
         }
     }
 
-    private var formattedElapsed: String {
-        let t = Int(vm.recordingElapsed)
-        let h = t / 3600
-        let m = (t % 3600) / 60
-        let s = t % 60
-        return h > 0
-            ? String(format: "%d:%02d:%02d", h, m, s)
-            : String(format: "%02d:%02d", m, s)
-    }
-
     /// Activate Recaptr and surface its main window. Called from the
     /// "Show Recaptr" menu bar item.
     private func bringRecaptrForward() {
@@ -53,6 +43,31 @@ struct MenuBarContent: View {
         for window in NSApp.windows where window.canBecomeKey {
             window.makeKeyAndOrderFront(nil)
             break
+        }
+    }
+}
+
+/// "Recording · 12:34", observing only the recording clock.
+private struct MenuElapsed: View {
+    @ObservedObject var clock: RecordingClock
+
+    var body: some View {
+        Text("Recording · \(clock.formattedElapsed)")
+            .font(.system(size: 13, weight: .medium))
+    }
+}
+
+/// Menu bar label: red dot and elapsed time. Observes only the
+/// recording clock, so the app's scenes don't rebuild every second.
+struct MenuBarLabel: View {
+    @ObservedObject var clock: RecordingClock
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: "circle.fill")
+                .foregroundStyle(.red)
+            Text(clock.formattedElapsed)
+                .font(.system(size: 12, weight: .medium, design: .monospaced))
         }
     }
 }

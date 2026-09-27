@@ -197,13 +197,29 @@ final class MainViewModel: ObservableObject {
     @Published var lastRecordedFile: URL?
 
     // Telemetry surfaced to the UI.
-    @Published var recordingElapsed: TimeInterval = 0
+    /// Per-second recording readouts, in their own small observable so
+    /// only the views that show them (timer pill, menu bar) update each
+    /// second. When these were @Published here, every tick rebuilt the
+    /// whole app: every window, Settings, and the menu bar item
+    /// (profiling, 2026-09-27).
+    let clock = RecordingClock()
+    var recordingElapsed: TimeInterval {
+        get { clock.elapsed }
+        set { clock.elapsed = newValue }
+    }
     /// Size of the file being written, refreshed once a second.
-    @Published var recordingBytes: Int64 = 0
+    var recordingBytes: Int64 {
+        get { clock.bytes }
+        set { clock.bytes = newValue }
+    }
     /// File being written, for `recordingBytes`.
     private var recordingURL: URL?
-    @Published var liveStats: RecorderStats = RecorderStats()
-    @Published var mixerStats: AudioMixerStats = AudioMixerStats()
+    /// Diagnostics, refreshed each second but not published: nothing
+    /// on screen shows them live (the summary is built at stop).
+    var liveStats: RecorderStats = RecorderStats() {
+        didSet { if clock.anchored != liveStats.sessionAnchored { clock.anchored = liveStats.sessionAnchored } }
+    }
+    var mixerStats: AudioMixerStats = AudioMixerStats()
 
     @Published var audioPermissionStatus: AVAuthorizationStatus = .notDetermined
     @Published var lastFileProbeSummary: String?
@@ -482,6 +498,22 @@ final class MainViewModel: ObservableObject {
             }
         }
         Task { await self.requestAudioPermissionIfNeeded() }
+        #if DEBUG
+        // UI tests: `-RecaptrUITestProbeLatest YES` probes the newest
+        // recording (for example one cut off by a force-quit), prints
+        // what's in it, and quits.
+        if Self.isUITesting, UserDefaults.standard.bool(forKey: "RecaptrUITestProbeLatest") {
+            Task { @MainActor in
+                if let newest = self.newestRecording() {
+                    print("RecaptrUITest: probing \(newest.lastPathComponent)")
+                    print("RecaptrUITest: " + MonitorLagProbe.atoms(newest))
+                    await self.probeRecordedFile(newest)
+                    print("RecaptrUITest: " + (await MonitorLagProbe.videoGaps(newest)))
+                }
+                NSApp.terminate(nil)
+            }
+        }
+        #endif
         // Screen Recording is requested on demand (see
         // `screenModeSelected`), not at launch, so camera-only users
         // never see the prompt.
@@ -1441,6 +1473,9 @@ final class MainViewModel: ObservableObject {
             captureOutline.setRecording(true)
             recordingURL = url
             recordingBytes = 0
+            warnedLowDisk = false
+            warnedHot = false
+            lastDiskCheck = .distantPast
             recordingActivity = ProcessInfo.processInfo.beginActivity(
                 options: [.userInitiated, .idleSystemSleepDisabled, .idleDisplaySleepDisabled],
                 reason: "Recaptr is recording"
@@ -1484,9 +1519,16 @@ final class MainViewModel: ObservableObject {
         liveStats = recorder.stats()
         mixerStats = audioMixer.snapshot()
 
-        let summary = Self.buildRecordingSummary(rec: liveStats, mix: mixerStats)
+        var summary = Self.buildRecordingSummary(rec: liveStats, mix: mixerStats)
+        // Why the take ended, when Recaptr ended it (disk full, writer
+        // failure): first line of the status and of Diagnostics.
+        if let reason = stopReason {
+            summary = reason + "\n" + summary
+            stopReason = nil
+        }
         lastRecordingSummary = summary
         status = url.map { "Saved → \($0.lastPathComponent)  ·  \(summary)" } ?? "Recording stopped (no file)  ·  \(summary)"
+
 
         // Open the file we just wrote and confirm what tracks
         // actually made it in. Async so the UI doesn't block; updates
@@ -1667,6 +1709,13 @@ final class MainViewModel: ObservableObject {
             let probeSummary = String(format: "Probe → %.2fs total · video tracks=%d · fps=%.2f · video %@ %.1f Mbps · transfer=%@ · audio tracks=%d (enabled %d) · markers=%d · lengths video %.2f audio [%@] · %@",
                                       dur, videoTracks.count, fps, codec, videoMbps, transfer, audioTracks.count, enabledAudio, recorder.lastMarkerSeconds.count, videoLength, trackLengths.joined(separator: ", ") as NSString, audioDetail)
             lastFileProbeSummary = probeSummary
+            #if DEBUG
+            if Self.isUITesting {
+                let r = liveStats
+                lastFileProbeSummary = probeSummary + " · " + (await MonitorLagProbe.videoGaps(url))
+                    + " · vdrop notReady=\(r.videoDroppedNotReady) reject=\(r.videoAppendRejected) ptsRegression=\(r.videoDroppedPtsRegression) accepted=\(r.videoAccepted)"
+            }
+            #endif
             // Combine with the recording summary so the final status
             // shows both "what we tried to record" and "what's actually
             // in the file." Newline separates them in the Diagnostics
@@ -1767,6 +1816,7 @@ final class MainViewModel: ObservableObject {
             #if DEBUG
             if let url = lastRecordedFile {
                 print("RecaptrUITest: " + (await MonitorLagProbe.videoGaps(url)))
+                print("RecaptrUITest: " + MonitorLagProbe.atoms(url))
                 print("RecaptrUITest: " + (await MonitorLagProbe.greenEdge(url)))
             }
             if d.bool(forKey: "RecaptrUITestMeasureMonitorLag"), let url = lastRecordedFile {
@@ -1833,11 +1883,24 @@ final class MainViewModel: ObservableObject {
     /// 1 = mic), for Settings meters. Nil when that channel isn't
     /// running.
     func channelLevels(_ index: Int) -> (rms: Float, peak: Float)? {
+        // Called by 30 Hz meters: read the channel directly rather than
+        // snapshotting every channel's counters.
         guard audioMixer.running else { return nil }
-        let snap = audioMixer.snapshot()
-        guard snap.channels.indices.contains(index), snap.channels[index].running else { return nil }
-        return (snap.channels[index].rmsDbfs, snap.channels[index].peakDbfs)
+        return audioMixer.channel(at: index)?.levels()
     }
+
+    #if DEBUG
+    /// Newest .mov in the save folder (UI tests).
+    private func newestRecording() -> URL? {
+        guard let dir = try? recordingStorage.resolveSaveDirectory(),
+              let files = try? FileManager.default.contentsOfDirectory(
+                at: dir, includingPropertiesForKeys: [.contentModificationDateKey]) else { return nil }
+        func modified(_ url: URL) -> Date {
+            (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+        }
+        return files.filter { $0.pathExtension == "mov" }.max { modified($0) < modified($1) }
+    }
+    #endif
 
     /// Mixer channel the monitor plays: the camera's source audio (0),
     /// or the mic (1) for screen and window captures. Nil when there
@@ -1906,8 +1969,60 @@ final class MainViewModel: ObservableObject {
                 strongSelf.tickStats()
             }
         }
+        // Lets macOS batch this wake-up with others (energy).
+        timer.tolerance = 0.1
         RunLoop.main.add(timer, forMode: .common)
         recorderStatsTimer = timer
+    }
+
+    // MARK: - Recording health (disk space, heat)
+
+    /// Free space left when a take is stopped cleanly rather than
+    /// letting the writer fail on a full disk.
+    static var stopBelowBytes: Int64 {
+        // `-RecaptrUITestStopBelowGB <n>` raises it so tests can
+        // trigger the stop without filling a drive.
+        let override = UserDefaults.standard.double(forKey: "RecaptrUITestStopBelowGB")
+        return isUITesting && override > 0 ? Int64(override * 1e9) : 1_000_000_000
+    }
+    static let warnBelowBytes: Int64 = 5_000_000_000
+    private var lastDiskCheck = Date.distantPast
+    private var warnedLowDisk = false
+    private var warnedHot = false
+    /// Set when Recaptr stops a take itself; shown above the summary.
+    private var stopReason: String?
+
+    /// Once a second while recording (disk checked every 10 s).
+    private func checkRecordingHealth() {
+        if Date().timeIntervalSince(lastDiskCheck) >= Self.diskCheckInterval,
+           let dir = recordingURL?.deletingLastPathComponent(),
+           let free = (try? dir.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]))?
+               .volumeAvailableCapacityForImportantUsage {
+            lastDiskCheck = Date()
+            if free < Self.stopBelowBytes {
+                stopReason = String(format: "Stopped: only %.1f GB left on the save drive. The recording is saved.",
+                                    Double(free) / 1e9)
+                Task { await self.stopRecording() }
+                return
+            }
+            if free < Self.warnBelowBytes, !warnedLowDisk {
+                warnedLowDisk = true
+                status = String(format: "Save drive is nearly full: %.1f GB left. Recording stops by itself at 1 GB.",
+                                Double(free) / 1e9)
+            }
+        }
+        let thermal = ProcessInfo.processInfo.thermalState
+        if (thermal == .serious || thermal == .critical), !warnedHot {
+            warnedHot = true
+            status = "Your Mac is running hot. If frames start dropping, lower the resolution or encoding preset."
+        }
+    }
+
+    /// Seconds between free-space checks (`-RecaptrUITestDiskCheckSeconds`
+    /// shortens it in tests).
+    private static var diskCheckInterval: TimeInterval {
+        let override = UserDefaults.standard.double(forKey: "RecaptrUITestDiskCheckSeconds")
+        return isUITesting && override > 0 ? override : 10
     }
 
     private func stopStatsTimer() {
@@ -1933,12 +2048,13 @@ final class MainViewModel: ObservableObject {
         }
         let snapshot = recorder.stats()
         liveStats = snapshot
+        checkRecordingHealth()
 
         // Surface a writer failure mid-recording so a long session
         // doesn't burn 20 minutes producing nothing.
         if snapshot.writerStatus == .failed {
             let msg = snapshot.writerErrorDescription ?? "writer failed"
-            status = "Writer failed mid-recording: \(msg)"
+            stopReason = "Writer failed mid-recording: \(msg)"
             Task { await self.stopRecording() }
         }
     }

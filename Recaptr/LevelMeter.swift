@@ -137,6 +137,8 @@ final class MeterView: NSView {
             let timer = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
                 MainActor.assumeIsolated { self?.tick() }
             }
+            // A few ms of slack lets macOS batch wake-ups (energy).
+            timer.tolerance = 0.005
             RunLoop.main.add(timer, forMode: .common)
             self.timer = timer
         } else if !shouldRun {

@@ -222,7 +222,13 @@ struct SessionNamingTests {
 
     @Test func cleanTrimsAndCaps() {
         #expect(MarkerNamer.clean("\"Fortuna Falls!\"", maxWords: 6) == "Fortuna Falls")
-        #expect(MarkerNamer.clean("one two three four five six seven", maxWords: 3) == "one two three")
+        #expect(MarkerNamer.clean("one two three four five six seven", maxWords: 3) == "One Two Three")
+    }
+
+    @Test func cleanUsesTitleCaseButKeepsCapitals() {
+        #expect(MarkerNamer.clean("no signal", maxWords: 6) == "No Signal")
+        #expect(MarkerNamer.clean("boss at the east gate", maxWords: 6) == "Boss at the East Gate")
+        #expect(MarkerNamer.clean("low HP on iPhone", maxWords: 6) == "Low HP on iPhone")
     }
 }
 

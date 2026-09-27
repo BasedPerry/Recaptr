@@ -46,25 +46,8 @@ struct RecaptrApp: App {
         )) {
             MenuBarContent().environmentObject(vm)
         } label: {
-            HStack(spacing: 4) {
-                Image(systemName: "circle.fill")
-                    .foregroundStyle(.red)
-                Text(menuBarElapsed)
-                    .font(.system(size: 12, weight: .medium, design: .monospaced))
-            }
+            MenuBarLabel(clock: vm.clock)
         }
         .menuBarExtraStyle(.menu)
-    }
-
-    /// Format the menu-bar elapsed string. Matches the in-window
-    /// telemetry pill so both readouts are identical when visible.
-    private var menuBarElapsed: String {
-        let t = Int(vm.recordingElapsed)
-        let h = t / 3600
-        let m = (t % 3600) / 60
-        let s = t % 60
-        return h > 0
-            ? String(format: "%d:%02d:%02d", h, m, s)
-            : String(format: "%02d:%02d", m, s)
     }
 }
