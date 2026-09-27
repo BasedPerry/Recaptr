@@ -177,6 +177,7 @@ final class MainViewModel: ObservableObject {
     /// `startRecording`. `dropMarker()` is called from both the in-app
     /// button and the menu-bar item.
     @Published var markers: [TimeInterval] = []
+    static let markerDebounce: TimeInterval = 1
 
     private var cameraService: CameraCaptureService?
     private var screenService: ScreenCaptureService?
@@ -203,8 +204,11 @@ final class MainViewModel: ObservableObject {
     private var isStartingPreview = false
 
     private var recordingStartedAt: Date?
-    /// Held while recording so idle system sleep can't cut a long
-    /// capture short. The display may still sleep.
+    /// Held while recording so idle sleep can't cut a long capture
+    /// short. Keeps the display awake too: with only system sleep
+    /// blocked, the display slept after 10 idle minutes and the
+    /// capture card stalled for ~1 s several times as it did (two
+    /// takes, 2026-09-26/27).
     private var recordingActivity: NSObjectProtocol?
     private var recorderStatsTimer: Timer?
 
@@ -745,7 +749,11 @@ final class MainViewModel: ObservableObject {
 
     func dropMarker() {
         guard isRecording else { return }
-        let t = recordingElapsed
+        // Exact time; recordingElapsed only ticks once a second.
+        let t = recordingStartedAt.map { Date().timeIntervalSince($0) } ?? recordingElapsed
+        // One marker per second: extra presses (a mashed or held key)
+        // are ignored. A 2026-09-27 take got five markers in 0.9 s.
+        if let last = markers.last, t - last < Self.markerDebounce { return }
         markers.append(t)
         // Precise capture-clock time, for the .fcpxml.
         recorder.addMarker()
@@ -1305,7 +1313,7 @@ final class MainViewModel: ObservableObject {
             isRecording = true
             recordingStartedAt = Date()
             recordingActivity = ProcessInfo.processInfo.beginActivity(
-                options: [.userInitiated, .idleSystemSleepDisabled],
+                options: [.userInitiated, .idleSystemSleepDisabled, .idleDisplaySleepDisabled],
                 reason: "Recaptr is recording"
             )
             recordingElapsed = 0
