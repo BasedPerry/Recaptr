@@ -89,6 +89,8 @@ struct ContentViewNext: View {
             GlassEffectContainer {
                 chromeLayer
             }
+                // Live meters pause while the chrome is faded out.
+                .environment(\.chromeVisible, chromeOpacity > 0.05)
                 .opacity(chromeOpacity)
                 .allowsHitTesting(chromeOpacity > 0.05)
                 .animation(reduceMotion ? .linear(duration: 0.1) : .easeInOut(duration: 0.35),
@@ -680,4 +682,10 @@ struct RecaptrRootView: View {
             }
         }
     }
+}
+
+extension EnvironmentValues {
+    /// Whether the floating chrome is showing. Live meters pause when
+    /// it isn't.
+    @Entry var chromeVisible: Bool = true
 }

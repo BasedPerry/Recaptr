@@ -15,26 +15,26 @@
 //
 //  Gains and device choice live in Settings (set-and-forget).
 //
-//  Meters poll the view model at 30 Hz into local @State so they feel
-//  continuous without republishing view-model state.
+//  Meters are Core Animation layers updated directly (LevelMeter.swift),
+//  reading levels straight from the view model, so the card never
+//  rebuilds or re-lays-out per tick. They pause while the chrome is
+//  faded out.
 //
 
 import SwiftUI
-import Combine
 
 struct AudioModule: View {
 
     @EnvironmentObject var vm: MainViewModel
 
-    @State private var source = MeterReading()
-    @State private var mic = MeterReading()
     @State private var isDraggingVolume = false
     @State private var isHovering = false
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorSchemeContrast) private var contrast
 
-    private let meterTimer = Timer.publish(every: 1.0 / 30.0, on: .main, in: .common).autoconnect()
+    /// False while the floating chrome is faded out: meters pause.
+    @Environment(\.chromeVisible) private var chromeVisible
 
     private let trackHeight: CGFloat = 150
     private let trackWidth: CGFloat = 8
@@ -52,15 +52,19 @@ struct AudioModule: View {
 
             HStack(alignment: .bottom, spacing: 4) {
                 column(icon: vm.monitorEnabled ? "speaker.wave.2.fill" : "speaker.slash.fill",
-                       readout: volumeReadout, help: "Monitor volume") {
+                       readout: .text(volumeReadout), help: "Monitor volume") {
                     volumeTrack
                 }
-                column(icon: "waveform", readout: source.readout, help: "Source audio level") {
-                    meter(source, label: "Source level", id: "sourceLevel")
+                column(icon: "waveform", readout: .level { vm.sourceLevels() }, help: "Source audio level") {
+                    LevelMeter(levels: { vm.sourceLevels() }, active: chromeVisible,
+                               thickness: trackWidth, label: "Source level")
+                        .accessibilityIdentifier("sourceLevel")
                 }
                 if vm.hasMic {
-                    column(icon: "mic.fill", readout: mic.readout, help: "Mic level") {
-                        meter(mic, label: "Mic level", id: "micLevel")
+                    column(icon: "mic.fill", readout: .level { vm.micLevels() }, help: "Mic level") {
+                        LevelMeter(levels: { vm.micLevels() }, active: chromeVisible,
+                                   thickness: trackWidth, label: "Mic level")
+                            .accessibilityIdentifier("micLevel")
                     }
                     .transition(.opacity)
                 }
@@ -74,10 +78,6 @@ struct AudioModule: View {
         .onHover { isHovering = $0 }
         .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: showNumbers)
         .animation(reduceMotion ? nil : .easeOut(duration: 0.2), value: vm.hasMic)
-        .onReceive(meterTimer) { _ in
-            source.update(vm.sourceLevels())
-            mic.update(vm.micLevels())
-        }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Audio")
         .accessibilityIdentifier("audioPill")
@@ -88,7 +88,7 @@ struct AudioModule: View {
     /// One pill column: control or meter, then an icon, then the
     /// number (shown on hover only; the space is kept so the pill
     /// doesn't resize).
-    private func column<Content: View>(icon: String, readout: String, help: String,
+    private func column<Content: View>(icon: String, readout: Readout, help: String,
                                         @ViewBuilder content: () -> Content) -> some View {
         VStack(spacing: 6) {
             content()
@@ -97,11 +97,7 @@ struct AudioModule: View {
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(.primary)
                 .frame(height: 14)
-            Text(readout)
-                .font(BrandFont.mono(weight: .medium, size: 9).swiftUI)
-                .foregroundStyle(.primary)
-                .lineLimit(1)
-                .minimumScaleFactor(0.7)
+            ReadoutText(readout: readout, active: showNumbers && chromeVisible)
                 .frame(width: columnWidth + 6, height: 11)
                 .opacity(showNumbers ? 1 : 0)
                 .accessibilityHidden(true)
@@ -201,43 +197,6 @@ struct AudioModule: View {
         .accessibilityIdentifier("monitorVolume")
     }
 
-    /// Read-only level column: RMS fills bottom-up, a thin tick marks
-    /// the recent peak.
-    private func meter(_ reading: MeterReading, label: String, id: String) -> some View {
-        GeometryReader { geo in
-            let h = geo.size.height
-            ZStack(alignment: .bottom) {
-                trackBackground
-                // Gradient spans the whole track and is revealed from
-                // the bottom, so red only shows near 0 dBFS.
-                Capsule()
-                    .fill(LinearGradient(
-                        stops: [
-                            .init(color: .signal,       location: 0.0),
-                            .init(color: .signal,       location: 0.6),
-                            .init(color: .warningAmber, location: 0.85),
-                            .init(color: .red,          location: 1.0),
-                        ],
-                        startPoint: .bottom, endPoint: .top))
-                    .frame(width: trackWidth, height: h)
-                    .mask(alignment: .bottom) {
-                        Rectangle().frame(height: h * CGFloat(normalize(reading.rms)))
-                    }
-                Rectangle()
-                    .fill(.primary)
-                    .frame(width: trackWidth + 2, height: 1.5)
-                    .position(x: geo.size.width / 2, y: max(2, h - h * CGFloat(normalize(reading.peak))))
-                    .opacity(reading.peak > -100 ? 0.85 : 0)
-                    .allowsHitTesting(false)
-            }
-            .frame(maxWidth: .infinity)
-        }
-        .accessibilityElement()
-        .accessibilityLabel(label)
-        .accessibilityValue(reading.readout)
-        .accessibilityIdentifier(id)
-    }
-
     /// Empty-track fill; one step stronger under Increase Contrast.
     private var trackBackground: some View {
         Capsule()
@@ -255,11 +214,6 @@ struct AudioModule: View {
         vm.monitorEnabled ? "\(Int(vm.monitorVolume * 100))%" : "OFF"
     }
 
-    /// dBFS (-60…0) → 0…1.
-    private func normalize(_ dbfs: Float) -> Float {
-        (min(max(dbfs, -60), 0) + 60) / 60
-    }
-
     private func clamp01(_ v: Double) -> Double { min(max(v, 0), 1) }
 
     /// Toggle monitor on/off (button and ⌘K).
@@ -268,24 +222,44 @@ struct AudioModule: View {
     }
 }
 
-/// Smoothed meter state. Falls back toward silence when the source
-/// stops so a meter never freezes at its last value.
-private struct MeterReading {
-    var rms: Float = -120
-    var peak: Float = -120
+/// What a column shows under its icon on hover.
+private enum Readout {
+    case text(String)
+    case level(() -> (rms: Float, peak: Float)?)
+}
 
-    mutating func update(_ levels: (rms: Float, peak: Float)?) {
-        if let levels {
-            rms = levels.rms
-            peak = levels.peak
-        } else {
-            if rms > -100 { rms -= 2 }
-            if peak > -100 { peak -= 2 }
+/// Hover number. Level readouts refresh at 10 Hz, only while shown.
+private struct ReadoutText: View {
+    let readout: Readout
+    let active: Bool
+
+    var body: some View {
+        switch readout {
+        case .text(let text):
+            label(text)
+        case .level(let levels):
+            // The timeline only exists while the number is showing.
+            if active {
+                TimelineView(.periodic(from: .now, by: 0.1)) { _ in
+                    label(Self.format(levels()))
+                }
+            } else {
+                label("")
+            }
         }
     }
 
-    var readout: String {
-        peak > -100 ? String(format: "%+.0f", peak) : "—"
+    private func label(_ text: String) -> some View {
+        Text(text)
+            .font(BrandFont.mono(weight: .medium, size: 9).swiftUI)
+            .foregroundStyle(.primary)
+            .lineLimit(1)
+            .minimumScaleFactor(0.7)
+    }
+
+    static func format(_ levels: (rms: Float, peak: Float)?) -> String {
+        guard let peak = levels?.peak, peak > -100 else { return "—" }
+        return String(format: "%+.0f", peak)
     }
 }
 

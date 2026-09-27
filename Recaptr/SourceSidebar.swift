@@ -374,37 +374,17 @@ private struct TuningSections: View {
     }
 }
 
-/// Live horizontal level meter, redrawn at 30 fps. Gradient pinned to
-/// the full width so red only shows near 0 dBFS.
+/// Live horizontal level meter (Core Animation layers; see
+/// LevelMeter.swift).
 private struct LevelRow: View {
     let levels: () -> (rms: Float, peak: Float)?
 
     var body: some View {
         LabeledContent("Level") {
-            TimelineView(.periodic(from: .now, by: 1.0 / 30.0)) { _ in
-                let l = levels()
-                GeometryReader { geo in
-                    let w = geo.size.width
-                    ZStack(alignment: .leading) {
-                        Capsule().fill(.quaternary)
-                        Capsule()
-                            .fill(LinearGradient(
-                                stops: [.init(color: .signal, location: 0), .init(color: .signal, location: 0.6),
-                                        .init(color: .warningAmber, location: 0.85), .init(color: .red, location: 1)],
-                                startPoint: .leading, endPoint: .trailing))
-                            .mask(alignment: .leading) {
-                                Rectangle().frame(width: w * CGFloat(fraction(l?.rms ?? -120)))
-                            }
-                    }
-                }
+            LevelMeter(levels: levels, vertical: false, thickness: 6, showsPeak: false, label: "Level")
                 .frame(height: 6)
-            }
         }
-        .accessibilityElement()
-        .accessibilityLabel("Level")
     }
-
-    private func fraction(_ db: Float) -> Float { (min(max(db, -60), 0) + 60) / 60 }
 }
 
 extension CaptureResolution {
