@@ -5,6 +5,7 @@
 
 import Testing
 import Foundation
+import CoreMedia
 @testable import Recaptr
 
 struct PeakLimiterTests {
@@ -160,5 +161,34 @@ struct DriftPacerTests {
     @Test func exactClockDoesNothing() {
         var pacer = DriftPacer()
         #expect((0..<10_000).allSatisfy { _ in pacer.next(frames: 1024, ppm: 0) == 0 })
+    }
+}
+
+struct ScreenResolutionTests {
+
+    @Test func autoKeepsA4KDisplay() {
+        let d = ScreenResolution.auto.fit(CGSize(width: 3840, height: 2160))
+        #expect(d.width == 3840 && d.height == 2160)
+    }
+
+    @Test func capsScaleDownKeepingAspect() {
+        let d = ScreenResolution.fhd.fit(CGSize(width: 3840, height: 2160))
+        #expect(d.width == 1920 && d.height == 1080)
+        // A 5K display fits inside the 4K box.
+        let five = ScreenResolution.auto.fit(CGSize(width: 5120, height: 2880))
+        #expect(five.width == 3840 && five.height == 2160)
+    }
+
+    @Test func windowsKeepTheirShapeWithEvenSizes() {
+        let d = ScreenResolution.auto.fit(CGSize(width: 3840, height: 2122))
+        #expect(d.width == 3840 && d.height == 2122)
+        let odd = ScreenResolution.qhd.fit(CGSize(width: 1001, height: 777))
+        #expect(odd.width % 2 == 0 && odd.height % 2 == 0)
+        #expect(odd.width == 1000 || odd.width == 1002)  // never upscaled
+    }
+
+    @Test func portraitUsesTheLongSide() {
+        let d = ScreenResolution.fhd.fit(CGSize(width: 2160, height: 3840))
+        #expect(d.width == 1080 && d.height == 1920)
     }
 }

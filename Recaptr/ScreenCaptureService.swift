@@ -41,6 +41,64 @@ import Foundation
 import ScreenCaptureKit
 import CoreMedia
 import CoreVideo
+import AppKit
+
+/// Screen and window capture size cap. The capture keeps the
+/// source's aspect ratio and pixel size, scaled down to fit the cap
+/// (never up).
+enum ScreenResolution: String, CaseIterable, Identifiable {
+    case auto, qhd, fhd
+
+    var id: Self { self }
+
+    var shortLabel: String {
+        switch self {
+        case .auto: return "Auto"
+        case .qhd:  return "1440p"
+        case .fhd:  return "1080p"
+        }
+    }
+
+    /// Bounding box the capture must fit in.
+    private var cap: (Double, Double) {
+        switch self {
+        case .auto: return (3840, 2160)
+        case .qhd:  return (2560, 1440)
+        case .fhd:  return (1920, 1080)
+        }
+    }
+
+    /// Source size fitted into the cap, aspect kept, even numbers
+    /// (4:2:0 video needs them).
+    func fit(_ source: CGSize) -> CMVideoDimensions {
+        guard source.width > 0, source.height > 0 else { return .init(width: 1920, height: 1080) }
+        // Landscape caps also bound portrait sources by their long side.
+        let (capW, capH) = source.width >= source.height ? cap : (cap.1, cap.0)
+        let scale = min(1, capW / source.width, capH / source.height)
+        func even(_ v: Double) -> Int32 { max(2, Int32((v * scale / 2).rounded()) * 2) }
+        return .init(width: even(source.width), height: even(source.height))
+    }
+
+    /// A display's size in pixels (its current mode, so Retina and
+    /// scaled modes report real pixels, not points).
+    static func pixelSize(of display: SCDisplay) -> CGSize {
+        if let mode = CGDisplayCopyDisplayMode(display.displayID) {
+            return CGSize(width: mode.pixelWidth, height: mode.pixelHeight)
+        }
+        return CGSize(width: display.width * 2, height: display.height * 2)
+    }
+
+    /// A window's size in pixels: its frame in points times the
+    /// backing scale of the screen it's on.
+    @MainActor
+    static func pixelSize(of window: SCWindow) -> CGSize {
+        let frame = window.frame
+        let screens = NSScreen.screens
+        let scale = screens.first { $0.frame.intersects(frame) }?.backingScaleFactor
+            ?? screens.first?.backingScaleFactor ?? 2
+        return CGSize(width: frame.width * scale, height: frame.height * scale)
+    }
+}
 
 final class ScreenCaptureService: NSObject, @unchecked Sendable, SCStreamOutput, SCStreamDelegate {
 
@@ -83,7 +141,10 @@ final class ScreenCaptureService: NSObject, @unchecked Sendable, SCStreamOutput,
     /// is constructed by the caller (display vs window vs filtered display
     /// is its decision — we just consume the result).
     func start(filter: SCContentFilter,
-               previewSink: SampleBufferPreviewLayer) async throws -> CMVideoDimensions {
+               previewSink: SampleBufferPreviewLayer,
+               size: CMVideoDimensions = .init(width: 1920, height: 1080),
+               frameRate: Int = 60,
+               showsCursor: Bool = true) async throws -> CMVideoDimensions {
         // Tear down any prior stream before reusing this service.
         if stream != nil {
             await stop()
@@ -91,21 +152,22 @@ final class ScreenCaptureService: NSObject, @unchecked Sendable, SCStreamOutput,
         self.previewSinkLayer = previewSink
 
         let config = SCStreamConfiguration()
-        // Lock 1080p60 to match the camera-path recorder settings.
-        // Resolution comes from the configuration, not from the
-        // source — SCStream scales / letterboxes as needed.
-        config.width  = 1920
-        config.height = 1080
-        config.minimumFrameInterval = CMTime(value: 1, timescale: 60)
-        // BGRA: the recorder's H.264 encoder accepts BGRA (it
-        // converts to YUV420 internally), and BGRA is SCStream's
-        // preferred pixel format on Apple Silicon.
-        config.pixelFormat = kCVPixelFormatType_32BGRA
+        // Size is chosen by the caller from the source's own pixel
+        // size and aspect (capped by the Resolution setting); SCStream
+        // scales the content into it.
+        config.width  = Int(size.width)
+        config.height = Int(size.height)
+        config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(frameRate))
+        // Video-range 4:2:0 in Rec. 709, the encoder's native input.
+        // BGRA made the encoder convert every frame and left the file
+        // with no color tags (tested 2026-09-27: transfer=unset).
+        config.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+        config.colorMatrix = CGDisplayStream.yCbCrMatrix_ITU_R_709_2
+        config.colorSpaceName = CGColorSpace.itur_709
         // Small queue, drop late frames. SCStream briefly blocks the
         // system compositor if its queue is full — keep it short.
         config.queueDepth  = 5
-        // Cursor is part of the captured frame.
-        config.showsCursor = true
+        config.showsCursor = showsCursor
 
         // System-audio loopback. SCStream delivers PCM Float32 stereo
         // at the configured rate via the `.audio` output type; the
@@ -139,9 +201,10 @@ final class ScreenCaptureService: NSObject, @unchecked Sendable, SCStreamOutput,
         }
 
         self.stream = s
+        resetFrameGrid(frameRate: frameRate)
         self.activeDimensions = CMVideoDimensions(width: Int32(config.width),
                                                   height: Int32(config.height))
-        print("ScreenCaptureService: started — \(config.width)×\(config.height) @ \(config.minimumFrameInterval.timescale)fps BGRA + audio \(config.sampleRate)Hz×\(config.channelCount)ch")
+        print("ScreenCaptureService: started — \(config.width)×\(config.height) @ \(config.minimumFrameInterval.timescale)fps 420v/709 + audio \(config.sampleRate)Hz×\(config.channelCount)ch")
         return activeDimensions
     }
 
@@ -191,21 +254,20 @@ final class ScreenCaptureService: NSObject, @unchecked Sendable, SCStreamOutput,
 
         switch type {
         case .screen:
-            // Filter out idle frames — SCStream emits a frame per refresh
-            // cycle even when nothing changed on screen. .complete frames
-            // are the only ones carrying real pixel data.
-            if let attachmentsArray = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
-               let attachments = attachmentsArray.first,
-               let statusRaw = attachments[.status] as? Int,
-               let status = SCFrameStatus(rawValue: statusRaw),
-               status != .complete {
-                return
+            // SCStream sends .complete frames when the screen changes
+            // and .idle frames (no pixels) when it doesn't. Preview
+            // takes the real frames; the recording gets a steady grid
+            // (see `emitGrid`).
+            let status = (CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]])?
+                .first?[.status] as? Int
+            let isComplete = status == SCFrameStatus.complete.rawValue
+            if isComplete {
+                previewSinkLayer?.enqueue(sampleBuffer)
+                if let image = CMSampleBufferGetImageBuffer(sampleBuffer) { lastImage = image }
             }
-            // Fan out. previewSinkLayer.enqueue and onRecordBuffer (which
-            // dispatches to Recorder.writerQueue) are both thread-safe and
-            // non-blocking — no need to hop to another queue here.
-            previewSinkLayer?.enqueue(sampleBuffer)
-            onRecordBuffer?(sampleBuffer)
+            if status == SCFrameStatus.complete.rawValue || status == SCFrameStatus.idle.rawValue {
+                emitGrid(upTo: CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
+            }
 
         case .audio:
             // System-audio loopback. The `CMSampleBuffer` carries PCM
@@ -224,6 +286,65 @@ final class ScreenCaptureService: NSObject, @unchecked Sendable, SCStreamOutput,
         @unknown default:
             break
         }
+    }
+
+    // MARK: - Constant frame rate
+
+    // A screen recording made only of changed frames is variable
+    // frame rate: a still screen wrote nothing, and a 20 s take
+    // averaged 17 fps (2026-09-27). Final Cut conforms such files and
+    // the .fcpxml can't infer the rate. Instead the recording gets a
+    // frame on every tick of a fixed grid (60 or 30 fps) anchored at
+    // the first frame, each showing the newest real frame. Repeated
+    // frames cost the HEVC encoder almost nothing.
+    //
+    // Idle frames arrive ~47 times a second even on a still screen,
+    // so every arrival fills in the grid ticks up to its time. Video
+    // queue only.
+    private var lastImage: CVImageBuffer?
+    private var gridNext: CMTime = .invalid
+    private var gridStep = CMTime(value: 1, timescale: 60)
+    /// A gap longer than this (screen locked, stream stalled) is
+    /// skipped rather than filled, so the writer isn't flooded.
+    private let maxGridFill = 30
+
+    private func resetFrameGrid(frameRate: Int) {
+        videoQueue.async {
+            self.lastImage = nil
+            self.gridNext = .invalid
+            self.gridStep = CMTime(value: 1, timescale: CMTimeScale(frameRate))
+        }
+    }
+
+    private func emitGrid(upTo time: CMTime) {
+        guard let image = lastImage, time.isValid else { return }
+        if !gridNext.isValid { gridNext = time }
+        var filled = 0
+        while CMTimeCompare(gridNext, time) <= 0 {
+            if filled == maxGridFill {
+                // Long gap: jump the grid to now.
+                gridNext = time
+                filled = 0
+            }
+            if let frame = Self.makeFrame(image, at: gridNext, duration: gridStep) {
+                onRecordBuffer?(frame)
+            }
+            gridNext = CMTimeAdd(gridNext, gridStep)
+            filled += 1
+        }
+    }
+
+    private static func makeFrame(_ image: CVImageBuffer, at pts: CMTime, duration: CMTime) -> CMSampleBuffer? {
+        var format: CMVideoFormatDescription?
+        guard CMVideoFormatDescriptionCreateForImageBuffer(allocator: nil, imageBuffer: image,
+                                                           formatDescriptionOut: &format) == noErr,
+              let format else { return nil }
+        var timing = CMSampleTimingInfo(duration: duration, presentationTimeStamp: pts, decodeTimeStamp: .invalid)
+        var sample: CMSampleBuffer?
+        guard CMSampleBufferCreateReadyWithImageBuffer(allocator: nil, imageBuffer: image,
+                                                       formatDescription: format, sampleTiming: &timing,
+                                                       sampleBufferOut: &sample) == noErr else { return nil }
+        return sample
     }
 
     // MARK: - SCStreamDelegate

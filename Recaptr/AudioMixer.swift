@@ -253,6 +253,28 @@ nonisolated final class AudioInputChannel: @unchecked Sendable {
         driftFirstStamp = nil
         driftPPMValue = nil
         driftPacer = DriftPacer()
+        externalFramesSinceFirst = 0
+    }
+
+    /// External channels: frames delivered so far, for the rate.
+    private var externalFramesSinceFirst: Double = 0
+
+    /// Update the rate estimate from an external buffer's host-time
+    /// stamp. Same measurement as `noteTapTimeLocked`, with the sample
+    /// count kept here. Lock held.
+    private func noteExternalTimeLocked(ptsSeconds: Double, frames: Int, rate: Double) {
+        guard rate > 0 else { return }
+        guard let first = driftFirstStamp else {
+            driftFirstStamp = (0, ptsSeconds)
+            externalFramesSinceFirst = Double(frames)
+            return
+        }
+        let elapsed = ptsSeconds - first.host
+        if elapsed >= Self.driftMinSeconds {
+            let ppm = (externalFramesSinceFirst / elapsed / rate - 1) * 1_000_000
+            driftPPMValue = abs(ppm) <= Self.driftMaxPPM ? ppm : nil
+        }
+        externalFramesSinceFirst += Double(frames)
     }
 
     /// Update the device-rate estimate from a tap timestamp. Lock held.
@@ -659,6 +681,16 @@ nonisolated final class AudioInputChannel: @unchecked Sendable {
             sampleBuffer, at: 0, frameCount: Int32(frames), into: pcm.mutableAudioBufferList
         ) == noErr else { return }
 
+        // Drift: SCStream stamps buffers in host time, so frames
+        // delivered against those stamps give the system audio's rate
+        // the same way tap timestamps do for a device.
+        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        if pts.isValid {
+            lock.lock()
+            noteExternalTimeLocked(ptsSeconds: pts.seconds, frames: frames, rate: format.sampleRate)
+            lock.unlock()
+        }
+
         if nativeFormat != format {
             guard let conv = AVAudioConverter(from: format, to: outputFormat) else {
                 recordStartFailure("\(label): could not build converter \(format) → \(outputFormat)")
@@ -676,6 +708,7 @@ nonisolated final class AudioInputChannel: @unchecked Sendable {
             pending.removeAll()
             pendingFrameOffset = 0
             pendingFrameCount = 0
+            resetDriftLocked()
             lock.unlock()
             running = false
             return
@@ -915,7 +948,7 @@ nonisolated final class AudioInputChannel: @unchecked Sendable {
 
         // Clock-drift correction for this pull: +1 drop a frame,
         // -1 repeat one, 0 neither.
-        let correction = isExternal ? 0 : driftCorrectionLocked(frames: frames)
+        let correction = driftCorrectionLocked(frames: frames)
         if correction > 0, pendingFrameCount > frames {
             _ = dropOldestLocked(1)
             driftDrops &+= 1

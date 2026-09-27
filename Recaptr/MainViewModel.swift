@@ -95,6 +95,22 @@ final class MainViewModel: ObservableObject {
         CaptureResolution(rawValue: UserDefaults.standard.string(forKey: "RecaptrCaptureResolution") ?? "") ?? .auto {
         didSet { UserDefaults.standard.set(captureResolution.rawValue, forKey: "RecaptrCaptureResolution") }
     }
+    /// Screen and window capture size cap. Auto = the source's own
+    /// pixel size, up to 4K.
+    @Published var screenResolution: ScreenResolution =
+        ScreenResolution(rawValue: UserDefaults.standard.string(forKey: "RecaptrScreenResolution") ?? "") ?? .auto {
+        didSet { UserDefaults.standard.set(screenResolution.rawValue, forKey: "RecaptrScreenResolution") }
+    }
+    /// Screen and window frame rate: 60 or 30.
+    @Published var screenFrameRate: Int =
+        UserDefaults.standard.integer(forKey: "RecaptrScreenFrameRate") == 30 ? 30 : 60 {
+        didSet { UserDefaults.standard.set(screenFrameRate, forKey: "RecaptrScreenFrameRate") }
+    }
+    @Published var screenShowsCursor: Bool =
+        UserDefaults.standard.object(forKey: "RecaptrScreenShowsCursor") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(screenShowsCursor, forKey: "RecaptrScreenShowsCursor") }
+    }
+
     /// Size actually being captured, for Settings and file-size math.
     var activeCaptureSize: CMVideoDimensions? {
         isPreviewing && activeDims.width > 0 ? activeDims : nil
@@ -778,6 +794,22 @@ final class MainViewModel: ObservableObject {
     /// random display the moment it launches).
     func autoSelectStartupSource() {
         guard selectedMainSource == nil else { return }
+        // UI tests: `-RecaptrUITestSource display|window:<name>` starts
+        // on the first display, or the first window whose title
+        // contains <name>, instead of a camera.
+        let d = UserDefaults.standard
+        if d.bool(forKey: "RecaptrUITesting"), let want = d.string(forKey: "RecaptrUITestSource") {
+            let pick: VideoSource? = want == "display"
+                ? catalog.videoSources.first { $0.kind == .screenDisplay }
+                : catalog.videoSources.first {
+                    $0.kind == .screenWindow
+                        && $0.name.localizedCaseInsensitiveContains(String(want.dropFirst("window:".count)))
+                }
+            if let pick {
+                selectedMainSource = pick
+                return
+            }
+        }
         let cameras = catalog.videoSources.filter { $0.kind == .camera }
         guard !cameras.isEmpty else { return }
 
@@ -1075,7 +1107,9 @@ final class MainViewModel: ObservableObject {
                 }
                 let filter = SCContentFilter(display: display, excludingWindows: myWindows)
                 let svc = makeScreenService(audioViaMixer: micArmed)
-                dims = try await svc.start(filter: filter, previewSink: previewSinkLayer)
+                let size = screenResolution.fit(ScreenResolution.pixelSize(of: display))
+                dims = try await svc.start(filter: filter, previewSink: previewSinkLayer, size: size,
+                                           frameRate: screenFrameRate, showsCursor: screenShowsCursor)
                 screenService = svc
 
             case .screenWindow:
@@ -1094,7 +1128,9 @@ final class MainViewModel: ObservableObject {
                 // the capture.
                 let filter = SCContentFilter(desktopIndependentWindow: window)
                 let svc = makeScreenService(audioViaMixer: micArmed)
-                dims = try await svc.start(filter: filter, previewSink: previewSinkLayer)
+                let size = screenResolution.fit(ScreenResolution.pixelSize(of: window))
+                dims = try await svc.start(filter: filter, previewSink: previewSinkLayer, size: size,
+                                           frameRate: screenFrameRate, showsCursor: screenShowsCursor)
                 screenService = svc
             }
 
