@@ -204,7 +204,6 @@ final class MainViewModel: ObservableObject {
     private let recorder = Recorder()
     /// Plays SCStream system audio while monitoring a screen or
     /// window capture. The mic monitor lives on the AudioMixer channel.
-    private let systemAudioMonitor = SystemAudioMonitor()
     /// Levels for system audio on the direct (no-mic) screen path,
     /// which never passes through the mixer.
     private let screenAudioLevels = LevelTracker()
@@ -288,16 +287,23 @@ final class MainViewModel: ObservableObject {
             .store(in: &cancellables)
 
         // Monitor toggle + volume wired live (same no-restart pattern).
+        // The monitor plays one channel: the camera's source audio, or
+        // for screen and window captures the mic (see
+        // `monitorChannelIndex`).
         $monitorEnabled
             .sink { [weak self] enabled in
-                self?.audioMixer.channel(at: 0)?.setMonitor(enabled: enabled)
-                self?.systemAudioMonitor.setEnabled(enabled)
+                guard let self else { return }
+                let target = self.monitorChannelIndex
+                for index in 0...1 {
+                    self.audioMixer.channel(at: index)?.setMonitor(enabled: enabled && index == target)
+                }
             }
             .store(in: &cancellables)
         $monitorVolume
             .sink { [weak self] value in
-                self?.audioMixer.channel(at: 0)?.monitorVolume = Float(value)
-                self?.systemAudioMonitor.setVolume(Float(value))
+                for index in 0...1 {
+                    self?.audioMixer.channel(at: index)?.monitorVolume = Float(value)
+                }
             }
             .store(in: &cancellables)
 
@@ -1228,7 +1234,6 @@ final class MainViewModel: ObservableObject {
                 self?.recorder.appendAudio(sb)
                 self?.screenAudioLevels.feed(sb)
             }
-            self?.systemAudioMonitor.feed(sb)
         }
         svc.onStreamStopped = { [weak self] error in
             Task { @MainActor in
@@ -1267,7 +1272,6 @@ final class MainViewModel: ObservableObject {
         }
         hasScreenAudio = false
         replayAvailable = false
-        systemAudioMonitor.stop()
 
         previewSinkLayer.flush()
         // Clear the cached preview frame so a stale frame from this
@@ -1570,7 +1574,13 @@ final class MainViewModel: ObservableObject {
             await startRecording()
             // `-RecaptrUITestMonitor YES` monitors the source during
             // the take (latency tests: the mic hears the speakers).
-            if d.bool(forKey: "RecaptrUITestMonitor") { monitorEnabled = true }
+            if d.bool(forKey: "RecaptrUITestMonitor") {
+                // `-RecaptrUITestMonitorVolume 0` keeps a mic monitor
+                // silent (no feedback through speakers).
+                if let v = d.object(forKey: "RecaptrUITestMonitorVolume") as? NSNumber { monitorVolume = v.doubleValue }
+                else if let v = d.string(forKey: "RecaptrUITestMonitorVolume"), let n = Double(v) { monitorVolume = n }
+                monitorEnabled = true
+            }
             #if DEBUG
             if d.bool(forKey: "RecaptrUITestMeasureMonitorLag") {
                 Task { @MainActor [weak self] in
@@ -1669,6 +1679,18 @@ final class MainViewModel: ObservableObject {
         return (snap.channels[index].rmsDbfs, snap.channels[index].peakDbfs)
     }
 
+    /// Mixer channel the monitor plays: the camera's source audio (0),
+    /// or the mic (1) for screen and window captures. Nil when there
+    /// is nothing worth monitoring (a screen capture without a mic).
+    var monitorChannelIndex: Int? {
+        guard let kind = selectedMainSource?.kind else { return nil }
+        if kind == .camera { return 0 }
+        return micArmed ? 1 : nil
+    }
+
+    /// Whether the monitor button does anything for this source.
+    var canMonitor: Bool { monitorChannelIndex != nil }
+
     /// True when a commentary mic is chosen and switched on.
     private var micArmed: Bool { ch2Enabled && ch2DeviceID != nil }
 
@@ -1685,7 +1707,7 @@ final class MainViewModel: ObservableObject {
         ch1?.deviceLabel = label(forAudioDeviceID: ch1DeviceID)
         ch1?.gain = Float(ch1Gain)
         ch1?.enabled = !screenSource && ch1Enabled && (ch1DeviceID != nil)
-        ch1?.monitorEnabled = monitorEnabled
+        ch1?.monitorEnabled = monitorEnabled && !screenSource
         ch1?.monitorVolume = Float(monitorVolume)
 
         let ch2 = audioMixer.channel(at: 1)
@@ -1693,9 +1715,13 @@ final class MainViewModel: ObservableObject {
         ch2?.deviceLabel = label(forAudioDeviceID: ch2DeviceID)
         ch2?.gain = Float(ch2Gain)
         ch2?.enabled = micArmed
-        ch2?.monitorEnabled = false
+        // Screen and window captures monitor the mic only: the system
+        // audio already plays through the speakers, and monitoring it
+        // too doubled everything (Brandon, 2026-09-27).
+        ch2?.monitorEnabled = monitorEnabled && screenSource
+        ch2?.monitorVolume = Float(monitorVolume)
 
-        // System audio is monitored by SystemAudioMonitor, not here.
+        // System audio is never monitored (it's already audible).
         let system = audioMixer.channel(at: 2)
         system?.deviceLabel = "System audio"
         system?.enabled = screenSource && micArmed

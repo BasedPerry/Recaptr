@@ -124,10 +124,22 @@ struct AudioModule: View {
                 .contentShape(Circle())
         }
         .buttonStyle(.plain)
-        .help(vm.monitorEnabled ? "Mute monitor (⌘K)" : "Listen to source audio (⌘K)")
+        .disabled(!vm.canMonitor)
+        .help(monitorHelp)
         .accessibilityLabel("Monitor")
         .accessibilityValue(vm.monitorEnabled ? "On" : "Muted")
         .accessibilityIdentifier("monitorToggle")
+    }
+
+    /// Screen and window captures monitor the mic only, since the
+    /// system audio is already playing through the speakers.
+    private var monitorHelp: String {
+        guard vm.canMonitor else {
+            return "Nothing to monitor: system audio already plays through your speakers. Choose a mic to hear it here."
+        }
+        let isCamera = vm.selectedMainSource?.kind == .camera
+        if vm.monitorEnabled { return "Mute monitor (⌘K)" }
+        return isCamera ? "Listen to source audio (⌘K)" : "Listen to your mic (⌘K)"
     }
 
     /// Draggable monitor volume. Dims (but stays draggable) while the
