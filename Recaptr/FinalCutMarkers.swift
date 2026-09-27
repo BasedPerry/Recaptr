@@ -29,7 +29,7 @@ enum FinalCutMarkers {
               let video = try await asset.loadTracks(withMediaType: .video).first else { return nil }
 
         let size = try await video.load(.naturalSize)
-        let fps = Double(try await video.load(.nominalFrameRate))
+        let fps = try await frameRate(of: video, in: asset)
         let duration = try await asset.load(.duration).seconds
         let audioTracks = try await asset.loadTracks(withMediaType: .audio).count
 
@@ -39,6 +39,46 @@ enum FinalCutMarkers {
         let out = movURL.deletingPathExtension().appendingPathExtension("fcpxml")
         try xml.write(to: out, atomically: true, encoding: .utf8)
         return out
+    }
+
+    /// The capture's real frame rate, from the typical spacing of the
+    /// first frames. The track's nominal rate is an average, so frames
+    /// lost to a source dropout pull it down: a 2026-09-27 hour at 60
+    /// fps averaged 59.944, which read as 59.94 and gave Final Cut the
+    /// wrong frame rate.
+    static func frameRate(of video: AVAssetTrack, in asset: AVURLAsset) async throws -> Double {
+        let nominal = Double(try await video.load(.nominalFrameRate))
+        let reader = try AVAssetReader(asset: asset)
+        reader.timeRange = CMTimeRange(start: .zero, duration: CMTime(seconds: 10, preferredTimescale: 600))
+        let output = AVAssetReaderTrackOutput(track: video, outputSettings: nil)
+        output.alwaysCopiesSampleData = false
+        reader.add(output)
+        guard reader.startReading() else { return nominal }
+        var times: [Double] = []
+        while let buffer = output.copyNextSampleBuffer() {
+            if CMSampleBufferGetNumSamples(buffer) > 0 {
+                times.append(CMSampleBufferGetPresentationTimeStamp(buffer).seconds)
+            }
+        }
+        reader.cancelReading()
+        return frameRate(fromTimes: times) ?? nominal
+    }
+
+    /// Frame rate from frame times: the mean spacing, leaving out
+    /// dropouts (spacings over 1.5x the median), snapped to a standard
+    /// rate when close. The mean, not the median, because capture
+    /// timestamps jitter by a millisecond or so. Nil with too few frames.
+    static func frameRate(fromTimes times: [Double]) -> Double? {
+        let sorted = times.sorted()
+        guard sorted.count >= 30 else { return nil }
+        let spacings = zip(sorted.dropFirst(), sorted).map { $0 - $1 }
+        let median = spacings.sorted()[spacings.count / 2]
+        let steady = spacings.filter { $0 > 0 && $0 < median * 1.5 }
+        guard median > 0, !steady.isEmpty else { return nil }
+        let rate = Double(steady.count) / steady.reduce(0, +)
+        let standard: [Double] = [23.976, 24, 25, 29.97, 30, 50, 59.94, 60, 120]
+        let nearest = standard.min { abs($0 - rate) < abs($1 - rate) }!
+        return abs(nearest - rate) < 0.5 ? nearest : rate
     }
 
     static func document(movURL: URL, markers: [(title: String, seconds: Double)],

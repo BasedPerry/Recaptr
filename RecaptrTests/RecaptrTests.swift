@@ -107,3 +107,27 @@ struct FinalCutMarkersTests {
         #expect(xml.contains(#"<marker start="60060/60000s""#))
     }
 }
+
+struct FrameRateTests {
+
+    /// 60 fps with jitter and a 1 s dropout is still 60, not 59.94.
+    @Test func sixtyWithADropoutStaysSixty() {
+        var times: [Double] = []
+        var t = 0.0
+        for i in 0..<600 {
+            if i == 300 { t += 1.0 }  // source dropout
+            times.append(t + (i % 2 == 0 ? 0.0012 : -0.0012))  // jitter
+            t += 1.0 / 60
+        }
+        #expect(FinalCutMarkers.frameRate(fromTimes: times) == 60)
+    }
+
+    @Test func ntscIsRecognised() {
+        let times = (0..<600).map { Double($0) * 1001 / 60000 }
+        #expect(FinalCutMarkers.frameRate(fromTimes: times) == 59.94)
+    }
+
+    @Test func tooFewFramesGivesNil() {
+        #expect(FinalCutMarkers.frameRate(fromTimes: [0, 1.0 / 60]) == nil)
+    }
+}
