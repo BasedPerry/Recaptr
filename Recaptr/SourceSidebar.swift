@@ -159,9 +159,12 @@ private struct TuningSections: View {
                         ForEach(CaptureResolution.allCases) { Text($0.shortLabel).tag($0) }
                     }
                     .onChange(of: vm.captureResolution) { _, _ in restartCameraPreview() }
-                    Toggle("Low-light cleanup", isOn: $vm.lowLightNoiseReduction)
-                        .disabled(!vm.lowLightNoiseReductionSupported)
-                        .onChange(of: vm.lowLightNoiseReduction) { _, _ in restartCameraPreview() }
+                    // Only webcams and Continuity Camera support it;
+                    // a capture card would just show a dead switch.
+                    if vm.lowLightNoiseReductionSupported {
+                        Toggle("Low-light cleanup", isOn: $vm.lowLightNoiseReduction)
+                            .onChange(of: vm.lowLightNoiseReduction) { _, _ in restartCameraPreview() }
+                    }
                 } header: {
                     Label("Video", systemImage: "video")
                 } footer: {
@@ -171,10 +174,12 @@ private struct TuningSections: View {
 
             Section {
                 if isCamera {
-                    devicePicker("Source", selection: $vm.ch1DeviceID, id: "sourceDevicePicker")
+                    // "Input", not "Source": the section above is the
+                    // video source, and the two read as the same thing.
+                    devicePicker("Input", selection: $vm.ch1DeviceID, id: "sourceDevicePicker")
                     gainRow($vm.ch1Gain)
                 } else {
-                    LabeledContent("Source", value: "System audio")
+                    LabeledContent("Input", value: "System audio")
                 }
                 LevelRow(levels: { vm.sourceLevels() })
 
@@ -211,12 +216,8 @@ private struct TuningSections: View {
     }
 
     private var videoFooter: String {
-        if !vm.lowLightNoiseReductionSupported {
-            if let size = vm.activeCaptureSize { return "Capturing \(size.width)×\(size.height). Low-light cleanup needs a webcam or Continuity Camera." }
-            return "Low-light cleanup needs a webcam or Continuity Camera."
-        }
-        if let size = vm.activeCaptureSize { return "Capturing \(size.width)×\(size.height)." }
-        return ""
+        guard let size = vm.activeCaptureSize else { return "" }
+        return "Capturing \(size.width)×\(size.height)."
     }
 
     private func devicePicker(_ title: String, selection: Binding<String?>, id: String) -> some View {

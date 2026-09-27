@@ -61,9 +61,12 @@ final class DeviceCatalog: ObservableObject {
             )
         }
 
-        let micSources = mics.map {
-            AudioSource(id: $0.uniqueID, name: $0.localizedName)
-        }
+        // Core Audio creates private "CADefaultDeviceAggregate-<pid>-<n>"
+        // devices whenever an engine opens the default output (the
+        // monitor does), and they come and go. Never real inputs.
+        let micSources = mics
+            .filter { !$0.localizedName.hasPrefix("CADefaultDeviceAggregate") }
+            .map { AudioSource(id: $0.uniqueID, name: $0.localizedName) }
 
         await MainActor.run {
             self.videoSources.removeAll(where: { $0.kind == .camera })
