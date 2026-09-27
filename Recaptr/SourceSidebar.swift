@@ -121,9 +121,14 @@ struct SourceSidebar: View {
             vm.selectedMainSource = source
         } label: {
             HStack {
-                Label(Self.displayName(source), systemImage: mode.systemImage)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+                Label {
+                    Text(Self.displayName(source))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                } icon: {
+                    Image(systemName: mode.systemImage)
+                        .foregroundStyle(mode.tint)
+                }
                 Spacer()
                 if isSelected {
                     Image(systemName: "checkmark")

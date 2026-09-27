@@ -39,6 +39,19 @@ enum SourceMode: String, CaseIterable, Identifiable, Hashable {
         case .camera: return "camera.fill"
         }
     }
+
+    /// Brand color per source type, for icons (the sidebar's source
+    /// rows and the pill's source menu). macOS 27 brought color back
+    /// to sidebar icons; one color per type also tells Camera, Screen
+    /// and Window apart at a glance. Selection itself stays the system
+    /// accent.
+    var tint: Color {
+        switch self {
+        case .window: return .restore
+        case .screen: return .violet
+        case .camera: return .signal
+        }
+    }
 }
 
 // MARK: - Mode segments (shared with the sidebar)
@@ -130,15 +143,6 @@ struct SourceSwitcherPill: View {
         SourceModeSegments(activeMode: $activeMode)
     }
 
-    /// Per-mode brand tint. Mode identity only (the dropdown icon);
-    /// selection itself uses the system accent.
-    private var activeModeTint: Color {
-        switch activeMode {
-        case .window: return .restore
-        case .screen: return .violet
-        case .camera: return .signal
-        }
-    }
 
     // MARK: Source menu
 
@@ -163,7 +167,7 @@ struct SourceSwitcherPill: View {
             HStack(spacing: 8) {
                 Image(systemName: activeMode.systemImage)
                     .imageScale(.medium)
-                    .foregroundStyle(activeModeTint)
+                    .foregroundStyle(activeMode.tint)
                 Text(currentSourceName)
                     .lineLimit(1)
                     .truncationMode(.middle)
