@@ -131,3 +131,34 @@ struct FrameRateTests {
         #expect(FinalCutMarkers.frameRate(fromTimes: [0, 1.0 / 60]) == nil)
     }
 }
+
+struct DriftPacerTests {
+
+    /// 31 ppm over 60 s of 1024-frame pulls drops ~89 frames, evenly.
+    @Test func fastDeviceDropsAtItsRate() {
+        var pacer = DriftPacer()
+        let pulls = 60 * 48_000 / 1024
+        var drops = 0
+        var lastDrop = -1
+        var minGap = Int.max
+        for i in 0..<pulls where pacer.next(frames: 1024, ppm: 31) == 1 {
+            drops += 1
+            if lastDrop >= 0 { minGap = min(minGap, i - lastDrop) }
+            lastDrop = i
+        }
+        #expect(abs(drops - Int(60 * 48_000 * 31e-6)) <= 1)
+        #expect(minGap >= 25)  // spread out, not bunched
+    }
+
+    @Test func slowDeviceRepeats() {
+        var pacer = DriftPacer()
+        let results = (0..<10_000).map { _ in pacer.next(frames: 1024, ppm: -20) }
+        #expect(results.allSatisfy { $0 <= 0 })
+        #expect(results.filter { $0 == -1 }.count == Int(10_000 * 1024 * 20e-6))
+    }
+
+    @Test func exactClockDoesNothing() {
+        var pacer = DriftPacer()
+        #expect((0..<10_000).allSatisfy { _ in pacer.next(frames: 1024, ppm: 0) == 0 })
+    }
+}

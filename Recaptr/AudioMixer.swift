@@ -86,6 +86,13 @@ struct AudioInputChannelStats: Equatable {
     /// Frames dropped to keep this channel's backlog bounded (device
     /// clock running ahead of the mixer). Zero in a normal session.
     var trimmedFrames: Int = 0
+    /// Clock-drift corrections: single frames dropped (device fast)
+    /// and repeated (device slow) to hold the backlog steady.
+    var driftDrops: Int = 0
+    var driftRepeats: Int = 0
+    /// Measured device clock error versus the host clock, in parts per
+    /// million (positive = device fast). Nil until measured.
+    var driftPPM: Double?
     /// Automatic restarts after a stall or audio hardware change.
     var recoveries: Int = 0
     var lastRecoveryReason: String?
@@ -124,6 +131,23 @@ private func makeMixerFormat() -> AVAudioFormat {
     )!
 }
 
+// MARK: - Drift pacing
+
+/// Spreads clock-drift corrections evenly: given a device's error in
+/// ppm, says for each pull whether to drop a frame (+1), repeat one
+/// (-1), or neither (0), so that over time exactly `ppm` millionths of
+/// the frames are corrected, never more than one per pull.
+nonisolated struct DriftPacer {
+    private var accumulator: Double = 0
+
+    mutating func next(frames: Int, ppm: Double) -> Int {
+        accumulator += Double(frames) * ppm / 1_000_000
+        if accumulator >= 1 { accumulator -= 1; return 1 }
+        if accumulator <= -1 { accumulator += 1; return -1 }
+        return 0
+    }
+}
+
 // MARK: - AudioInputChannel
 
 /// One input source with its own AVAudioEngine bound to a specific
@@ -142,8 +166,20 @@ nonisolated final class AudioInputChannel: @unchecked Sendable {
     // Configuration — set by UI before start(); locked while running.
     var deviceUniqueID: String?
     var deviceLabel: String = "—"
-    var gain: Float = 1.0
+    var gain: Float = 1.0 {
+        didSet { monitorRing.gain = gain }
+    }
     var enabled: Bool = true
+
+    /// Low-latency monitor feed (see MonitorRing). Written by
+    /// `sinkNode` on the capture engine, read by the monitor engine's
+    /// source node. Nil sink means the native format didn't fit (not
+    /// 48 kHz Float32, or more than two channels) and monitoring falls
+    /// back to scheduling tap buffers on a player node.
+    let monitorRing = MonitorRing()
+    private var sinkNode: AVAudioSinkNode?
+    /// True when the current monitor engine plays from `monitorRing`.
+    private var monitorUsesRing = false
 
     // Internal state.
     private let engine = AVAudioEngine()
@@ -165,6 +201,74 @@ nonisolated final class AudioInputChannel: @unchecked Sendable {
     private let maxPendingFrames: AVAudioFrameCount = 12_000
     private let trimTargetFrames: AVAudioFrameCount = 6_000
     private var trimmedFrames: Int = 0
+
+    /// Clock-drift compensation (tap channels). Each capture device
+    /// runs on its own clock and the mixer pulls at the host clock, so
+    /// a device even slightly fast piles up backlog and its audio falls
+    /// steadily behind; a slow one does the opposite. Measured
+    /// 2026-09-27: the Yeti mic slid 20 ms behind the Elgato's game
+    /// audio every 10 minutes (~33 ppm), about 120 ms over an hour.
+    ///
+    /// The device's true rate comes from the tap timestamps: device
+    /// sample time against host time since the first callback, exact
+    /// to a few ppm after ~20 s. The pull then drops one frame (device
+    /// fast) or repeats one (device slow) at exactly that rate, e.g.
+    /// ~1.6 frames a second at 33 ppm, which is inaudible.
+    ///
+    /// Not measured from the backlog: tried first, and the mixer timer
+    /// running late under encoding load reads as extra backlog, so it
+    /// dropped a frame on every pull and caused underruns (10-minute
+    /// test, 2026-09-27).
+    private var driftFirstStamp: (sample: Double, host: Double)?
+    private var driftPPMValue: Double?
+    private var driftPacer = DriftPacer()
+    private var driftDrops = 0
+    private var driftRepeats = 0
+    #if DEBUG
+    /// UI tests: average backlog per pull since the last read, to
+    /// check that correction holds it flat.
+    private var backlogSum: Double = 0
+    private var backlogSamples = 0
+    func takeBacklogAverage() -> Double? {
+        lock.lock(); defer { lock.unlock() }
+        guard backlogSamples > 0 else { return nil }
+        let average = backlogSum / Double(backlogSamples)
+        backlogSum = 0
+        backlogSamples = 0
+        return average
+    }
+    /// `-RecaptrUITestNoDriftCorrection YES` measures but doesn't correct.
+    static let driftCorrectionDisabledForTesting =
+        UserDefaults.standard.bool(forKey: "RecaptrUITesting")
+        && UserDefaults.standard.bool(forKey: "RecaptrUITestNoDriftCorrection")
+    #endif
+
+    /// Seconds of timestamps needed before correcting.
+    private static let driftMinSeconds = 20.0
+    /// Ignore readings beyond this; a real crystal is within ~100 ppm,
+    /// so anything larger is a timestamp glitch.
+    private static let driftMaxPPM = 500.0
+
+    private func resetDriftLocked() {
+        driftFirstStamp = nil
+        driftPPMValue = nil
+        driftPacer = DriftPacer()
+    }
+
+    /// Update the device-rate estimate from a tap timestamp. Lock held.
+    private func noteTapTimeLocked(_ when: AVAudioTime, rate: Double) {
+        guard when.isSampleTimeValid, when.isHostTimeValid, rate > 0 else { return }
+        let sample = Double(when.sampleTime)
+        let host = AVAudioTime.seconds(forHostTime: when.hostTime)
+        guard let first = driftFirstStamp else {
+            driftFirstStamp = (sample, host)
+            return
+        }
+        let elapsed = host - first.host
+        guard elapsed >= Self.driftMinSeconds else { return }
+        let ppm = ((sample - first.sample) / elapsed / rate - 1) * 1_000_000
+        driftPPMValue = abs(ppm) <= Self.driftMaxPPM ? ppm : nil
+    }
 
     /// Jitter buffer for externally fed channels. SCStream delivers
     /// system audio in small, irregular chunks, so pulling from the
@@ -328,12 +432,35 @@ nonisolated final class AudioInputChannel: @unchecked Sendable {
     private func buildMonitorEngine() {
         let engine = AVAudioEngine()
         let player = AVAudioPlayerNode()
-        engine.attach(player)
+        // Play straight from the ring when the capture engine feeds
+        // it; otherwise schedule tap buffers on the player.
+        let useRing = sinkNode != nil && monitorFormat.channelCount == 2
         do {
-            try engine.connectNode(player, to: engine.mainMixerNode, format: monitorFormat)
+            if useRing {
+                let ring = monitorRing
+                let source = AVAudioSourceNode(format: monitorFormat) { isSilence, _, frameCount, outputData in
+                    let buffers = UnsafeMutableAudioBufferListPointer(outputData)
+                    guard buffers.count >= 2,
+                          let l = buffers[0].mData?.assumingMemoryBound(to: Float.self),
+                          let r = buffers[1].mData?.assumingMemoryBound(to: Float.self) else {
+                        isSilence.pointee = true
+                        return noErr
+                    }
+                    if !ring.read(left: l, right: r, frames: Int(frameCount)) {
+                        isSilence.pointee = true
+                    }
+                    return noErr
+                }
+                engine.attach(source)
+                try engine.connectNode(source, to: engine.mainMixerNode, format: monitorFormat)
+            } else {
+                engine.attach(player)
+                try engine.connectNode(player, to: engine.mainMixerNode, format: monitorFormat)
+            }
         } catch {
             print("AudioInputChannel[\(label)]: monitor connect failed: \(error.localizedDescription)")
         }
+        self.monitorUsesRing = useRing
         engine.mainMixerNode.outputVolume = monitorVolume
         self.monitorEngine = engine
         self.monitorPlayerNode = player
@@ -377,10 +504,10 @@ nonisolated final class AudioInputChannel: @unchecked Sendable {
         do {
             monitorEngine.prepare()
             try monitorEngine.start()
-            try monitorPlayerNode.playAudio()
+            if !monitorUsesRing { try monitorPlayerNode.playAudio() }
             monitorRunning = true
             let outFormat = monitorEngine.outputNode.outputFormat(forBus: 0)
-            print("AudioInputChannel[\(label)]: monitor engine started — outputNode format=\(outFormat)")
+            print("AudioInputChannel[\(label)]: monitor engine started (\(monitorUsesRing ? "low-latency ring" : "player")) — outputNode format=\(outFormat)")
         } catch {
             print("AudioInputChannel[\(label)]: monitor engine start failed: \(error.localizedDescription)")
         }
@@ -390,7 +517,11 @@ nonisolated final class AudioInputChannel: @unchecked Sendable {
     func stopMonitor() {
         monitorLock.lock(); monitorQueuedFrames = 0; monitorLock.unlock()
         guard monitorRunning else { return }
-        monitorPlayerNode.stop()
+        if monitorUsesRing {
+            print("AudioInputChannel[\(label)]: monitor stopped, ring skips=\(monitorRing.skips) underruns=\(monitorRing.underruns)")
+        } else {
+            monitorPlayerNode.stop()
+        }
         monitorEngine.stop()
         monitorRunning = false
     }
@@ -463,10 +594,15 @@ nonisolated final class AudioInputChannel: @unchecked Sendable {
         // leaving recordings with a silent track. Its documented
         // minimum buffer is also 100 ms versus 1024 frames (~21 ms)
         // here, which would add monitor latency.
-        engine.inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buf, _ in
-            self?.handleTap(buf)
+        engine.inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buf, when in
+            self?.handleTap(buf, when: when)
         }
         tapInstalled = true
+
+        // 5b. Low-latency monitor feed: a sink node on the input
+        // receives each I/O cycle (~10 ms) and copies it into the
+        // ring. The tap above keeps feeding the recording unchanged.
+        attachMonitorSink(format: format)
 
         // 6. Start.
         engine.prepare()
@@ -476,6 +612,35 @@ nonisolated final class AudioInputChannel: @unchecked Sendable {
         // A successful start clears any error from an earlier attempt.
         lock.lock(); deliveredSinceStart = false; lastError = nil; lock.unlock()
         print("AudioInputChannel[\(label)]: engine started")
+    }
+
+    /// Connect the input to a sink node that copies each I/O cycle
+    /// into `monitorRing`. Only for 48 kHz Float32 planar input with
+    /// one or two channels (the ring does no resampling); anything
+    /// else leaves `sinkNode` nil and the monitor uses the tap path.
+    private func attachMonitorSink(format: AVAudioFormat) {
+        // UI tests: `-RecaptrUITestMonitorTapPath YES` keeps the old
+        // path, for latency comparisons.
+        let d = UserDefaults.standard
+        if d.bool(forKey: "RecaptrUITesting"), d.bool(forKey: "RecaptrUITestMonitorTapPath") { return }
+        guard format.commonFormat == .pcmFormatFloat32, !format.isInterleaved,
+              format.sampleRate == monitorFormat.sampleRate,
+              (1...2).contains(format.channelCount) else {
+            print("AudioInputChannel[\(label)]: monitor uses tap path (format \(format))")
+            return
+        }
+        let ring = monitorRing
+        let sink = AVAudioSinkNode { _, frameCount, inputData in
+            let buffers = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: inputData))
+            guard buffers.count >= 1,
+                  let l = buffers[0].mData?.assumingMemoryBound(to: Float.self) else { return noErr }
+            let r = buffers.count > 1 ? buffers[1].mData?.assumingMemoryBound(to: Float.self) : nil
+            ring.write(left: l, right: r.map { UnsafePointer($0) }, frames: Int(frameCount))
+            return noErr
+        }
+        engine.attach(sink)
+        engine.connect(engine.inputNode, to: sink, format: format)
+        sinkNode = sink
     }
 
     /// Feed one externally captured buffer (SCStream system audio)
@@ -520,12 +685,19 @@ nonisolated final class AudioInputChannel: @unchecked Sendable {
             engine.inputNode.removeTap(onBus: 0)
             tapInstalled = false
         }
+        if let sink = sinkNode {
+            engine.disconnectNodeInput(sink)
+            engine.detach(sink)
+            sinkNode = nil
+        }
         // Tear down the monitor alongside capture.
         stopMonitor()
         lock.lock()
         pending.removeAll()
         pendingFrameOffset = 0
         pendingFrameCount = 0
+        // A restarted device has a new backlog; re-learn the target.
+        resetDriftLocked()
         lock.unlock()
         running = false
     }
@@ -542,8 +714,11 @@ nonisolated final class AudioInputChannel: @unchecked Sendable {
 
     // MARK: - Tap → converted buffer → pending queue
 
-    private func handleTap(_ inBuf: AVAudioPCMBuffer) {
-        lock.lock(); deliveredSinceStart = true; lock.unlock()
+    private func handleTap(_ inBuf: AVAudioPCMBuffer, when: AVAudioTime? = nil) {
+        lock.lock()
+        deliveredSinceStart = true
+        if let when { noteTapTimeLocked(when, rate: inBuf.format.sampleRate) }
+        lock.unlock()
         // Tap-firing diagnostic. First call + every 500th call get
         // logged (~1 log per 10 s at 48 kHz / 1024 frames per tap).
         // A plateauing counter pinpoints when the tap stopped firing.
@@ -618,7 +793,7 @@ nonisolated final class AudioInputChannel: @unchecked Sendable {
         // player node. `AVAudioPlayerNode.scheduleBuffer` copies the
         // buffer contents internally so the source can be released
         // immediately after.
-        if monitorRunning,
+        if monitorRunning, !monitorUsesRing,
            let monitorBuf = AVAudioPCMBuffer(pcmFormat: monitorFormat, frameCapacity: outBuf.frameLength),
            let interleavedSrc = outBuf.floatChannelData?.pointee,
            let monitorChannels = monitorBuf.floatChannelData {
@@ -698,6 +873,9 @@ nonisolated final class AudioInputChannel: @unchecked Sendable {
         primed = false
         // Trims before alignment are the startup window, not drift.
         trimmedFrames = 0
+        resetDriftLocked()
+        driftDrops = 0
+        driftRepeats = 0
         lock.unlock()
     }
 
@@ -735,12 +913,23 @@ nonisolated final class AudioInputChannel: @unchecked Sendable {
             primed = true
         }
 
+        // Clock-drift correction for this pull: +1 drop a frame,
+        // -1 repeat one, 0 neither.
+        let correction = isExternal ? 0 : driftCorrectionLocked(frames: frames)
+        if correction > 0, pendingFrameCount > frames {
+            _ = dropOldestLocked(1)
+            driftDrops &+= 1
+        }
+        let repeatLast = correction < 0 && frames > 1
+        let target = repeatLast ? frames - 1 : frames
+
         var produced: AVAudioFrameCount = 0
         var destIdx = 0  // sample index (interleaved, so frame*kMixerChannels)
+        var lastFrame: (Float, Float)?
 
-        while produced < frames, let buf = pending.first {
+        while produced < target, let buf = pending.first {
             let availableInBuf = buf.frameLength - pendingFrameOffset
-            let want = frames - produced
+            let want = target - produced
             let take = min(availableInBuf, want)
             if take == 0 { break }
 
@@ -751,6 +940,7 @@ nonisolated final class AudioInputChannel: @unchecked Sendable {
                 for i in 0..<count {
                     dest[destIdx + i] += raw[srcStart + i]
                 }
+                lastFrame = (raw[srcStart + count - 2], raw[srcStart + count - 1])
             }
 
             destIdx += Int(take) * Int(kMixerChannels)
@@ -764,12 +954,32 @@ nonisolated final class AudioInputChannel: @unchecked Sendable {
             }
         }
 
+        // Repeat the last frame to fill the slot the correction left.
+        if repeatLast, produced == target, let (l, r) = lastFrame {
+            dest[destIdx] += l
+            dest[destIdx + 1] += r
+            produced &+= 1
+            driftRepeats &+= 1
+        }
+
         framesPulledByMixer &+= Int(produced)
         if produced < frames {
             zeroFillEvents &+= 1
             primed = false
         }
         return produced
+    }
+
+    /// This pull's correction: +1 drop a frame, -1 repeat one, 0
+    /// neither, paced at the measured device drift. Lock held.
+    private func driftCorrectionLocked(frames: AVAudioFrameCount) -> Int {
+        #if DEBUG
+        backlogSum += Double(pendingFrameCount)
+        backlogSamples += 1
+        if Self.driftCorrectionDisabledForTesting { return 0 }
+        #endif
+        guard let ppm = driftPPMValue else { return 0 }
+        return driftPacer.next(frames: Int(frames), ppm: ppm)
     }
 
     // MARK: - Stats
@@ -780,6 +990,9 @@ nonisolated final class AudioInputChannel: @unchecked Sendable {
         let pulled = framesPulledByMixer
         let zf = zeroFillEvents
         let trimmed = trimmedFrames
+        let drops = driftDrops
+        let repeats = driftRepeats
+        let ppm = driftPPMValue
         let err = lastError
         let rmsDb = smoothedRmsDbfs
         let peakDb = lastPeakDbfs
@@ -796,6 +1009,9 @@ nonisolated final class AudioInputChannel: @unchecked Sendable {
             framesPulledByMixer: pulled,
             zeroFillEvents: zf,
             trimmedFrames: trimmed,
+            driftDrops: drops,
+            driftRepeats: repeats,
+            driftPPM: ppm,
             recoveries: recoveryCount,
             lastRecoveryReason: lastRecoveryReason,
             lastError: err,

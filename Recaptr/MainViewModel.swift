@@ -1406,6 +1406,9 @@ final class MainViewModel: ObservableObject {
             if ch.trimmedFrames > 0 {
                 s += " trim=\(ch.trimmedFrames)"
             }
+            if let ppm = ch.driftPPM {
+                s += String(format: " drift=%+.1fppm(-%d/+%d)", ppm, ch.driftDrops, ch.driftRepeats)
+            }
             if ch.recoveries > 0 {
                 s += " recovered=\(ch.recoveries)(\(ch.lastRecoveryReason ?? "?"))"
             }
@@ -1529,6 +1532,25 @@ final class MainViewModel: ObservableObject {
         Task { @MainActor in
             try? await Task.sleep(for: .seconds(3))
             await startRecording()
+            // `-RecaptrUITestMonitor YES` monitors the source during
+            // the take (latency tests: the mic hears the speakers).
+            if d.bool(forKey: "RecaptrUITestMonitor") { monitorEnabled = true }
+            #if DEBUG
+            if d.bool(forKey: "RecaptrUITestMeasureMonitorLag") {
+                Task { @MainActor [weak self] in
+                    for _ in 0..<Int(seconds / 10) {
+                        try? await Task.sleep(for: .seconds(10))
+                        if let ring = self?.audioMixer.channel(at: 0)?.monitorRing {
+                            print("RecaptrUITest: monitor ring fill=\(ring.fill)")
+                        }
+                        if let a = self?.audioMixer.channel(at: 0)?.takeBacklogAverage(),
+                           let m = self?.audioMixer.channel(at: 1)?.takeBacklogAverage() {
+                            print(String(format: "RecaptrUITest: backlog audio=%.0f mic=%.0f mic-audio=%.1fms", a, m, (m - a) / 48))
+                        }
+                    }
+                }
+            }
+            #endif
             // `-RecaptrUITestAutoMarkers <n>` drops n markers spread
             // evenly through the take.
             let markerCount = max(0, d.integer(forKey: "RecaptrUITestAutoMarkers"))
@@ -1540,6 +1562,14 @@ final class MainViewModel: ObservableObject {
             try? await Task.sleep(for: .seconds(slice))
             await stopRecording()
             try? await Task.sleep(for: .seconds(4))  // let the probe print
+            #if DEBUG
+            if d.bool(forKey: "RecaptrUITestMeasureMonitorLag"), let url = lastRecordedFile {
+                if let ring = audioMixer.channel(at: 0)?.monitorRing {
+                    print("RecaptrUITest: monitor ring skips=\(ring.skips) underruns=\(ring.underruns)")
+                }
+                print("RecaptrUITest: " + (await MonitorLagProbe.measure(url)))
+            }
+            #endif
             print("RecaptrUITest: status → \(status)")
             NSApp.terminate(nil)
         }
