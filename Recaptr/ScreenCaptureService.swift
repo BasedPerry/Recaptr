@@ -202,6 +202,7 @@ final class ScreenCaptureService: NSObject, @unchecked Sendable, SCStreamOutput,
 
         self.stream = s
         resetFrameGrid(frameRate: frameRate)
+        seedFirstFrameIfNeeded(filter: filter, configuration: config)
         self.activeDimensions = CMVideoDimensions(width: Int32(config.width),
                                                   height: Int32(config.height))
         print("ScreenCaptureService: started — \(config.width)×\(config.height) @ \(config.minimumFrameInterval.timescale)fps 420v/709 + audio \(config.sampleRate)Hz×\(config.channelCount)ch")
@@ -261,7 +262,13 @@ final class ScreenCaptureService: NSObject, @unchecked Sendable, SCStreamOutput,
             // (see `emitGrid`).
             let status = (CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]])?
                 .first?[.status] as? Int
-            let isComplete = status == SCFrameStatus.complete.rawValue
+            var isComplete = status == SCFrameStatus.complete.rawValue
+            #if DEBUG
+            // UI tests: `-RecaptrUITestIgnoreFramesFor <s>` ignores real
+            // frames at the start, as if the source never changed, to
+            // exercise `seedFirstFrameIfNeeded`.
+            if isComplete, let until = ignoreFramesUntil, Date() < until { isComplete = false }
+            #endif
             if isComplete {
                 previewSinkLayer?.enqueue(sampleBuffer)
                 if let image = CMSampleBufferGetImageBuffer(sampleBuffer) { lastImage = image }
@@ -314,6 +321,13 @@ final class ScreenCaptureService: NSObject, @unchecked Sendable, SCStreamOutput,
     // 2026-09-27); after a gap, arrivals also dumped a burst of frames
     // that the real-time encoder partly dropped. Video queue only.
     private var lastImage: CVImageBuffer?
+    #if DEBUG
+    private let ignoreFramesUntil: Date? = {
+        let d = UserDefaults.standard
+        let seconds = d.double(forKey: "RecaptrUITestIgnoreFramesFor")
+        return d.bool(forKey: "RecaptrUITesting") && seconds > 0 ? Date().addingTimeInterval(seconds) : nil
+    }()
+    #endif
     private var gridNext: CMTime = .invalid
     private var gridStep = CMTime(value: 1, timescale: 60)
     private var gridTimer: DispatchSourceTimer?
@@ -336,6 +350,40 @@ final class ScreenCaptureService: NSObject, @unchecked Sendable, SCStreamOutput,
             timer.setEventHandler { [weak self] in self?.fillFromClock() }
             timer.resume()
             self.gridTimer = timer
+        }
+    }
+
+    /// SCStream sends pixels only when the content changes, so a still
+    /// window (or screen) can go without a single real frame: the grid
+    /// then has nothing to repeat and the recording had no video track
+    /// at all (a still Finder window, 2026-09-27). If nothing has
+    /// arrived shortly after starting, take one still of the source at
+    /// the same size and format and start from that.
+    private func seedFirstFrameIfNeeded(filter: SCContentFilter, configuration: SCStreamConfiguration) {
+        Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(300))
+            guard let self, await self.needsFirstFrame() else { return }
+            do {
+                let still = try await SCScreenshotManager.captureSampleBuffer(contentFilter: filter,
+                                                                            configuration: configuration)
+                guard let image = CMSampleBufferGetImageBuffer(still) else { return }
+                self.videoQueue.async {
+                    guard self.lastImage == nil else { return }
+                    self.lastImage = image
+                    self.previewSinkLayer?.enqueue(still)
+                    let now = CMClockGetTime(CMClockGetHostTimeClock())
+                    self.emitGrid(upTo: CMTimeSubtract(now, self.fillLatency))
+                    print("ScreenCaptureService: no frame yet, started from a still")
+                }
+            } catch {
+                print("ScreenCaptureService: couldn't take a first still: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func needsFirstFrame() async -> Bool {
+        await withCheckedContinuation { cont in
+            videoQueue.async { cont.resume(returning: self.lastImage == nil && self.stream != nil) }
         }
     }
 

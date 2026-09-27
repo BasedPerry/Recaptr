@@ -120,12 +120,19 @@ final class MainViewModel: ObservableObject {
     @Published var seriesHistory: [String] = UserDefaults.standard.stringArray(forKey: "RecaptrSeriesHistory") ?? [] {
         didSet { if !Self.isUITesting { UserDefaults.standard.set(seriesHistory, forKey: "RecaptrSeriesHistory") } }
     }
+    /// A Bool setting with a default when unset. `bool(forKey:)` also
+    /// reads "YES"/"NO" given as launch arguments, which `as? Bool`
+    /// doesn't (a -RecaptrShowCaptureOutline NO run left it on).
+    private static func bool(_ key: String, default value: Bool) -> Bool {
+        UserDefaults.standard.object(forKey: key) == nil ? value : UserDefaults.standard.bool(forKey: key)
+    }
+
     /// Test runs share the real app's settings; naming changes made by
     /// test hooks must not leak into the user's next recording.
     private static let isUITesting = UserDefaults.standard.bool(forKey: "RecaptrUITesting")
     /// Name markers and blank episodes with Apple Intelligence.
     @Published var aiNamingEnabled: Bool =
-        UserDefaults.standard.object(forKey: "RecaptrAINaming") as? Bool ?? true {
+        MainViewModel.bool("RecaptrAINaming", default: true) {
         didSet { UserDefaults.standard.set(aiNamingEnabled, forKey: "RecaptrAINaming") }
     }
     /// After-stop work (probe, naming, renaming, Final Cut file).
@@ -133,7 +140,7 @@ final class MainViewModel: ObservableObject {
 
     /// Outline the display or window being captured (never recorded).
     @Published var showCaptureOutline: Bool =
-        UserDefaults.standard.object(forKey: "RecaptrShowCaptureOutline") as? Bool ?? true {
+        MainViewModel.bool("RecaptrShowCaptureOutline", default: true) {
         didSet {
             UserDefaults.standard.set(showCaptureOutline, forKey: "RecaptrShowCaptureOutline")
             if !showCaptureOutline { captureOutline.hide() }
@@ -153,7 +160,7 @@ final class MainViewModel: ObservableObject {
     }
 
     @Published var screenShowsCursor: Bool =
-        UserDefaults.standard.object(forKey: "RecaptrScreenShowsCursor") as? Bool ?? true {
+        MainViewModel.bool("RecaptrScreenShowsCursor", default: true) {
         didSet { UserDefaults.standard.set(screenShowsCursor, forKey: "RecaptrScreenShowsCursor") }
     }
 
@@ -442,6 +449,17 @@ final class MainViewModel: ObservableObject {
         // the picker sees a populated list.
         Task {
             await self.refreshCatalog()
+            // UI tests asking for a screen or window source: displays
+            // and windows can arrive a moment after cameras, and
+            // picking early silently fell back to a camera (which
+            // skewed a profiling comparison, 2026-09-27). Wait for them.
+            if Self.isUITesting, let want = UserDefaults.standard.string(forKey: "RecaptrUITestSource") {
+                let kind: VideoSource.Kind = want == "display" ? .screenDisplay : .screenWindow
+                for _ in 0..<20 where !self.catalog.videoSources.contains(where: { $0.kind == kind }) {
+                    try? await Task.sleep(for: .milliseconds(250))
+                    await self.refreshCatalog()
+                }
+            }
             await MainActor.run {
                 self.autoSelectStartupSource()
                 // UI tests: `-RecaptrUITestMicInput <name>` binds the
@@ -1703,6 +1721,14 @@ final class MainViewModel: ObservableObject {
                 .filter { ($0[kCGWindowOwnerPID as String] as? Int32) == ProcessInfo.processInfo.processIdentifier }
                 .compactMap { $0[kCGWindowLayer as String] as? Int }
             print("RecaptrUITest: own window layers \(mine.sorted())")
+            // The capture outline: a Recaptr window at status-bar level
+            // the size of a display (the menu bar item is also at that
+            // level, so layer alone proves nothing).
+            let outlines = (CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? [])
+                .filter { ($0[kCGWindowOwnerPID as String] as? Int32) == ProcessInfo.processInfo.processIdentifier
+                    && ($0[kCGWindowLayer as String] as? Int) == 25
+                    && (($0[kCGWindowBounds as String] as? [String: CGFloat])?["Width"] ?? 0) > 800 }
+            print("RecaptrUITest: capture outline windows \(outlines.count)")
             if d.bool(forKey: "RecaptrUITestMonitor") {
                 // `-RecaptrUITestMonitorVolume 0` keeps a mic monitor
                 // silent (no feedback through speakers).

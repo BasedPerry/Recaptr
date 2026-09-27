@@ -12,6 +12,12 @@
 //  window (see MainViewModel.startPreview), window captures only see
 //  the one window, and the outline also opts out of screen sharing.
 //
+//  The border is a plain Core Animation layer, not SwiftUI: a static
+//  layer costs nothing per frame. The first version hosted a SwiftUI
+//  view in a display-sized window, and profiling (2026-09-27) found it
+//  kept the app's SwiftUI update loop busy: 14% of a core during a 4K
+//  screen capture (25% with it, 11% without).
+//
 
 import AppKit
 import SwiftUI
@@ -20,7 +26,8 @@ import SwiftUI
 final class CaptureOutline {
 
     private var panel: NSPanel?
-    private let model = OutlineModel()
+    private let border = CALayer()
+    private var recording = false
     private var trackTimer: Timer?
     private var trackedWindow: CGWindowID?
 
@@ -45,7 +52,15 @@ final class CaptureOutline {
     }
 
     func setRecording(_ recording: Bool) {
-        model.recording = recording
+        self.recording = recording
+        updateColor()
+    }
+
+    /// Green while previewing, red while recording (Recaptr's signal
+    /// and record colors), resolved for the current appearance.
+    private func updateColor() {
+        let color = recording ? NSColor.systemRed : NSColor(Color.signal)
+        border.borderColor = color.withAlphaComponent(0.9).cgColor
     }
 
     func hide() {
@@ -82,7 +97,13 @@ final class CaptureOutline {
     private func place(at frame: CGRect) {
         let panel = self.panel ?? makePanel()
         self.panel = panel
-        if panel.frame != frame { panel.setFrame(frame, display: true) }
+        if panel.frame != frame {
+            panel.setFrame(frame, display: true)
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            border.frame = CGRect(origin: .zero, size: frame.size)
+            CATransaction.commit()
+        }
         if !panel.isVisible { panel.orderFrontRegardless() }
     }
 
@@ -97,25 +118,17 @@ final class CaptureOutline {
         panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle, .fullScreenAuxiliary]
         panel.sharingType = .none
         panel.isReleasedWhenClosed = false
-        panel.contentView = NSHostingView(rootView: OutlineView(model: model))
+        let view = NSView()
+        view.wantsLayer = true
+        border.borderWidth = 3
+        border.cornerRadius = 10
+        border.cornerCurve = .continuous
+        border.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
+        border.frame = view.bounds
+        view.layer?.addSublayer(border)
+        panel.contentView = view
+        updateColor()
         return panel
-    }
-}
-
-@Observable
-private final class OutlineModel {
-    var recording = false
-}
-
-private struct OutlineView: View {
-    let model: OutlineModel
-
-    var body: some View {
-        RoundedRectangle(cornerRadius: 10, style: .continuous)
-            .strokeBorder(model.recording ? Color.red : Color.signal, lineWidth: 3)
-            .opacity(0.9)
-            .animation(.easeInOut(duration: 0.25), value: model.recording)
-            .allowsHitTesting(false)
     }
 }
 
