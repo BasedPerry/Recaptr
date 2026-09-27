@@ -192,3 +192,83 @@ struct ScreenResolutionTests {
         #expect(d.width == 1080 && d.height == 1920)
     }
 }
+
+struct SessionNamingTests {
+
+    @Test func sanitizeStripsPathCharacters() {
+        #expect(SessionNaming.sanitize("  Fire/Emblem: Three   Houses ") == "Fire-Emblem- Three Houses")
+        #expect(SessionNaming.sanitize("..hidden") == "hidden")
+    }
+
+    @Test func episodeNumberFollowsExistingFiles() {
+        let files = ["Fire Emblem – Ep 1 – Start.mov", "Fire Emblem – Ep 3.mov", "Fire Emblem – Ep 3.fcpxml",
+                     "Other – Ep 9.mov", "Fire Emblem – Chapter 5.mov"]
+        #expect(SessionNaming.nextEpisodeNumber(existing: files, series: "Fire Emblem") == 4)
+        #expect(SessionNaming.nextEpisodeNumber(existing: [], series: "Fire Emblem") == 1)
+    }
+
+    @Test func typedEpisodeWinsOverGenerated() {
+        #expect(SessionNaming.episode(typed: "Chapter 5", number: 4, generatedTitle: "Fortuna Falls") == "Chapter 5")
+        #expect(SessionNaming.episode(typed: " ", number: 4, generatedTitle: "Fortuna Falls") == "Ep 4 – Fortuna Falls")
+        #expect(SessionNaming.episode(typed: "", number: 4, generatedTitle: nil) == "Ep 4")
+    }
+
+    @Test func uniqueNamesDontOverwrite() {
+        let folder = URL(fileURLWithPath: "/tmp/x")
+        let taken: Set<String> = ["/tmp/x/A – Ep 1.mov", "/tmp/x/A – Ep 1 (2).mov"]
+        let url = SessionNaming.uniqueURL(in: folder, base: "A – Ep 1", ext: "mov") { taken.contains($0.path) }
+        #expect(url.lastPathComponent == "A – Ep 1 (3).mov")
+    }
+
+    @Test func cleanTrimsAndCaps() {
+        #expect(MarkerNamer.clean("\"Fortuna Falls!\"", maxWords: 6) == "Fortuna Falls")
+        #expect(MarkerNamer.clean("one two three four five six seven", maxWords: 3) == "one two three")
+    }
+}
+
+import AVFoundation
+
+struct TranscriberTests {
+
+    /// Speak a sentence with the system voice into a file, then run it
+    /// through the same on-device transcriber the marker namer uses.
+    @Test(.timeLimit(.minutes(3))) func transcribesSpeech() async throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("speech-test-\(UUID()).caf")
+        try await SpeechFile.write("Fortuna is finally down. Heading for the east gate now.", to: url)
+        let asset = AVURLAsset(url: url)
+        let track = try #require(try await asset.loadTracks(withMediaType: .audio).first)
+        let duration = try await asset.load(.duration).seconds
+        let transcriber = try #require(await Transcriber.make(), "speech model unavailable")
+        let text = await transcriber.transcribe(asset: asset, track: track, from: 0, duration: duration) ?? ""
+        print("TranscriberTests heard: \(text)")
+        #expect(text.localizedCaseInsensitiveContains("gate"))
+    }
+}
+
+/// Renders speech to an audio file with AVSpeechSynthesizer.
+@MainActor
+enum SpeechFile {
+    static func write(_ text: String, to url: URL) async throws {
+        let synthesizer = AVSpeechSynthesizer()
+        var file: AVAudioFile?
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            var done = false
+            synthesizer.write(AVSpeechUtterance(string: text)) { buffer in
+                guard !done, let pcm = buffer as? AVAudioPCMBuffer else { return }
+                if pcm.frameLength == 0 {
+                    done = true
+                    cont.resume()
+                    return
+                }
+                do {
+                    if file == nil { file = try AVAudioFile(forWriting: url, settings: pcm.format.settings) }
+                    try file?.write(from: pcm)
+                } catch {
+                    done = true
+                    cont.resume(throwing: error)
+                }
+            }
+        }
+        _ = synthesizer
+    }
+}

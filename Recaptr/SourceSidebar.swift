@@ -52,6 +52,7 @@ struct SourceSidebar: View {
                 .padding(.bottom, 2)
 
             Form {
+                NamingSection()
                 Section {
                     sourceRows
                 } header: {
@@ -160,6 +161,64 @@ struct SourceSidebar: View {
             return String(source.name.dropFirst(prefix.count))
         }
         return source.name
+    }
+}
+
+// MARK: - Naming
+
+/// Series and Episode for recordings. Stays editable while recording:
+/// the file is renamed when the take stops, so the episode can be
+/// typed mid-take.
+private struct NamingSection: View {
+    @EnvironmentObject var vm: MainViewModel
+
+    var body: some View {
+        Section {
+            HStack(spacing: 4) {
+                TextField("Series", text: $vm.seriesName, prompt: Text("None"))
+                    .accessibilityIdentifier("seriesField")
+                if !vm.seriesHistory.isEmpty {
+                    Menu {
+                        ForEach(vm.seriesHistory, id: \.self) { series in
+                            Button(series) { vm.seriesName = series }
+                        }
+                        if !vm.seriesName.isEmpty {
+                            Divider()
+                            Button("No Series") { vm.seriesName = "" }
+                        }
+                    } label: {
+                        Image(systemName: "chevron.up.chevron.down")
+                    }
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+                    .help("Recent series")
+                }
+            }
+            TextField("Episode", text: $vm.episodeName, prompt: Text(episodePrompt))
+                .disabled(vm.seriesName.trimmingCharacters(in: .whitespaces).isEmpty)
+                .accessibilityIdentifier("episodeField")
+        } header: {
+            Label("Recording", systemImage: "record.circle")
+        } footer: {
+            Text(footer)
+        }
+    }
+
+    private var aiNaming: Bool { vm.aiNamingEnabled && MarkerNamer.isAvailable }
+
+    private var episodePrompt: String {
+        aiNaming ? "Auto: number + title from markers" : "Auto: next number"
+    }
+
+    private var footer: String {
+        let series = SessionNaming.sanitize(vm.seriesName)
+        guard !series.isEmpty else {
+            return aiNaming ? "Markers are named with Apple Intelligence after you stop." : "Add a series to file recordings together."
+        }
+        let episode = SessionNaming.sanitize(vm.episodeName)
+        let name = SessionNaming.baseName(series: series, episode: episode.isEmpty ? "Ep N" : episode)
+        return "Saves as \(series)/\(name).mov"
     }
 }
 

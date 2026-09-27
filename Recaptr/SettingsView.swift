@@ -56,6 +56,16 @@ private struct RecordingSettingsTab: View {
                 SaveFolderRow(storage: vm.recordingStorage, locked: vm.isRecording)
             }
 
+            Section {
+                Toggle("Name markers and episodes with Apple Intelligence", isOn: $vm.aiNamingEnabled)
+                    .disabled(!MarkerNamer.isAvailable)
+            } header: {
+                Text("Naming")
+            } footer: {
+                Text(MarkerNamer.unavailableReason
+                     ?? "After you stop, each marker gets a short name from its frame and what you said around it, and a blank episode gets a title. Runs on your Mac; nothing is uploaded.")
+            }
+
             Section("Last recording") {
                 if let url = vm.lastRecordedFile {
                     LabeledContent("File") {

@@ -17,16 +17,17 @@ import AVFoundation
 
 enum FinalCutMarkers {
 
-    /// Write `<recording>.fcpxml` beside `movURL` if the take had
-    /// markers (`markerSeconds`: offsets from the first frame).
-    /// Returns the written URL, or nil when there were none.
+    /// Write `<recording>.fcpxml` beside `movURL` when the take had
+    /// markers or belongs to a series (the file's event is the series,
+    /// so episodes import together). `markers` are titles and offsets
+    /// from the first frame. Returns the written URL, or nil when
+    /// there was nothing to write.
     @discardableResult
-    static func writeIfNeeded(for movURL: URL, markerSeconds: [Double]) async throws -> URL? {
-        guard !markerSeconds.isEmpty else { return nil }
+    static func writeIfNeeded(for movURL: URL, markers: [(title: String, seconds: Double)],
+                              eventName: String? = nil) async throws -> URL? {
+        guard !markers.isEmpty || eventName != nil else { return nil }
         let asset = AVURLAsset(url: movURL)
-        let markers = markerSeconds.enumerated().map { (title: "Marker \($0.offset + 1)", seconds: $0.element) }
-        guard
-              let video = try await asset.loadTracks(withMediaType: .video).first else { return nil }
+        guard let video = try await asset.loadTracks(withMediaType: .video).first else { return nil }
 
         let size = try await video.load(.naturalSize)
         let fps = try await frameRate(of: video, in: asset)
@@ -35,7 +36,7 @@ enum FinalCutMarkers {
 
         let xml = document(movURL: movURL, markers: markers, width: Int(size.width),
                            height: Int(size.height), fps: fps, duration: duration,
-                           audioTracks: audioTracks)
+                           audioTracks: audioTracks, eventName: eventName ?? "Recaptr")
         let out = movURL.deletingPathExtension().appendingPathExtension("fcpxml")
         try xml.write(to: out, atomically: true, encoding: .utf8)
         return out
@@ -83,7 +84,7 @@ enum FinalCutMarkers {
 
     static func document(movURL: URL, markers: [(title: String, seconds: Double)],
                          width: Int, height: Int, fps: Double, duration: Double,
-                         audioTracks: Int) -> String {
+                         audioTracks: Int, eventName: String = "Recaptr") -> String {
         // Frame duration as a rational, so markers land exactly on frames.
         let (num, den): (Int, Int) =
             abs(fps - 59.94) < 0.05 ? (1001, 60000) :
@@ -114,7 +115,7 @@ enum FinalCutMarkers {
               <media-rep kind="original-media" src="\(esc(movURL.absoluteString))"/>
             </asset>
           </resources>
-          <event name="Recaptr">
+          <event name="\(esc(eventName))">
             <asset-clip ref="r2" name="\(name)" duration="\(time(duration))" format="r1" tcFormat="NDF">
         \(markerLines)
             </asset-clip>

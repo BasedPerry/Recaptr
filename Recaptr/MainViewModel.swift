@@ -106,6 +106,31 @@ final class MainViewModel: ObservableObject {
         UserDefaults.standard.integer(forKey: "RecaptrScreenFrameRate") == 30 ? 30 : 60 {
         didSet { UserDefaults.standard.set(screenFrameRate, forKey: "RecaptrScreenFrameRate") }
     }
+    // MARK: Series / Episode naming
+
+    /// Series (the game or show). Recordings go in a folder of this
+    /// name, named "Series – Episode". Empty: the old timestamp names.
+    @Published var seriesName: String = UserDefaults.standard.string(forKey: "RecaptrSeries") ?? "" {
+        didSet { if !Self.isUITesting { UserDefaults.standard.set(seriesName, forKey: "RecaptrSeries") } }
+    }
+    /// Episode for the next (or current) recording. Blank: "Ep N" plus
+    /// a generated title. Cleared after each recording.
+    @Published var episodeName: String = ""
+    /// Recently used series, newest first.
+    @Published var seriesHistory: [String] = UserDefaults.standard.stringArray(forKey: "RecaptrSeriesHistory") ?? [] {
+        didSet { if !Self.isUITesting { UserDefaults.standard.set(seriesHistory, forKey: "RecaptrSeriesHistory") } }
+    }
+    /// Test runs share the real app's settings; naming changes made by
+    /// test hooks must not leak into the user's next recording.
+    private static let isUITesting = UserDefaults.standard.bool(forKey: "RecaptrUITesting")
+    /// Name markers and blank episodes with Apple Intelligence.
+    @Published var aiNamingEnabled: Bool =
+        UserDefaults.standard.object(forKey: "RecaptrAINaming") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(aiNamingEnabled, forKey: "RecaptrAINaming") }
+    }
+    /// After-stop work (probe, naming, renaming, Final Cut file).
+    private(set) var finalizeTask: Task<Void, Never>?
+
     /// Outline the display or window being captured (never recorded).
     @Published var showCaptureOutline: Bool =
         UserDefaults.standard.object(forKey: "RecaptrShowCaptureOutline") as? Bool ?? true {
@@ -1444,11 +1469,57 @@ final class MainViewModel: ObservableObject {
         // silent-recording case where the file lands but has no audio
         // track.
         if let url {
-            Task {
+            let markerSeconds = recorder.lastMarkerSeconds
+            let series = SessionNaming.sanitize(seriesName)
+            let episode = episodeName
+            episodeName = ""
+            finalizeTask = Task {
                 await self.probeRecordedFile(url)
-                await self.writeFinalCutMarkers(for: url, markerSeconds: self.recorder.lastMarkerSeconds)
+                await self.finalizeRecording(url, markerSeconds: markerSeconds, series: series, typedEpisode: episode)
             }
         }
+    }
+
+    /// Name markers (and a blank episode) with Apple Intelligence, move
+    /// the file into its series folder as "Series – Episode", and write
+    /// the Final Cut file with the marker names and the series as its
+    /// event.
+    private func finalizeRecording(_ url: URL, markerSeconds: [Double], series: String, typedEpisode: String) async {
+        let useAI = aiNamingEnabled && MarkerNamer.isAvailable
+        var labels: [String?] = markerSeconds.map { _ in nil }
+        if useAI, !markerSeconds.isEmpty {
+            status += "\nNaming \(markerSeconds.count) marker\(markerSeconds.count == 1 ? "" : "s")…"
+            labels = await MarkerNamer.labels(for: url, markerSeconds: markerSeconds,
+                                              series: series.isEmpty ? nil : series)
+        }
+
+        var finalURL = url
+        if !series.isEmpty {
+            let folder = SessionNaming.seriesFolder(root: url.deletingLastPathComponent(), series: series)
+            do {
+                try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                let existing = (try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []
+                let number = SessionNaming.nextEpisodeNumber(existing: existing, series: series)
+                var generated: String?
+                if useAI, SessionNaming.sanitize(typedEpisode).isEmpty {
+                    generated = await MarkerNamer.episodeTitle(fromLabels: labels.compactMap { $0 }, series: series)
+                }
+                let episode = SessionNaming.episode(typed: typedEpisode, number: number, generatedTitle: generated)
+                let target = SessionNaming.uniqueURL(in: folder, base: SessionNaming.baseName(series: series, episode: episode), ext: "mov")
+                try FileManager.default.moveItem(at: url, to: target)
+                finalURL = target
+                lastRecordedFile = target
+                status += "\nSaved as \(series)/\(target.lastPathComponent)"
+                seriesHistory = [series] + seriesHistory.filter { $0 != series }.prefix(9)
+            } catch {
+                status += "\nCouldn't file it under \(series): \(error.localizedDescription)"
+            }
+        }
+
+        let markers = markerSeconds.enumerated().map { index, seconds in
+            (title: labels[index] ?? "Marker \(index + 1)", seconds: seconds)
+        }
+        await writeFinalCutMarkers(for: finalURL, markers: markers, eventName: series.isEmpty ? nil : series)
     }
 
     /// Readable summary built from the final stat snapshots. Includes
@@ -1496,11 +1567,12 @@ final class MainViewModel: ObservableObject {
         return "\(recPart) · \(mixPart) · \(chPart)"
     }
 
-    /// A recording with markers gets a .fcpxml beside it; that's where
-    /// Final Cut picks the markers up.
-    private func writeFinalCutMarkers(for url: URL, markerSeconds: [Double]) async {
+    /// A recording with markers (or in a series) gets a .fcpxml beside
+    /// it; that's where Final Cut picks up the markers and the event.
+    private func writeFinalCutMarkers(for url: URL, markers: [(title: String, seconds: Double)],
+                                      eventName: String?) async {
         do {
-            if let xml = try await FinalCutMarkers.writeIfNeeded(for: url, markerSeconds: markerSeconds) {
+            if let xml = try await FinalCutMarkers.writeIfNeeded(for: url, markers: markers, eventName: eventName) {
                 if UserDefaults.standard.bool(forKey: "RecaptrUITesting"),
                    let text = try? String(contentsOf: xml, encoding: .utf8) {
                     print("RecaptrUITest: fcpxml BEGIN\n\(text)RecaptrUITest: fcpxml END")
@@ -1605,6 +1677,19 @@ final class MainViewModel: ObservableObject {
         let seconds = d.double(forKey: "RecaptrUITestAutoRecord")
         guard seconds > 0 else { return }
         uiTestAutoRecordDone = true
+        // `-RecaptrUITestResetNaming YES` clears the saved series and
+        // history (cleanup after earlier test runs saved them).
+        if d.bool(forKey: "RecaptrUITestResetNaming") {
+            UserDefaults.standard.removeObject(forKey: "RecaptrSeries")
+            UserDefaults.standard.removeObject(forKey: "RecaptrSeriesHistory")
+            seriesName = ""
+            seriesHistory = []
+            print("RecaptrUITest: naming reset")
+        }
+        // `-RecaptrUITestSeries <name>` / `-RecaptrUITestEpisode <name>`
+        // (not saved; see isUITesting).
+        if let series = d.string(forKey: "RecaptrUITestSeries") { seriesName = series }
+        if let episode = d.string(forKey: "RecaptrUITestEpisode") { episodeName = episode }
         Task { @MainActor in
             try? await Task.sleep(for: .seconds(3))
             await startRecording()
@@ -1648,7 +1733,8 @@ final class MainViewModel: ObservableObject {
             }
             try? await Task.sleep(for: .seconds(slice))
             await stopRecording()
-            try? await Task.sleep(for: .seconds(4))  // let the probe print
+            await finalizeTask?.value
+            try? await Task.sleep(for: .seconds(1))
             #if DEBUG
             if let url = lastRecordedFile {
                 print("RecaptrUITest: " + (await MonitorLagProbe.videoGaps(url)))
