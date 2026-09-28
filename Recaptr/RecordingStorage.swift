@@ -22,6 +22,7 @@ final class RecordingStorage: ObservableObject {
     @Published private(set) var hasUserLocation: Bool = false
 
     private let bookmarkKey = "com.OvertonForge.Recaptr.saveLocation.bookmark"
+    private let usesDefaultKey = "com.OvertonForge.Recaptr.saveLocation.usesDefault"
     private var securityScopedURL: URL?
 
     init() {
@@ -30,9 +31,19 @@ final class RecordingStorage: ObservableObject {
 
     // MARK: - Public API
 
+    /// True until a folder has been chosen (or the default picked in
+    /// Settings), so the first recording can ask where to save.
+    var needsFolderChoice: Bool {
+        let defaults = UserDefaults.standard
+        return defaults.data(forKey: bookmarkKey) == nil
+            && !defaults.bool(forKey: usesDefaultKey)
+            && !defaults.bool(forKey: "RecaptrUITesting")
+    }
+
     /// Shows a folder picker and saves a bookmark. Runs modally, so
-    /// callers disable it while recording.
-    func pickFolder() {
+    /// callers disable it while recording. Returns false if cancelled.
+    @discardableResult
+    func pickFolder() -> Bool {
         let panel = NSOpenPanel()
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
@@ -40,19 +51,20 @@ final class RecordingStorage: ObservableObject {
         panel.canCreateDirectories = true
         panel.title = "Choose Recaptr Save Location"
         panel.prompt = "Use This Folder"
-        panel.message = "Recaptr will write all new recordings into this folder."
-        panel.directoryURL = FileManager.default.urls(for: .moviesDirectory,
-                                                       in: .userDomainMask).first
+        panel.message = "Choose where Recaptr saves recordings. You can change this in Settings."
+        panel.directoryURL = Self.userMoviesFolder
 
         let response = panel.runModal()
-        guard response == .OK, let url = panel.url else { return }
+        guard response == .OK, let url = panel.url else { return false }
 
         adopt(url: url)
+        return hasUserLocation
     }
 
     /// Reverts to the sandbox container for new recordings.
     func resetToDefault() {
         UserDefaults.standard.removeObject(forKey: bookmarkKey)
+        UserDefaults.standard.set(true, forKey: usesDefaultKey)
         securityScopedURL?.stopAccessingSecurityScopedResource()
         securityScopedURL = nil
         hasUserLocation = false
@@ -83,6 +95,7 @@ final class RecordingStorage: ObservableObject {
                 relativeTo: nil
             )
             UserDefaults.standard.set(bookmarkData, forKey: bookmarkKey)
+            UserDefaults.standard.removeObject(forKey: usesDefaultKey)
 
             securityScopedURL?.stopAccessingSecurityScopedResource()
             if url.startAccessingSecurityScopedResource() {
@@ -123,6 +136,14 @@ final class RecordingStorage: ObservableObject {
         } catch {
             // Folder gone or volume unmounted. Use the sandbox.
         }
+    }
+
+    /// The real ~/Movies. Inside the sandbox, FileManager returns the
+    /// container's copy instead.
+    private static var userMoviesFolder: URL? {
+        guard let home = getpwuid(getuid())?.pointee.pw_dir else { return nil }
+        return URL(fileURLWithPath: String(cString: home), isDirectory: true)
+            .appendingPathComponent("Movies", isDirectory: true)
     }
 
     private static func sandboxDefault() throws -> URL {

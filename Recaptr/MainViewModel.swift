@@ -1192,6 +1192,11 @@ final class MainViewModel: ObservableObject {
         }
         guard !isRecording else { return }
 
+        if recordingStorage.needsFolderChoice, !recordingStorage.pickFolder() {
+            status = "Choose a save folder to start recording."
+            return
+        }
+
         markers = []
 
         // Screen sources record the SCStream audio; cameras use the mixer,

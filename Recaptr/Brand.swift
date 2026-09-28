@@ -62,8 +62,7 @@ private extension NSColor {
 
 // MARK: - Typography
 //
-// Fonts in Recaptr/Fonts/ register via INFOPLIST_KEY_ATSApplicationFontsPath.
-// Font.custom silently falls back to the system font when a file is missing.
+// No font files ship with the app, so Font.custom falls back to the system font.
 
 enum BrandFont {
     case heading(weight: Font.Weight, size: CGFloat)
