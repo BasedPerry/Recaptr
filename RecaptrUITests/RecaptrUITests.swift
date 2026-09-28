@@ -42,6 +42,8 @@ final class RecaptrUITests: XCTestCase {
         let series = app.textFields["seriesField"]
         XCTAssertTrue(series.waitForExistence(timeout: 5))
         series.click()
+        // Clear the user's saved series first.
+        series.typeKey("a", modifierFlags: .command)
         series.typeText("UITest Series")
         let episode = app.textFields["episodeField"]
         XCTAssertTrue(episode.isEnabled, "Episode stays disabled with a series set")
