@@ -345,7 +345,8 @@ final class ScreenCaptureService: NSObject, @unchecked Sendable, SCStreamOutput,
     private let maxBurst = 8
 
     private func resetFrameGrid(frameRate: Int) {
-        videoQueue.async {
+        videoQueue.async { [weak self] in
+            guard let self else { return }
             self.lastImage = nil
             self.gridNext = .invalid
             self.gridStep = CMTime(value: 1, timescale: CMTimeScale(frameRate))
@@ -370,9 +371,12 @@ final class ScreenCaptureService: NSObject, @unchecked Sendable, SCStreamOutput,
             try? await Task.sleep(for: .milliseconds(300))
             guard let self, await self.needsFirstFrame() else { return }
             do {
-                let still = try await SCScreenshotManager.captureSampleBuffer(contentFilter: filter,
-                                                                            configuration: configuration)
-                guard let image = CMSampleBufferGetImageBuffer(still) else { return }
+                // Core Media buffers aren't Sendable; this one is only
+                // read on the video queue from here on.
+                nonisolated(unsafe) let still = try await SCScreenshotManager.captureSampleBuffer(
+                    contentFilter: filter, configuration: configuration)
+                guard let pixels = CMSampleBufferGetImageBuffer(still) else { return }
+                nonisolated(unsafe) let image = pixels
                 self.videoQueue.async {
                     guard self.lastImage == nil else { return }
                     self.lastImage = image

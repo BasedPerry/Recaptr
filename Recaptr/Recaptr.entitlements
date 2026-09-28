@@ -45,31 +45,5 @@
 	<key>com.apple.security.files.user-selected.read-write</key>
 	<true/>
 
-	<!--
-		Phase 4.6.5 (2026-05-09 night) — Mach lookup exception for
-		the Audio Analytics daemon. CoreAudio on macOS Tahoe (and
-		later 14.x) requires sandboxed apps using AVAudioEngine for
-		input to be able to look up `com.apple.audioanalyticsd`.
-		Without this exception, AVAudioEngine.start() prints
-
-		    PRECONDITION FAILURE: Process is sandboxed but
-		    'com.apple.security.exception.mach-lookup.global-name'
-		    doesn't contain 'com.apple.audioanalyticsd'.
-		    throwing -10877  (kAudioUnitErr_FailedInitialization)
-
-		four times, then reports the engine as "started" — but the
-		input audio unit is in a degraded state and the tap callback
-		fires with silent / zero buffers (or doesn't fire at all on
-		some routes). That was the proximate cause of the "audio:
-		NONE" probe result we hit in Phase 4.6.4 testing.
-
-		`temporary-exception` is the version available without
-		special Apple approval; sufficient for development and
-		signed Mac App Store submissions when justified.
-	-->
-	<key>com.apple.security.temporary-exception.mach-lookup.global-name</key>
-	<array>
-		<string>com.apple.audioanalyticsd</string>
-	</array>
 </dict>
 </plist>

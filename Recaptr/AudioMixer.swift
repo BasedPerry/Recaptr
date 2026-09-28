@@ -662,7 +662,13 @@ nonisolated final class AudioInputChannel: @unchecked Sendable {
             return noErr
         }
         engine.attach(sink)
-        engine.connect(engine.inputNode, to: sink, format: format)
+        do {
+            try engine.connectNode(engine.inputNode, to: sink, format: format)
+        } catch {
+            engine.detach(sink)
+            print("AudioInputChannel[\(label)]: monitor sink not connected (\(error.localizedDescription)); using tap path")
+            return
+        }
         sinkNode = sink
     }
 

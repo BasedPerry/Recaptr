@@ -1813,6 +1813,13 @@ final class MainViewModel: ObservableObject {
             await startRecording()
             // `-RecaptrUITestMonitor YES` monitors the source during
             // the take (latency tests: the mic hears the speakers).
+            // Live levels a few seconds in: proves channels carry sound,
+            // not just silent buffers.
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(4))
+                let fmt: ((rms: Float, peak: Float)?) -> String = { l in l.map { String(format: "%.1f dBFS peak", $0.peak) } ?? "none" }
+                print("RecaptrUITest: levels source=\(fmt(self.channelLevels(0))) mic=\(fmt(self.channelLevels(1)))")
+            }
             // Outline check: is a Recaptr window up at status-bar level?
             let mine = (CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? [])
                 .filter { ($0[kCGWindowOwnerPID as String] as? Int32) == ProcessInfo.processInfo.processIdentifier }
