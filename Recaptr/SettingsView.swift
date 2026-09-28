@@ -36,6 +36,7 @@ struct SettingsView: View {
 
 private struct RecordingSettingsTab: View {
     @EnvironmentObject var vm: MainViewModel
+    @State private var renaming = false
 
     var body: some View {
         Form {
@@ -76,6 +77,11 @@ private struct RecordingSettingsTab: View {
                             Button("Show in Finder") {
                                 NSWorkspace.shared.activateFileViewerSelecting([url])
                             }
+                            if vm.lastTake != nil {
+                                Button("Rename…") { renaming = true }
+                                    .disabled(vm.isRecording)
+                                    .accessibilityIdentifier("renameTakeButton")
+                            }
                         }
                     }
                 } else {
@@ -93,6 +99,86 @@ private struct RecordingSettingsTab: View {
         }
         .formStyle(.grouped)
         .frame(height: 480)
+        .sheet(isPresented: $renaming) {
+            if let take = vm.lastTake {
+                RenameTakeSheet(take: take)
+                    .environmentObject(vm)
+            }
+        }
+    }
+}
+
+/// Rename the last take's episode and its markers after the fact
+/// (Apple Intelligence names will sometimes miss).
+private struct RenameTakeSheet: View {
+    @EnvironmentObject var vm: MainViewModel
+    @Environment(\.dismiss) private var dismiss
+    let take: MainViewModel.LastTake
+
+    @State private var episode = ""
+    @State private var titles: [String] = []
+    @State private var error: String?
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Form {
+                Section {
+                    TextField(take.series.isEmpty ? "Name" : "Episode", text: $episode)
+                        .accessibilityIdentifier("renameEpisodeField")
+                } header: {
+                    Text(take.series.isEmpty ? "Recording" : take.series)
+                } footer: {
+                    Text(previewName)
+                }
+                if !titles.isEmpty {
+                    Section("Markers") {
+                        ForEach(titles.indices, id: \.self) { index in
+                            TextField(timecode(take.markers[index].seconds), text: $titles[index])
+                                .accessibilityIdentifier("renameMarker\(index)")
+                        }
+                    }
+                }
+                if let error {
+                    Text(error).foregroundStyle(.red)
+                }
+            }
+            .formStyle(.grouped)
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Button("Rename") {
+                    Task {
+                        do {
+                            try await vm.renameLastTake(episode: episode, markerTitles: titles)
+                            dismiss()
+                        } catch {
+                            self.error = "Couldn't rename: \(error.localizedDescription)"
+                        }
+                    }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(SessionNaming.sanitize(episode).isEmpty)
+            }
+            .padding()
+        }
+        .frame(width: 460, height: 520)
+        .onAppear {
+            episode = take.episode
+            titles = take.markers.map(\.title)
+        }
+    }
+
+    private var previewName: String {
+        let clean = SessionNaming.sanitize(episode)
+        let base = take.series.isEmpty ? clean : SessionNaming.baseName(series: take.series, episode: clean)
+        return "Saves as \(base).mov"
+    }
+
+    private func timecode(_ seconds: Double) -> String {
+        let t = Int(seconds)
+        return t >= 3600 ? String(format: "%d:%02d:%02d", t / 3600, t % 3600 / 60, t % 60)
+                         : String(format: "%02d:%02d", t / 60, t % 60)
     }
 }
 

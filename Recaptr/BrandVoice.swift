@@ -19,7 +19,11 @@ nonisolated enum BrandVoice {
     Be specific: name the place, boss, character, action or result you can see or hear.
     Plain and direct, a little dry. No hype, no clickbait, no emoji, no exclamation marks.
     Never mention the recording itself, markers, the player or "clip".
-    If nothing specific is visible or said, describe what is on screen.
+    The player's commentary comes first: if it says what happened or why the moment matters
+    ("finally beat him", "that's the support conversation"), name it from that.
+    The commentary may also pick up game audio; prefer the player's own words.
+    Otherwise name what the frames show. Never name a blank, black or loading screen;
+    name what happened around it instead.
     """
 
     /// Instructions for titling an episode from its marker labels.

@@ -60,7 +60,7 @@ nonisolated enum MarkerNamer {
 
         var labels: [String?] = []
         for seconds in markerSeconds {
-            let frame = await frameImage(asset, at: seconds)
+            let frames = await informativeFrames(asset, around: seconds)
             var said: String?
             if let speechTrack, let transcriber {
                 said = await transcriber.transcribe(asset: asset, track: speechTrack,
@@ -70,7 +70,19 @@ nonisolated enum MarkerNamer {
             #if DEBUG
             print("MarkerNamer: at \(Int(seconds)) s heard: \(said ?? "(nothing)")")
             #endif
-            labels.append(await label(frame: frame, said: said, series: series))
+            let used = labels.compactMap { $0 }
+            var name = await label(frames: frames, said: said, series: series, alreadyUsed: used)
+            // The small model often ignores "don't repeat" (two markers
+            // both came back "Remember Something"), so check here: one
+            // retry with more variety, then number it.
+            if let first = name, used.contains(where: { isNearDuplicate($0, first) }) {
+                name = await label(frames: frames, said: said, series: series, alreadyUsed: used, insist: true)
+                if let retry = name, used.contains(where: { isNearDuplicate($0, retry) }) {
+                    let count = used.filter { isNearDuplicate($0, retry) }.count + 1
+                    name = "\(retry) (\(count))"
+                }
+            }
+            labels.append(name)
         }
         return labels
     }
@@ -89,28 +101,56 @@ nonisolated enum MarkerNamer {
 
     // MARK: - One marker
 
-    private static func label(frame: CGImage?, said: String?, series: String?) async -> String? {
-        guard frame != nil || !(said ?? "").isEmpty else { return nil }
+    private static func label(frames: [CGImage], said: String?, series: String?,
+                              alreadyUsed: [String], insist: Bool = false) async -> String? {
+        guard !frames.isEmpty || !(said ?? "").isEmpty else { return nil }
         let session = LanguageModelSession(instructions: BrandVoice.markerInstructions)
         var context = ""
         if let series { context += "Series: \(series)\n" }
-        if let said, !said.isEmpty { context += "Said on the mic around this moment: \"\(said)\"\n" }
+        if let said, !said.isEmpty { context += "Heard on the commentary mic just before the marker: \"\(said)\"\n" }
+        // Two presses on one scene came back as "Support Level Failure"
+        // and "Support Level Failed" (2026-09-27 take).
+        if !alreadyUsed.isEmpty {
+            context += "Names already used in this recording: \(alreadyUsed.joined(separator: "; ")). "
+                + "Don't reuse them; if this is the same scene, name what changed.\n"
+        }
+        if insist {
+            context += "Your last name repeated one of those. Give a clearly different name.\n"
+        }
         context += "Name this moment."
+        let options = GenerationOptions(temperature: insist ? 1.0 : nil)
         do {
             let response: LanguageModelSession.Response<MarkerLabel>
-            if let frame {
-                response = try await session.respond(generating: MarkerLabel.self) {
+            if frames.count >= 2 {
+                response = try await session.respond(generating: MarkerLabel.self, options: options) {
+                    context
+                    Attachment(frames[0]).label("Just before the marker")
+                    Attachment(frames[1]).label("At or just after the marker")
+                }
+            } else if let frame = frames.first {
+                response = try await session.respond(generating: MarkerLabel.self, options: options) {
                     context
                     Attachment(frame).label("The frame at this moment")
                 }
             } else {
-                response = try await session.respond(to: context, generating: MarkerLabel.self)
+                response = try await session.respond(to: context, generating: MarkerLabel.self, options: options)
             }
             return clean(response.content.title, maxWords: 8)
         } catch {
             print("MarkerNamer: label failed: \(error.localizedDescription)")
             return nil
         }
+    }
+
+    /// Same name or nearly ("Support Level Failure" vs "Support Level
+    /// Failed"): most words share their first four letters.
+    static func isNearDuplicate(_ a: String, _ b: String) -> Bool {
+        func stems(_ s: String) -> Set<String> {
+            Set(s.lowercased().split { !$0.isLetter && !$0.isNumber }.map { String($0.prefix(4)) })
+        }
+        let x = stems(a), y = stems(b)
+        guard !x.isEmpty, !y.isEmpty else { return false }
+        return Double(x.intersection(y).count) / Double(x.union(y).count) >= 0.6
     }
 
     /// Trim quotes and stray punctuation, cap the word count.
@@ -131,13 +171,55 @@ nonisolated enum MarkerNamer {
 
     // MARK: - Inputs
 
-    /// The frame at `seconds`, scaled to at most 1280 px (images cost
-    /// tokens by size; this is plenty to tell what's on screen).
-    private static func frameImage(_ asset: AVURLAsset, at seconds: Double) async -> CGImage? {
+    /// Up to two frames from around the marker (1.5 s before, at, and
+    /// 1.5 s after), leaving out flat ones (black, a loading or blank
+    /// screen) and keeping the two with the most detail, in time
+    /// order. A single frame at the press named two 2026-09-27 markers
+    /// "Black Screen" and "Empty Screen" because the press landed on a
+    /// transition. 960 px each keeps two images within the model's
+    /// context.
+    private static func informativeFrames(_ asset: AVURLAsset, around seconds: Double) async -> [CGImage] {
         let generator = AVAssetImageGenerator(asset: asset)
-        generator.maximumSize = CGSize(width: 1280, height: 1280)
+        generator.maximumSize = CGSize(width: 960, height: 960)
         generator.appliesPreferredTrackTransform = true
-        return try? await generator.image(at: CMTime(seconds: seconds, preferredTimescale: 600)).image
+        var all: [(time: Double, image: CGImage, detail: Double)] = []
+        for offset in [-1.5, 0, 1.5] {
+            let t = max(0, seconds + offset)
+            guard let image = try? await generator.image(at: CMTime(seconds: t, preferredTimescale: 600)).image else { continue }
+            all.append((t, image, luminanceDetail(image)))
+        }
+        #if DEBUG
+        print("MarkerNamer: at \(Int(seconds)) s frame detail " + all.map { String(format: "%.3f", $0.detail) }.joined(separator: " "))
+        #endif
+        let detailed = all.filter { $0.detail >= minimumDetail }
+        // All flat: a dark, low-contrast scene rather than a blank one
+        // is still worth showing; only a truly black frame isn't.
+        let pool = detailed.isEmpty ? Array(all.filter { $0.detail >= blackDetail }.sorted { $0.detail > $1.detail }.prefix(1)) : detailed
+        return pool.sorted { $0.detail > $1.detail }.prefix(2)
+            .sorted { $0.time < $1.time }.map(\.image)
+    }
+
+    /// Frames flatter than this (standard deviation of luminance, 0...1)
+    /// are skipped as blank.
+    static let minimumDetail = 0.03
+    /// Below this a frame is effectively black and never shown.
+    static let blackDetail = 0.005
+
+    /// How much a frame varies: the standard deviation of its
+    /// luminance, measured on a 32x32 grey thumbnail. Near 0 for black,
+    /// white or single-colour screens.
+    static func luminanceDetail(_ image: CGImage) -> Double {
+        let side = 32
+        var pixels = [UInt8](repeating: 0, count: side * side)
+        guard let context = CGContext(data: &pixels, width: side, height: side, bitsPerComponent: 8,
+                                      bytesPerRow: side, space: CGColorSpaceCreateDeviceGray(),
+                                      bitmapInfo: CGImageAlphaInfo.none.rawValue) else { return 1 }
+        context.interpolationQuality = .low
+        context.draw(image, in: CGRect(x: 0, y: 0, width: side, height: side))
+        let values = pixels.map { Double($0) / 255 }
+        let mean = values.reduce(0, +) / Double(values.count)
+        let variance = values.reduce(0) { $0 + ($1 - mean) * ($1 - mean) } / Double(values.count)
+        return variance.squareRoot()
     }
 
     /// The mic track when the file has per-source tracks ("Mic"),

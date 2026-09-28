@@ -135,6 +135,23 @@ final class MainViewModel: ObservableObject {
         MainViewModel.bool("RecaptrAINaming", default: true) {
         didSet { UserDefaults.standard.set(aiNamingEnabled, forKey: "RecaptrAINaming") }
     }
+    /// The most recent take's naming, so it can be renamed after the
+    /// fact (Settings > Last recording > Rename).
+    struct LastTake {
+        var url: URL
+        var series: String
+        var markers: [(title: String, seconds: Double)]
+
+        /// The episode part of the file name ("Ep 1 – Title"), or the
+        /// whole name for takes without a series.
+        var episode: String {
+            let name = url.deletingPathExtension().lastPathComponent
+            let prefix = series + SessionNaming.separator
+            return !series.isEmpty && name.hasPrefix(prefix) ? String(name.dropFirst(prefix.count)) : name
+        }
+    }
+    @Published private(set) var lastTake: LastTake?
+
     /// After-stop work (probe, naming, renaming, Final Cut file).
     private(set) var finalizeTask: Task<Void, Never>?
 
@@ -1587,6 +1604,37 @@ final class MainViewModel: ObservableObject {
             (title: labels[index] ?? "Marker \(index + 1)", seconds: seconds)
         }
         await writeFinalCutMarkers(for: finalURL, markers: markers, eventName: series.isEmpty ? nil : series)
+        lastTake = LastTake(url: finalURL, series: series, markers: markers)
+    }
+
+    /// Rename the last take's episode and markers: moves the .mov (and
+    /// replaces its .fcpxml) to the new name in the same folder, never
+    /// over an existing file, and rewrites the markers.
+    func renameLastTake(episode: String, markerTitles: [String]) async throws {
+        guard var take = lastTake else { return }
+        let folder = take.url.deletingLastPathComponent()
+        let cleanEpisode = SessionNaming.sanitize(episode)
+        let base = take.series.isEmpty ? cleanEpisode : SessionNaming.baseName(series: take.series, episode: cleanEpisode)
+        guard !cleanEpisode.isEmpty else { return }
+
+        var target = take.url
+        if base != take.url.deletingPathExtension().lastPathComponent {
+            target = SessionNaming.uniqueURL(in: folder, base: base, ext: "mov")
+            try FileManager.default.moveItem(at: take.url, to: target)
+            // The old Final Cut file points at the old name; it's
+            // replaced below.
+            try? FileManager.default.removeItem(at: take.url.deletingPathExtension().appendingPathExtension("fcpxml"))
+        }
+        for index in take.markers.indices where index < markerTitles.count {
+            let title = markerTitles[index].trimmingCharacters(in: .whitespacesAndNewlines)
+            if !title.isEmpty { take.markers[index].title = title }
+        }
+        take.url = target
+        lastRecordedFile = target
+        lastTake = take
+        await writeFinalCutMarkers(for: target, markers: take.markers,
+                                   eventName: take.series.isEmpty ? nil : take.series)
+        status = "Renamed to \(target.lastPathComponent)"
     }
 
     /// Readable summary built from the final stat snapshots. Includes

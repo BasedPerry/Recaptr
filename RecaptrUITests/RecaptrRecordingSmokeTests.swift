@@ -63,6 +63,34 @@ final class RecaptrRecordingSmokeTests: XCTestCase {
         XCTAssertTrue(waitUntil(timeout: 5, { !monitor.isEnabled }), "Monitor should be disabled for screen without a mic")
     }
 
+    /// Settings > Last recording > Rename renames the take and its
+    /// Final Cut file.
+    @MainActor
+    func testRenameLastTake() throws {
+        let probe = try record(modeKey: "3", seconds: 5, markers: 1,
+                               extraArgs: ["-RecaptrUITestSeries", "UITest Series",
+                                           "-RecaptrUITestEpisode", "Before"],
+                               waitForFiling: true)
+        XCTAssertTrue(probe.status.contains("UITest Series – Before"), probe.status)
+        let app = XCUIApplication()
+        app.typeKey(",", modifierFlags: .command)
+        // Settings reopens on the last tab used; Rename is on Recording.
+        let recordingTab = app.toolbars.buttons["Recording"].firstMatch
+        if recordingTab.waitForExistence(timeout: 5) { recordingTab.click() }
+        let rename = app.buttons["renameTakeButton"]
+        XCTAssertTrue(rename.waitForExistence(timeout: 5), "No Rename button in Settings")
+        rename.click()
+        let field = app.textFields["renameEpisodeField"]
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        field.doubleClick()
+        field.typeKey("a", modifierFlags: .command)
+        field.typeText("After")
+        app.buttons["Rename"].firstMatch.click()
+        let status = app.staticTexts["statusLine"]
+        XCTAssertTrue(waitUntil(timeout: 10, { self.text(of: status).contains("Renamed to UITest Series – After") }),
+                      "Rename didn't happen: \(text(of: status))")
+    }
+
     /// With a series and episode set, the take is filed as
     /// "Series/Series – Episode.mov" and its markers go in the .fcpxml.
     @MainActor

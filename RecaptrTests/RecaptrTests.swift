@@ -6,6 +6,7 @@
 import Testing
 import Foundation
 import CoreMedia
+import CoreGraphics
 @testable import Recaptr
 
 struct PeakLimiterTests {
@@ -196,7 +197,7 @@ struct ScreenResolutionTests {
 struct SessionNamingTests {
 
     @Test func sanitizeStripsPathCharacters() {
-        #expect(SessionNaming.sanitize("  Fire/Emblem: Three   Houses ") == "Fire-Emblem- Three Houses")
+        #expect(SessionNaming.sanitize("  Fire/Emblem: Three   Houses ") == "Fire-Emblem\u{A789} Three Houses")
         #expect(SessionNaming.sanitize("..hidden") == "hidden")
     }
 
@@ -276,5 +277,56 @@ enum SpeechFile {
             }
         }
         _ = synthesizer
+    }
+}
+
+
+struct MarkerFrameTests {
+
+    private func image(_ fill: (Int, Int) -> UInt8) -> CGImage {
+        let side = 64
+        var pixels = [UInt8](repeating: 0, count: side * side)
+        for y in 0..<side { for x in 0..<side { pixels[y * side + x] = fill(x, y) } }
+        let context = CGContext(data: &pixels, width: side, height: side, bitsPerComponent: 8, bytesPerRow: side,
+                                space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue)!
+        return context.makeImage()!
+    }
+
+    @Test func blankFramesAreFlat() {
+        #expect(MarkerNamer.luminanceDetail(image { _, _ in 0 }) < MarkerNamer.minimumDetail)    // black
+        #expect(MarkerNamer.luminanceDetail(image { _, _ in 230 }) < MarkerNamer.minimumDetail)  // white
+    }
+
+    @Test func realContentHasDetail() {
+        #expect(MarkerNamer.luminanceDetail(image { x, _ in x < 32 ? 40 : 200 }) > MarkerNamer.minimumDetail)
+    }
+}
+
+@MainActor
+struct LastTakeTests {
+
+    @Test func episodeIsTheNameAfterTheSeries() {
+        let url = URL(fileURLWithPath: "/tmp/Fire Emblem/Fire Emblem – Ep 1 – Black Screen.mov")
+        let take = MainViewModel.LastTake(url: url, series: "Fire Emblem", markers: [])
+        #expect(take.episode == "Ep 1 – Black Screen")
+    }
+
+    @Test func takesWithoutASeriesUseTheWholeName() {
+        let url = URL(fileURLWithPath: "/tmp/Recaptr_2026-09-27T21-00-00Z.mov")
+        #expect(MainViewModel.LastTake(url: url, series: "", markers: []).episode == "Recaptr_2026-09-27T21-00-00Z")
+    }
+}
+
+
+struct MarkerDuplicateTests {
+
+    @Test func nearDuplicatesAreCaught() {
+        #expect(MarkerNamer.isNearDuplicate("Support Level Failure", "Support Level Failed"))
+        #expect(MarkerNamer.isNearDuplicate("Remember Something", "remember something"))
+    }
+
+    @Test func differentMomentsAreNot() {
+        #expect(!MarkerNamer.isNearDuplicate("Phantom Defeated", "Stage Clear Victory"))
+        #expect(!MarkerNamer.isNearDuplicate("Boss Dialogue Hesitation", "Shield Block Failure"))
     }
 }

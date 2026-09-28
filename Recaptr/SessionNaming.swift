@@ -21,12 +21,15 @@ nonisolated enum SessionNaming {
     /// in Finder and Final Cut and never appears in generated titles.
     static let separator = " – "
 
-    /// Make `text` safe as a file or folder name: no slashes or colons,
-    /// no leading dots, single spaces, at most 80 characters.
+    /// Make `text` safe as a file or folder name: no slashes, colons
+    /// swapped for a look-alike (U+A789) so "Fire Emblem: Fortune's
+    /// Weave" keeps reading that way ("-" made it "Fire Emblem-
+    /// Fortunes Weave"), no leading dots, single spaces, at most 80
+    /// characters.
     static func sanitize(_ text: String) -> String {
         var cleaned = text
             .replacingOccurrences(of: "/", with: "-")
-            .replacingOccurrences(of: ":", with: "-")
+            .replacingOccurrences(of: ":", with: "\u{A789}")
             .replacingOccurrences(of: "\n", with: " ")
             .components(separatedBy: .whitespaces).filter { !$0.isEmpty }.joined(separator: " ")
         while cleaned.hasPrefix(".") { cleaned.removeFirst() }
