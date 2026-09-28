@@ -24,6 +24,23 @@ struct RecaptrApp: App {
                     UserDefaults.standard.set(false, forKey: WelcomeSheet.seenKey)
                 }
             }
+            #if DEBUG
+            CommandMenu("Debug") {
+                Button("Size Window for Store Screenshots") { StoreScreenshot.sizeWindow() }
+                Button("Capture Store Screenshot") {
+                    Task {
+                        do {
+                            let url = try await StoreScreenshot.capture(into: vm.recordingStorage.resolveSaveDirectory())
+                            vm.status = "Store screenshot saved: \(url.lastPathComponent)"
+                            print("RecaptrStoreScreenshot: \(url.path)")
+                        } catch {
+                            vm.status = "Store screenshot failed: \(error.localizedDescription)"
+                        }
+                    }
+                }
+                .keyboardShortcut("p", modifiers: [.control, .option, .command])
+            }
+            #endif
         }
 
         Settings {
