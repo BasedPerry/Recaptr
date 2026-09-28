@@ -46,15 +46,6 @@ extension VideoSource {
         let lower = name.lowercased()
         return needles.contains { lower.contains($0) }
     }
-
-    /// An iPhone or iPad used as a webcam, matched by name.
-    var isContinuityCamera: Bool {
-        guard kind == .camera else { return false }
-        let lower = name.lowercased()
-        return lower.contains("iphone camera") ||
-               lower.contains("ipad camera") ||
-               lower.contains("continuity camera")
-    }
 }
 
 /// A capturable audio source. `id` is the CoreAudio device UID.

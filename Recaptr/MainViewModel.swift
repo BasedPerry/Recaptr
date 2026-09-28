@@ -239,7 +239,7 @@ final class MainViewModel: ObservableObject {
     private var deviceDisconnectObserver: NSObjectProtocol?
 
     /// Refreshes the catalog on replug and switches to a capture card if
-    /// nothing, or Continuity Camera, is selected.
+    /// nothing is selected.
     private var deviceConnectObserver: NSObjectProtocol?
 
     private var cancellables = Set<AnyCancellable>()
@@ -791,8 +791,8 @@ final class MainViewModel: ObservableObject {
     // MARK: - Auto startup source
 
     /// Picks a default source when none is selected: the main display if
-    /// that's the start source, otherwise a capture card, then a
-    /// non-Continuity camera, then any camera. Windows are never auto-picked.
+    /// that's the start source, otherwise a capture card, then any
+    /// camera. Windows are never auto-picked.
     func autoSelectStartupSource() {
         guard selectedMainSource == nil else { return }
         // -RecaptrUITestSource display|window:<name>: start on the first display, or the first window whose title contains <name>.
@@ -820,9 +820,7 @@ final class MainViewModel: ObservableObject {
         let cameras = catalog.videoSources.filter { $0.kind == .camera }
         guard !cameras.isEmpty else { return }
 
-        let pick = cameras.first(where: { $0.isCameraCaptureCard })
-            ?? cameras.first(where: { !$0.isContinuityCamera })
-            ?? cameras.first
+        let pick = cameras.first(where: { $0.isCameraCaptureCard }) ?? cameras.first
 
         if let chosen = pick {
             selectedMainSource = chosen
@@ -876,8 +874,7 @@ final class MainViewModel: ObservableObject {
     }
 
     /// Refreshes the catalog when a device is plugged in. Switches to it
-    /// only if nothing is selected, or if it's a capture card replacing a
-    /// Continuity Camera. An explicit camera choice is kept.
+    /// only if it's a capture card and nothing is selected.
     @MainActor
     private func handleDeviceConnect(_ note: Notification) async {
         guard let device = note.object as? AVCaptureDevice else { return }
@@ -891,16 +888,7 @@ final class MainViewModel: ObservableObject {
             return
         }
 
-        let shouldAutoSwitch: Bool
-        if selectedMainSource == nil {
-            shouldAutoSwitch = newSource.isCameraCaptureCard
-        } else if let current = selectedMainSource,
-                  current.isContinuityCamera,
-                  newSource.isCameraCaptureCard {
-            shouldAutoSwitch = true
-        } else {
-            shouldAutoSwitch = false
-        }
+        let shouldAutoSwitch = selectedMainSource == nil && newSource.isCameraCaptureCard
 
         if shouldAutoSwitch {
             // The camera notification arrives before CoreAudio registers the

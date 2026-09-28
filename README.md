@@ -17,6 +17,8 @@ Requires macOS 27 and Apple silicon. Open `Recaptr.xcodeproj` and run the `Recap
 
 ## Video
 
+**Sources.** USB cameras and capture cards (`.external`), displays, and windows. Continuity Camera and the iPhone's Continuity microphone are excluded: on macOS 27, selecting the iPhone camera corrupts the main actor's executor and the app crashes on the next main-thread check. It reproduces on older builds and shows no bad writes under Address Sanitizer or zombies.
+
 **Cameras and capture cards.** `activeFormat` is set after `addInput` (the session preset overrides it otherwise), and the device stays locked for configuration until `stop()`, or it drops back to its default rate. Frame durations use the format's own `minFrameDuration`, since the device matches `CMTime` by exact value. Some cards tag HDMI video as SMPTE 240M; frames are retagged Rec. 709.
 
 **Screens and windows.** SCStream only sends frames when something changes. To get a constant frame rate, the recorder takes the newest frame on every tick of a fixed 60 or 30 fps grid, driven by arriving frames and a timer that trails the clock by 50 ms. A still window may send nothing at all, so a screenshot seeds the grid after 300 ms. Capture is 420v Rec. 709. Display captures exclude Recaptr's own windows.

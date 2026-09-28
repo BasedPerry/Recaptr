@@ -227,7 +227,7 @@ private struct TuningSections: View {
                         ForEach(CaptureResolution.allCases) { Text($0.shortLabel).tag($0) }
                     }
                     .onChange(of: vm.captureResolution) { _, _ in restartCameraPreview() }
-                    // Webcams and Continuity Camera only; capture cards don't support it.
+                    // Webcams only; capture cards don't support it.
                     if vm.lowLightNoiseReductionSupported {
                         Toggle("Low-light cleanup", isOn: $vm.lowLightNoiseReduction)
                             .onChange(of: vm.lowLightNoiseReduction) { _, _ in restartCameraPreview() }
