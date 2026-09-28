@@ -38,8 +38,6 @@ final class DeviceCatalog: ObservableObject {
 
     private func loadCamerasAndMics() async {
         let camDiscovery = AVCaptureDevice.DiscoverySession(
-            // USB cameras and capture cards only. Continuity Camera is left
-            // out: selecting it on macOS 27 crashes the app (see README).
             deviceTypes: [.external],
             mediaType: .video,
             position: .unspecified
@@ -49,8 +47,13 @@ final class DeviceCatalog: ObservableObject {
             mediaType: .audio,
             position: .unspecified
         )
-        let cams = camDiscovery.devices
-        let mics = micDiscovery.devices
+        // USB cameras and capture cards only. Continuity devices are left out:
+        // selecting the iPhone camera on macOS 27 crashes the app (see README).
+        // On macOS 27 the iPhone camera also reports as `.external`.
+        let continuity = [kAudioDeviceTransportTypeContinuityCaptureWired,
+                          kAudioDeviceTransportTypeContinuityCaptureWireless].map { Int32(bitPattern: $0) }
+        let cams = camDiscovery.devices.filter { !$0.isContinuityCamera && !continuity.contains($0.transportType) }
+        let mics = micDiscovery.devices.filter { !continuity.contains($0.transportType) }
 
         let camSources = cams.map {
             VideoSource(
@@ -65,11 +68,8 @@ final class DeviceCatalog: ObservableObject {
 
         // Core Audio adds transient "CADefaultDeviceAggregate" devices when an
         // engine opens the default output. They're never real inputs.
-        let continuity = [kAudioDeviceTransportTypeContinuityCaptureWired,
-                          kAudioDeviceTransportTypeContinuityCaptureWireless].map { Int32(bitPattern: $0) }
         let micSources = mics
             .filter { !$0.localizedName.hasPrefix("CADefaultDeviceAggregate") }
-            .filter { !continuity.contains($0.transportType) }
             .map { AudioSource(id: $0.uniqueID, name: $0.localizedName) }
 
         await MainActor.run {
