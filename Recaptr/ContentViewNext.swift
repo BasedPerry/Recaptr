@@ -502,6 +502,7 @@ struct ContentViewNext: View {
 struct RecaptrRootView: View {
     @EnvironmentObject var vm: MainViewModel
     @AppStorage("RecaptrSidebarVisible") private var sidebarVisible = false
+    @AppStorage(WelcomeSheet.seenKey) private var welcomeSeen = false
 
     var body: some View {
         NavigationSplitView(columnVisibility: Binding(
@@ -514,6 +515,13 @@ struct RecaptrRootView: View {
             ContentViewNext(sidebarVisible: $sidebarVisible)
         }
         .navigationSplitViewStyle(.prominentDetail)
+        .sheet(isPresented: Binding(
+            get: { !welcomeSeen && !UserDefaults.standard.bool(forKey: "RecaptrUITesting") },
+            set: { if !$0 { welcomeSeen = true } }
+        )) {
+            WelcomeSheet()
+                .environmentObject(vm)
+        }
         .onAppear {
             // UI tests start with the sidebar closed. Not a launch
             // argument: that would pin the value and break toggling.

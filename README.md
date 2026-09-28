@@ -44,6 +44,7 @@ Each source gets its own AAC track (no mix track). A linked limiter at -1 dBFS k
 - **Health.** Won't start under 2 GB free. While recording: a warning under 5 GB, auto-stop under 1 GB, a one-time thermal warning, and idle system and display sleep are blocked (capture cards stall when the display sleeps).
 - **After stop.** The file is probed for its tracks, markers and a blank episode are named, the file moves to `<Series>/Series – Ep N – Title.mov`, and the .fcpxml is written beside it. `renameLastTake` can redo this.
 - **Save folder.** Stored as a security-scoped bookmark. Recaptr asks for a folder before the first recording.
+- **First launch.** A welcome sheet (`WelcomeSheet`) sets the save folder, the start source (capture card or main display), and naming. It shows once; Help → Welcome to Recaptr reopens it. Screen Recording is only requested when Screen is picked.
 
 ## Naming
 

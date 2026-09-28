@@ -50,6 +50,12 @@ private struct RecordingSettingsTab: View {
                 SaveFolderRow(storage: vm.recordingStorage, locked: vm.isRecording)
             }
 
+            Section("Launch") {
+                Picker("Start with", selection: $vm.startSource) {
+                    ForEach(MainViewModel.StartSource.allCases) { Text($0.label).tag($0) }
+                }
+            }
+
             Section {
                 Toggle("Name markers and episodes with Apple Intelligence", isOn: $vm.aiNamingEnabled)
                     .disabled(!MarkerNamer.isAvailable)

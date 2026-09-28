@@ -17,6 +17,14 @@ struct RecaptrApp: App {
         }
         // The preview runs under the traffic lights; keep that corner free of chrome.
         .windowStyle(.hiddenTitleBar)
+        .commands {
+            // No help book, so the welcome sheet takes Help's place.
+            CommandGroup(replacing: .help) {
+                Button("Welcome to Recaptr") {
+                    UserDefaults.standard.set(false, forKey: WelcomeSheet.seenKey)
+                }
+            }
+        }
 
         Settings {
             SettingsView()

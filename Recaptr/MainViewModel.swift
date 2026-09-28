@@ -111,6 +111,17 @@ final class MainViewModel: ObservableObject {
         MainViewModel.bool("RecaptrAINaming", default: true) {
         didSet { UserDefaults.standard.set(aiNamingEnabled, forKey: "RecaptrAINaming") }
     }
+    /// What to show at launch: a camera or capture card, or the main display.
+    enum StartSource: String, CaseIterable, Identifiable {
+        case camera, screen
+        var id: Self { self }
+        var label: String { self == .camera ? "Capture card or camera" : "Screen" }
+    }
+    @Published var startSource: StartSource =
+        StartSource(rawValue: UserDefaults.standard.string(forKey: "RecaptrStartSource") ?? "") ?? .camera {
+        didSet { UserDefaults.standard.set(startSource.rawValue, forKey: "RecaptrStartSource") }
+    }
+
     /// The most recent take's naming, so it can be renamed after the
     /// fact (Settings > Last recording > Rename).
     struct LastTake {
@@ -415,6 +426,12 @@ final class MainViewModel: ObservableObject {
             if Self.isUITesting, let want = UserDefaults.standard.string(forKey: "RecaptrUITestSource") {
                 let kind: VideoSource.Kind = want == "display" ? .screenDisplay : .screenWindow
                 for _ in 0..<20 where !self.catalog.videoSources.contains(where: { $0.kind == kind }) {
+                    try? await Task.sleep(for: .milliseconds(250))
+                    await self.refreshCatalog()
+                }
+            } else if self.startSource == .screen, CGPreflightScreenCaptureAccess() {
+                // Displays can be listed after the cameras.
+                for _ in 0..<20 where !self.catalog.videoSources.contains(where: { $0.kind == .screenDisplay }) {
                     try? await Task.sleep(for: .milliseconds(250))
                     await self.refreshCatalog()
                 }
@@ -773,9 +790,9 @@ final class MainViewModel: ObservableObject {
 
     // MARK: - Auto startup source
 
-    /// Picks a default source when none is selected: a capture card, then a
-    /// non-Continuity camera, then any camera. Screens and windows are never
-    /// auto-picked.
+    /// Picks a default source when none is selected: the main display if
+    /// that's the start source, otherwise a capture card, then a
+    /// non-Continuity camera, then any camera. Windows are never auto-picked.
     func autoSelectStartupSource() {
         guard selectedMainSource == nil else { return }
         // -RecaptrUITestSource display|window:<name>: start on the first display, or the first window whose title contains <name>.
@@ -791,6 +808,14 @@ final class MainViewModel: ObservableObject {
                 selectedMainSource = pick
                 return
             }
+        }
+        // Start on the main display when chosen and already allowed. Never
+        // prompts for Screen Recording at launch.
+        if startSource == .screen, !d.bool(forKey: "RecaptrUITesting"), CGPreflightScreenCaptureAccess(),
+           let display = catalog.videoSources.first(where: { $0.kind == .screenDisplay }) {
+            selectedMainSource = display
+            status = "Source: \(display.name)"
+            return
         }
         let cameras = catalog.videoSources.filter { $0.kind == .camera }
         guard !cameras.isEmpty else { return }
