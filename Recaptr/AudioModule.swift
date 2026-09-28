@@ -2,23 +2,8 @@
 //  AudioModule.swift
 //  Recaptr
 //
-//  Right-edge floating audio card: the audio controls you need
-//  mid-session, readable at a glance.
-//
-//    Top       Monitor toggle (headphones). ⌘K does the same.
-//    Columns   Monitor volume (drag), source level, mic level (only
-//              when a commentary mic is chosen). Each column has an
-//              icon underneath instead of a text label.
-//    Hover     Numbers (volume %, peak dB per meter) fade in while the
-//              pointer is over the pill or the volume is being dragged,
-//              so the resting pill is controls and meters only.
-//
-//  Gains and device choice live in Settings (set-and-forget).
-//
-//  Meters are Core Animation layers updated directly (LevelMeter.swift),
-//  reading levels straight from the view model, so the card never
-//  rebuilds or re-lays-out per tick. They pause while the chrome is
-//  faded out.
+//  Floating audio card: monitor toggle, monitor volume, and level meters.
+//  Numbers appear on hover. Gains and devices live in Settings.
 //
 
 import SwiftUI
@@ -72,8 +57,7 @@ struct AudioModule: View {
         }
         .padding(.vertical, 14)
         .padding(.horizontal, 12)
-        // A card, not a capsule: with two or three columns the pill
-        // got wide enough that its fully rounded ends looked bloated.
+        // Rounded rect, not a capsule: fully rounded ends look bloated at this width.
         .recaptrGlass(in: RoundedRectangle(cornerRadius: 22, style: .continuous))
         .onHover { isHovering = $0 }
         .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: showNumbers)
@@ -85,9 +69,8 @@ struct AudioModule: View {
 
     // MARK: - Layout pieces
 
-    /// One pill column: control or meter, then an icon, then the
-    /// number (shown on hover only; the space is kept so the pill
-    /// doesn't resize).
+    /// One column: control or meter, icon, then a hover-only number whose
+    /// space is always reserved so the card doesn't resize.
     private func column<Content: View>(icon: String, readout: Readout, help: String,
                                         @ViewBuilder content: () -> Content) -> some View {
         VStack(spacing: 6) {

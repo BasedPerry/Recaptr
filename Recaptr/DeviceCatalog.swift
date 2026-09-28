@@ -2,10 +2,7 @@
 //  DeviceCatalog.swift
 //  Recaptr
 //
-//  Enumerates available capture sources: ScreenCaptureKit displays
-//  and windows for screen sources, AVCaptureDevice for cameras
-//  and microphones. The catalog is the single source of truth used
-//  by the MainViewModel + UI source switcher.
+//  Lists displays, windows, cameras and microphones.
 //
 
 import Foundation
@@ -19,8 +16,7 @@ final class DeviceCatalog: ObservableObject {
     @Published var videoSources: [VideoSource] = []
     @Published var audioSources: [AudioSource] = []
 
-    /// Refresh both video and audio source lists. Safe to call
-    /// repeatedly (e.g. on device hotplug or app activation).
+    /// Reloads all sources. Safe to call repeatedly.
     func refresh() async {
         await withTaskGroup(of: Void.self) { group in
             group.addTask { await self.loadShareableContent() }
@@ -28,7 +24,7 @@ final class DeviceCatalog: ObservableObject {
         }
 
         print("DeviceCatalog: \(videoSources.count) video source(s), \(audioSources.count) audio source(s)")
-        // The full list (every window title on the Mac) is debug-only.
+        // Debug only: the list includes every window title on the Mac.
         #if DEBUG
         for s in videoSources {
             print("  · [\(s.kind.rawValue)] \(s.name)  (id=\(s.id))")
@@ -64,9 +60,8 @@ final class DeviceCatalog: ObservableObject {
             )
         }
 
-        // Core Audio creates private "CADefaultDeviceAggregate-<pid>-<n>"
-        // devices whenever an engine opens the default output (the
-        // monitor does), and they come and go. Never real inputs.
+        // Core Audio adds transient "CADefaultDeviceAggregate" devices when an
+        // engine opens the default output. They're never real inputs.
         let micSources = mics
             .filter { !$0.localizedName.hasPrefix("CADefaultDeviceAggregate") }
             .map { AudioSource(id: $0.uniqueID, name: $0.localizedName) }
@@ -79,10 +74,8 @@ final class DeviceCatalog: ObservableObject {
     }
 
     private func loadShareableContent() async {
-        // Calling SCShareableContent without permission fires the
-        // Screen Recording prompt. Only enumerate once access is
-        // granted; the view model asks for it the first time the user
-        // picks a Window or Screen source.
+        // SCShareableContent triggers the Screen Recording prompt, so wait until
+        // access is granted. The view model asks when a screen source is picked.
         guard CGPreflightScreenCaptureAccess() else { return }
         do {
             let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
@@ -100,19 +93,13 @@ final class DeviceCatalog: ObservableObject {
             }
             let myBundleID = Bundle.main.bundleIdentifier
             for w in content.windows {
-                // Only windows a person would pick: normal-layer app
-                // windows with a title, a real size, not Recaptr's own.
-                // Without this the list filled with system surfaces
-                // (Notification Center, WindowManager, loginwindow,
-                // untitled helper windows).
+                // Skip system surfaces, helper windows and Recaptr's own.
                 guard let app = w.owningApplication,
                       app.bundleIdentifier != myBundleID,
                       w.windowLayer == 0,
                       w.frame.width >= 200, w.frame.height >= 120,
                       let title = w.title, !title.isEmpty,
-                      // Only apps with a Dock presence. Background
-                      // agents own titled windows too (a hidden
-                      // "universalAccessAuthWarn: Screen Recording").
+                      // Background agents own titled windows too.
                       NSRunningApplication(processIdentifier: app.processID)?.activationPolicy == .regular
                 else { continue }
                 let appName = app.applicationName
@@ -131,16 +118,11 @@ final class DeviceCatalog: ObservableObject {
                 self.videoSources.append(contentsOf: screenSources.sorted(by: { $0.name < $1.name }))
             }
         } catch {
-            // Screen Recording permission not yet granted; the
-            // viewmodel surfaces a permission banner from
-            // CGPreflightScreenCaptureAccess on its own path.
+            // No permission yet. The view model shows the banner.
         }
     }
 
-    /// Resolve a human-readable name for a `CGDirectDisplayID` by
-    /// matching against `NSScreen.screens`. `SCDisplay.localizedName`
-    /// was deprecated/removed in shipping ScreenCaptureKit; this is
-    /// the canonical workaround.
+    /// Display name from `NSScreen`, since `SCDisplay` has no localized name.
     private static func displayName(for displayID: CGDirectDisplayID) -> String {
         let key = NSDeviceDescriptionKey("NSScreenNumber")
         if let screen = NSScreen.screens.first(where: {

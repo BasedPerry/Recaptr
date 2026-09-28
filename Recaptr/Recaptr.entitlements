@@ -2,46 +2,20 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<!--
-		Phase 4.6.3 (2026-05-09 night) — explicit entitlements file.
-		We were relying on Xcode's ENABLE_RESOURCE_ACCESS_MICROPHONE
-		and friends to auto-synthesize entitlements. On macOS Tahoe
-		with hardened runtime + sandbox, that shorthand silently
-		omits keys often enough to be unreliable — symptom: the app
-		never appears in System Settings → Privacy & Security →
-		Microphone, AVCaptureDevice.requestAccess(for:.audio) returns
-		granted=false with no prompt, and AVCaptureSession audio
-		delivers all-zero samples (so recording counters increment
-		but the file plays silent).
-
-		This file is the source of truth. CODE_SIGN_ENTITLEMENTS in
-		the pbxproj points here.
-	-->
+	<!-- Listed explicitly: build-setting shorthands can omit keys and leave the mic silent. -->
 
 	<key>com.apple.security.app-sandbox</key>
 	<true/>
 
-	<!-- AVCaptureSession audio input + AVAudioEngine input capture.
-	     This is the single mic-related entitlement on macOS — there
-	     is no separate "microphone" entitlement; audio-input covers
-	     both AVFoundation paths. -->
+	<!-- Covers both AVCaptureSession and AVAudioEngine input. -->
 	<key>com.apple.security.device.audio-input</key>
 	<true/>
 
-	<!-- AVCaptureDevice video — built-in cam, Continuity Camera,
-	     external capture cards (Elgato 4K X). -->
+	<!-- Built-in cameras, Continuity Camera and capture cards. -->
 	<key>com.apple.security.device.camera</key>
 	<true/>
 
-	<!-- Phase 7 sneak (2026-05-11) — bumped from read-only to read-write
-	     for the user-selected save-location flow. The user picks a
-	     folder via NSOpenPanel (RecordingStorage.pickFolder), we
-	     persist a security-scoped bookmark, and recordings land
-	     directly in their chosen folder. Read-write is a superset of
-	     read-only, so the previous capability is preserved.
-	     Sandbox container path remains the fallback when the user
-	     hasn't picked anything or the picked folder is unavailable
-	     (volume unmounted, etc.). -->
+	<!-- Save folder chosen in NSOpenPanel, kept as a security-scoped bookmark. -->
 	<key>com.apple.security.files.user-selected.read-write</key>
 	<true/>
 

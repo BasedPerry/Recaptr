@@ -2,14 +2,7 @@
 //  SettingsView.swift
 //  Recaptr
 //
-//  The macOS Settings window (Recaptr > Settings…, ⌘, or the gear
-//  button): app-wide settings only. Per-method tuning (sources,
-//  capture resolution, audio devices and gain, instant replay) lives
-//  in the source sidebar; monitor volume lives on the audio card.
-//
-//  Tabs:
-//    Recording    encoding preset, save folder, last recording
-//    Permissions  microphone, camera, screen recording
+//  App-wide settings. Per-source tuning lives in the source sidebar.
 //
 
 import SwiftUI
@@ -108,8 +101,7 @@ private struct RecordingSettingsTab: View {
     }
 }
 
-/// Rename the last take's episode and its markers after the fact
-/// (Apple Intelligence names will sometimes miss).
+/// Renames the last take's episode and markers after recording.
 private struct RenameTakeSheet: View {
     @EnvironmentObject var vm: MainViewModel
     @Environment(\.dismiss) private var dismiss

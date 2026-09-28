@@ -2,21 +2,10 @@
 //  CaptureOutline.swift
 //  Recaptr
 //
-//  A thin outline around whatever a screen or window capture is
-//  recording, so it's obvious which display or window is live (the
-//  Recaptr window can sit on the display it's capturing). Green while
-//  previewing, red while recording.
-//
-//  A borderless, click-through window above other apps. It never
-//  appears in the capture: display captures exclude every Recaptr
-//  window (see MainViewModel.startPreview), window captures only see
-//  the one window, and the outline also opts out of screen sharing.
-//
-//  The border is a plain Core Animation layer, not SwiftUI: a static
-//  layer costs nothing per frame. The first version hosted a SwiftUI
-//  view in a display-sized window, and profiling (2026-09-27) found it
-//  kept the app's SwiftUI update loop busy: 14% of a core during a 4K
-//  screen capture (25% with it, 11% without).
+//  Click-through outline around the display or window being captured.
+//  It never appears in the recording: display captures exclude Recaptr's
+//  windows, and the panel opts out of sharing. The border is a CALayer
+//  because a display-sized SwiftUI view kept the update loop busy.
 //
 
 import AppKit
@@ -43,7 +32,7 @@ final class CaptureOutline {
         stopTracking()
         trackedWindow = window
         followWindow()
-        // 10 Hz: smooth enough while dragging, negligible cost.
+        // 10 Hz is smooth enough while dragging and costs little.
         let timer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.followWindow() }
         }
@@ -56,8 +45,7 @@ final class CaptureOutline {
         updateColor()
     }
 
-    /// Green while previewing, red while recording (Recaptr's signal
-    /// and record colors), resolved for the current appearance.
+    /// Green while previewing, red while recording.
     private func updateColor() {
         let color = recording ? NSColor.systemRed : NSColor(Color.signal)
         border.borderColor = color.withAlphaComponent(0.9).cgColor
@@ -85,12 +73,11 @@ final class CaptureOutline {
             panel?.orderOut(nil)
             return
         }
-        // Core Graphics window bounds are top-left based; AppKit is
-        // bottom-left based on the primary screen.
+        // CG window bounds are top-left origin; AppKit is bottom-left on the primary screen.
         let rect = CGRect(x: bounds["X"] ?? 0,
                           y: primary.frame.height - (bounds["Y"] ?? 0) - (bounds["Height"] ?? 0),
                           width: bounds["Width"] ?? 0, height: bounds["Height"] ?? 0)
-        // A little outside the window so the line doesn't cover it.
+        // Just outside the window so the line doesn't cover it.
         place(at: rect.insetBy(dx: -4, dy: -4))
     }
 

@@ -5,13 +5,7 @@
 
 import SwiftUI
 
-/// Dropdown content for the menu bar recording indicator. The
-/// containing `MenuBarExtra` in RecaptrApp inserts this item only
-/// while `vm.isRecording` is true.
-///
-/// Surfaces three actions reachable from anywhere on macOS without
-/// bringing the Recaptr window forward: drop a clip marker, show
-/// the main window, or stop recording.
+/// Menu for the menu bar recording indicator, shown only while recording.
 struct MenuBarContent: View {
     @EnvironmentObject var vm: MainViewModel
 
@@ -36,8 +30,6 @@ struct MenuBarContent: View {
         }
     }
 
-    /// Activate Recaptr and surface its main window. Called from the
-    /// "Show Recaptr" menu bar item.
     private func bringRecaptrForward() {
         NSApp.activate(ignoringOtherApps: true)
         for window in NSApp.windows where window.canBecomeKey {
@@ -57,8 +49,8 @@ private struct MenuElapsed: View {
     }
 }
 
-/// Menu bar label: red dot and elapsed time. Observes only the
-/// recording clock, so the app's scenes don't rebuild every second.
+/// Red dot and elapsed time. Observes only the clock so the app's
+/// scenes don't rebuild every second.
 struct MenuBarLabel: View {
     @ObservedObject var clock: RecordingClock
 

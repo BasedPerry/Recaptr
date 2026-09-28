@@ -2,26 +2,15 @@
 //  MonitorRing.swift
 //  Recaptr
 //
-//  Low-latency path for live monitoring. The capture engine's sink
-//  node writes each I/O cycle (~10 ms) into this ring on the input
-//  audio thread; the monitor engine's source node reads it on the
-//  output audio thread. Nothing in between: no tap, no queue, no
-//  scheduling.
-//
-//  Why: the input tap delivers 100 ms blocks (it ignores the 1024
-//  frames we ask for; measured 4800 at 48 kHz on 2026-09-27), and the
-//  player-node monitor queued up to 2.5 of them, so monitoring ran
-//  roughly 100–250 ms behind before the output device added its own
-//  delay. Recording still uses the tap; this ring only feeds the
-//  monitor.
-//
-//  Single producer, single consumer, lock-free: both ends run on
-//  real-time audio threads, so neither may lock or allocate.
+//  Lock-free ring that feeds the live monitor straight from the input
+//  I/O cycle (~10 ms), bypassing the 100 ms tap blocks.
 //
 
 import Foundation
 import Synchronization
 
+/// Single producer, single consumer. Both ends run on real-time audio
+/// threads, so neither may lock or allocate.
 nonisolated final class MonitorRing: @unchecked Sendable {
 
     /// Frames of audio kept queued in steady state (~20 ms): enough to
@@ -37,12 +26,11 @@ nonisolated final class MonitorRing: @unchecked Sendable {
     private let mask: Int
     private let storage: UnsafeMutablePointer<Float>
 
-    /// Total frames ever written / read. Their difference is the fill.
+    /// Total frames written and read. Their difference is the fill.
     private let writePos = Atomic<Int>(0)
     private let readPos = Atomic<Int>(0)
 
-    /// Channel gain, as Float bits so the output thread reads it
-    /// without a lock.
+    /// Channel gain as Float bits, so the output thread reads it lock-free.
     private let gainBits = Atomic<UInt32>(Float(1).bitPattern)
 
     /// Diagnostics: skips (drift or backlog trimmed) and underruns.

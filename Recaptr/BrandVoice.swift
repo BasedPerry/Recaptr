@@ -2,10 +2,7 @@
 //  BrandVoice.swift
 //  Recaptr
 //
-//  The voice generated names are written in. Draft, kept in step with
-//  the brand voice note (Cerebro: Recaptr/Recaptr_Brand_Voice.md):
-//  plain, specific, a little dry, never hype. Names read like a good
-//  chapter title, not a thumbnail.
+//  Model instructions for generated marker and episode names.
 //
 
 import Foundation

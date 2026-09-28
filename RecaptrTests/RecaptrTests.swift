@@ -38,8 +38,7 @@ struct PeakLimiterTests {
 
     @Test func overFullScaleIsHeldUnderTheCeiling() {
         var limiter = PeakLimiter()
-        // +6 dBFS: twice full scale, like game audio and a mic peaking
-        // together.
+        // +6 dBFS: twice full scale.
         var block = sine(dbfs: 6, frames: 1024)
         run(&limiter, &block)
         let peak = block.map(abs).max() ?? 0
@@ -47,9 +46,7 @@ struct PeakLimiterTests {
         #expect(peak > limiter.ceiling * 0.9)  // limited, not muted
     }
 
-    /// Two sources that each fit but together clip: after linked
-    /// limiting, playing both tracks together stays under the ceiling
-    /// and their balance is unchanged.
+    /// Two sources that clip only when summed stay under the ceiling and keep their balance.
     @Test func linkedLimitingKeepsTheSumUnderTheCeiling() {
         var limiter = PeakLimiter()
         var game = sine(dbfs: -2, frames: 1024)   // loud game audio
@@ -237,8 +234,7 @@ import AVFoundation
 
 struct TranscriberTests {
 
-    /// Speak a sentence with the system voice into a file, then run it
-    /// through the same on-device transcriber the marker namer uses.
+    /// Synthesized speech through the marker namer's transcriber.
     @Test(.timeLimit(.minutes(3))) func transcribesSpeech() async throws {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("speech-test-\(UUID()).caf")
         try await SpeechFile.write("Fortuna is finally down. Heading for the east gate now.", to: url)

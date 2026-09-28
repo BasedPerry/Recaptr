@@ -2,33 +2,16 @@
 //  Glass.swift
 //  Recaptr
 //
-//  The one Liquid Glass primitive for Recaptr's floating chrome.
-//
-//  Everything is system glass with nothing drawn on top: no tint
-//  gradient, no hairline stroke, no manual shadow. That keeps every
-//  surface under the control of the user's system settings (the
-//  Liquid Glass look slider in System Settings > Appearance, Light /
-//  Dark, Reduce Transparency, Increase Contrast), and changes to those
-//  settings apply live without a relaunch.
-//
-//  Rules for callers:
-//    - One glass layer per surface. Controls inside a glass pill are
-//      plain (borderless) so glass never stacks on glass.
-//    - `interactive: true` only when the glass itself is the control
-//      (for example a standalone icon button), not for a container
-//      that merely holds controls.
-//    - No decorative tints or overlays. Color belongs to content
-//      (record red, meters). The one exception is state: a faint tint
-//      may say "this is live" (the controls pill while recording).
-//    - Content on glass uses full-strength styles (`.primary`) for
-//      controls. Over dark video, `.secondary` and fainter read as
-//      disabled; keep them for supporting text.
+//  Liquid Glass for the floating chrome. Plain system glass with nothing
+//  drawn on top, so it follows the user's appearance settings live.
+//  One glass layer per surface; controls inside it stay plain.
 //
 
 import SwiftUI
 
 extension View {
-    /// Apply Recaptr's standard Liquid Glass background in `shape`.
+    /// Standard glass background. Use `interactive` only when the glass
+    /// itself is the control, and `tint` only to signal state.
     func recaptrGlass(
         in shape: some Shape = Capsule(),
         interactive: Bool = false,
@@ -41,10 +24,8 @@ extension View {
 // MARK: - Preview stage
 
 #if DEBUG
-/// Renders chrome over the three backdrops the manual test matrix
-/// uses: bright, dark, and busy. Previews cannot simulate the Liquid
-/// Glass look slider, so they supplement the running-app matrix
-/// rather than replace it.
+/// Shows chrome over bright, dark, and busy backdrops. Previews can't
+/// simulate the Liquid Glass look setting, so also check the running app.
 struct ChromePreviewStage<Content: View>: View {
     @ViewBuilder var content: Content
 
@@ -64,8 +45,7 @@ struct ChromePreviewStage<Content: View>: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    /// Stand-in for a busy camera feed: saturated, high-contrast
-    /// color with hard edges behind the glass.
+    /// Stand-in for a busy camera feed.
     private var busy: some View {
         ZStack {
             AngularGradient(colors: [.orange, .pink, .blue, .green, .yellow, .orange],

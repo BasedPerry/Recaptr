@@ -419,9 +419,9 @@
 				INFOPLIST_KEY_ATSApplicationFontsPath = Fonts;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.video";
-				INFOPLIST_KEY_NSCameraUsageDescription = "Recaptr uses your cameras and capture cards (like the Elgato 4K X) to record video sources for gameplay capture and creative work.";
+				INFOPLIST_KEY_NSCameraUsageDescription = "Recaptr records video from your cameras and capture cards.";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "© 2026 Overton Forge";
-				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Recaptr uses microphones and audio devices (including HDMI audio from capture cards) to record audio alongside your video sources.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Recaptr records audio from your microphones and capture cards.";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -461,9 +461,9 @@
 				INFOPLIST_KEY_ATSApplicationFontsPath = Fonts;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.video";
-				INFOPLIST_KEY_NSCameraUsageDescription = "Recaptr uses your cameras and capture cards (like the Elgato 4K X) to record video sources for gameplay capture and creative work.";
+				INFOPLIST_KEY_NSCameraUsageDescription = "Recaptr records video from your cameras and capture cards.";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "© 2026 Overton Forge";
-				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Recaptr uses microphones and audio devices (including HDMI audio from capture cards) to record audio alongside your video sources.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Recaptr records audio from your microphones and capture cards.";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",

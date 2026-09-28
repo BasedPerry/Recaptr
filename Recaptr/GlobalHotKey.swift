@@ -2,14 +2,9 @@
 //  GlobalHotKey.swift
 //  Recaptr
 //
-//  System-wide shortcut, so a clip marker can be dropped while another
-//  app (the game, a browser) is in front. ⌘B only works while Recaptr
-//  is the active app, and a global ⌘B would steal Bold everywhere and
-//  Blade in Final Cut, so the global combo is ⌃⌥⌘B.
-//
-//  Carbon's RegisterEventHotKey: works in the sandbox and needs no
-//  Accessibility or Input Monitoring permission, because the system
-//  delivers only this exact combo to us.
+//  System-wide ⌃⌥⌘B for markers while another app is in front. Not ⌘B,
+//  which would steal Bold and Final Cut's Blade. Carbon's hot key API works
+//  in the sandbox and needs no Accessibility or Input Monitoring permission.
 //
 
 import Carbon.HIToolbox
@@ -22,8 +17,7 @@ final class GlobalHotKey {
     private var handlerRef: EventHandlerRef?
     private let action: () -> Void
 
-    /// Registers `keyCode` + `modifiers` (Carbon constants) and calls
-    /// `action` on the main actor each time it's pressed.
+    /// Takes Carbon key and modifier constants. Calls `action` on the main actor.
     init?(keyCode: UInt32, modifiers: UInt32, action: @escaping () -> Void) {
         self.action = action
         var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
@@ -44,7 +38,6 @@ final class GlobalHotKey {
         }
     }
 
-    /// ⌃⌥⌘B.
     static func marker(action: @escaping () -> Void) -> GlobalHotKey? {
         GlobalHotKey(keyCode: UInt32(kVK_ANSI_B),
                      modifiers: UInt32(controlKey | optionKey | cmdKey),

@@ -2,39 +2,8 @@
 //  ScreenCaptureService.swift
 //  Recaptr
 //
-//  Screen / window capture via ScreenCaptureKit. Mirrors the
-//  two-output pattern used in `CameraCaptureService`: one `SCStream`
-//  delivers frames and we fan out to preview + record from the
-//  delegate callback.
-//
-//  For screen sources, audio comes from the SAME stream
-//  (`SCStreamOutputType.audio`) rather than the `AudioMixer`.
-//  `MainViewModel` bypasses the mixer when the source is
-//  `.screenDisplay` or `.screenWindow`; camera sources keep the mixer
-//  path for mic capture. Using SCStream's audio output keeps video
-//  and audio on the same host clock, which makes the recorder's
-//  session-anchor logic work without modification, and avoids the
-//  AVAudioEngine HAL-conflict that arises when an AVAudioEngine
-//  input is open against a system-audio loopback device.
-//
-//  Lifecycle:
-//    - `start(filter:previewSink:)` — builds an `SCStreamConfiguration`
-//      (1080p60 BGRA + 48 kHz stereo audio), creates the stream,
-//      registers self as both delegate and sample handler, and starts
-//      capture. Returns the configured `CMVideoDimensions`. Throws on
-//      any configuration failure.
-//    - `stop()` — calls `SCStream.stopCapture()` and drops the
-//      reference.
-//
-//  Permission: ScreenCaptureKit routes through TCC "Screen & System
-//  Audio Recording." `MainViewModel` handles the prompt
-//  (`requestScreenCapturePermissionIfNeeded`) before `start()` is
-//  called.
-//
-//  Frame status: `SCStream` emits a frame for every refresh cycle,
-//  including no-change "idle" frames with no real pixel data. The
-//  service filters to `SCFrameStatus.complete` so only buffers with
-//  fresh content reach the preview layer and the recorder.
+//  Screen and window capture with ScreenCaptureKit. System audio comes
+//  from the same stream, so video and audio share the host clock.
 //
 
 import Foundation
@@ -43,9 +12,7 @@ import CoreMedia
 import CoreVideo
 import AppKit
 
-/// Screen and window capture size cap. The capture keeps the
-/// source's aspect ratio and pixel size, scaled down to fit the cap
-/// (never up).
+/// Capture size cap. The source's aspect is kept and it's only scaled down.
 enum ScreenResolution: String, CaseIterable, Identifiable {
     case auto, qhd, fhd
 
@@ -59,7 +26,6 @@ enum ScreenResolution: String, CaseIterable, Identifiable {
         }
     }
 
-    /// Bounding box the capture must fit in.
     private var cap: (Double, Double) {
         switch self {
         case .auto: return (3840, 2160)
@@ -68,8 +34,7 @@ enum ScreenResolution: String, CaseIterable, Identifiable {
         }
     }
 
-    /// Source size fitted into the cap, aspect kept, even numbers
-    /// (4:2:0 video needs them).
+    /// Source size fitted into the cap, rounded to even numbers for 4:2:0.
     func fit(_ source: CGSize) -> CMVideoDimensions {
         guard source.width > 0, source.height > 0 else { return .init(width: 1920, height: 1080) }
         // Landscape caps also bound portrait sources by their long side.
@@ -79,8 +44,7 @@ enum ScreenResolution: String, CaseIterable, Identifiable {
         return .init(width: even(source.width), height: even(source.height))
     }
 
-    /// A display's size in pixels (its current mode, so Retina and
-    /// scaled modes report real pixels, not points).
+    /// Display size in pixels from its current mode, not points.
     static func pixelSize(of display: SCDisplay) -> CGSize {
         if let mode = CGDisplayCopyDisplayMode(display.displayID) {
             return CGSize(width: mode.pixelWidth, height: mode.pixelHeight)
@@ -88,8 +52,7 @@ enum ScreenResolution: String, CaseIterable, Identifiable {
         return CGSize(width: display.width * 2, height: display.height * 2)
     }
 
-    /// A window's size in pixels: its frame in points times the
-    /// backing scale of the screen it's on.
+    /// Window size in pixels, using the backing scale of its screen.
     @MainActor
     static func pixelSize(of window: SCWindow) -> CGSize {
         let frame = window.frame
@@ -102,83 +65,57 @@ enum ScreenResolution: String, CaseIterable, Identifiable {
 
 final class ScreenCaptureService: NSObject, @unchecked Sendable, SCStreamOutput, SCStreamDelegate {
 
-    // Separate queues per output type. SCStream's .screen and .audio
-    // outputs deliver on whichever queue we register, and AVAssetWriter
-    // append() doesn't block, so a single queue per type is plenty.
     private let videoQueue = DispatchQueue(label: "recaptr.screen.video", qos: .userInteractive)
     private let audioQueue = DispatchQueue(label: "recaptr.screen.audio", qos: .userInitiated)
 
     private var stream: SCStream?
-    /// Rolling instant-replay buffer (macOS 27). Only attached when
-    /// `instantReplay` is on.
+    /// Instant-replay buffer, attached only when `instantReplay` is on.
     private var clipBuffer: SCClipBufferingOutput?
 
-    /// Set before `start()`. Keeps the last 15 s of the stream in a
-    /// rolling buffer so `exportReplay` can save it on demand.
+    /// Set before `start()`. Keeps the last 15 s for `exportReplay`.
     var instantReplay = false
     private weak var previewSinkLayer: SampleBufferPreviewLayer?
     private var activeDimensions: CMVideoDimensions = .init(width: 0, height: 0)
 
-    /// Set by `MainViewModel` before `start()`. Receives each non-idle
-    /// frame so the recorder can append while `isRecording` is true.
-    /// (The recorder ignores buffers when its writer is not running,
-    /// matching the camera-path contract — see `Recorder.appendVideo()`.)
+    /// Receives constant-rate frames for the recorder.
     var onRecordBuffer: ((CMSampleBuffer) -> Void)?
 
-    /// `SCStream` system-audio buffers (PCM Float32 stereo at 48 kHz,
-    /// per `SCStreamConfiguration`). Wired to `recorder.appendAudio`
-    /// in `MainViewModel` for screen sources. `AVAssetWriterInput`
-    /// configured for AAC accepts PCM input in transcode mode, so no
-    /// extra conversion is needed.
+    /// System audio as PCM Float32 stereo, 48 kHz. The AAC writer input
+    /// takes it without conversion.
     var onAudioBuffer: ((CMSampleBuffer) -> Void)?
 
-    /// Surfaces `SCStreamDelegate.didStopWithError` so `MainViewModel`
-    /// can react to a stream that dies mid-capture (display unplugged,
-    /// captured window closed, permission revoked).
+    /// Called when the stream dies (display unplugged, window closed,
+    /// permission revoked).
     var onStreamStopped: ((Error?) -> Void)?
 
-    /// Build and start an SCStream against the given filter. The filter
-    /// is constructed by the caller (display vs window vs filtered display
-    /// is its decision — we just consume the result).
+    /// Starts a stream for `filter` and returns the capture size.
     func start(filter: SCContentFilter,
                previewSink: SampleBufferPreviewLayer,
                size: CMVideoDimensions = .init(width: 1920, height: 1080),
                frameRate: Int = 60,
                showsCursor: Bool = true) async throws -> CMVideoDimensions {
-        // Tear down any prior stream before reusing this service.
         if stream != nil {
             await stop()
         }
         self.previewSinkLayer = previewSink
 
         let config = SCStreamConfiguration()
-        // Size is chosen by the caller from the source's own pixel
-        // size and aspect (capped by the Resolution setting); SCStream
-        // scales the content into it.
         config.width  = Int(size.width)
         config.height = Int(size.height)
         config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(frameRate))
-        // Video-range 4:2:0 in Rec. 709, the encoder's native input.
-        // BGRA made the encoder convert every frame and left the file
-        // with no color tags (tested 2026-09-27: transfer=unset).
+        // 4:2:0 Rec. 709 is the encoder's native input. BGRA forces a
+        // conversion per frame and leaves the file without color tags.
         config.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
         config.colorMatrix = CGDisplayStream.yCbCrMatrix_ITU_R_709_2
         config.colorSpaceName = CGColorSpace.itur_709
-        // Small queue, drop late frames. SCStream briefly blocks the
-        // system compositor if its queue is full — keep it short.
+        // Keep this small. A full queue briefly blocks the compositor.
         config.queueDepth  = 5
         config.showsCursor = showsCursor
 
-        // System-audio loopback. SCStream delivers PCM Float32 stereo
-        // at the configured rate via the `.audio` output type; the
-        // recorder's AAC writer accepts PCM in transcode mode, so
-        // these buffers feed `recorder.appendAudio` directly.
         config.capturesAudio = true
         config.sampleRate    = 48_000
         config.channelCount  = 2
-        // Suppress Recaptr's own audio output from the loopback (e.g.
-        // when the live monitor plays through system speakers, we
-        // don't want to feed it back into the recording).
+        // Keeps the live monitor from feeding back into the recording.
         config.excludesCurrentProcessAudio = true
 
         let s = SCStream(filter: filter, configuration: config, delegate: self)
@@ -214,21 +151,18 @@ final class ScreenCaptureService: NSObject, @unchecked Sendable, SCStreamOutput,
         do {
             try await s.stopCapture()
         } catch {
-            // Stopping a stream that already errored out can throw —
-            // not a problem on teardown. Log and move on.
+            // A stream that already failed can throw here. Harmless.
             print("ScreenCaptureService: stopCapture threw (likely already stopped): \(error)")
         }
         stream = nil
         stopFrameGrid()
-        clipBuffer = nil  // stopping the stream stops buffering
+        clipBuffer = nil
         activeDimensions = .init(width: 0, height: 0)
     }
 
-    /// True while a replay buffer is running.
     var isReplayBuffering: Bool { clipBuffer != nil }
 
-    /// Save the most recent `duration` seconds (max 15) of the stream
-    /// to `url`. Buffering continues during the export.
+    /// Saves the last `duration` seconds (max 15). Buffering continues.
     func exportReplay(to url: URL, duration: TimeInterval = 15) async throws {
         guard let clipBuffer else {
             throw CaptureError.configurationFailed("Instant replay is not running")
@@ -242,12 +176,8 @@ final class ScreenCaptureService: NSObject, @unchecked Sendable, SCStreamOutput,
 
     // MARK: - SCStreamOutput
     //
-    // Delegate methods intentionally take their isolation from the
-    // class rather than carrying explicit `nonisolated` annotations;
-    // marking them `nonisolated` trips Swift 6 strict-concurrency
-    // warnings when stored properties' inferred actor isolation leaks
-    // into the function body. `SCStream` calls these on the queue we
-    // registered, regardless of annotation.
+    // Not marked `nonisolated`: that triggers Swift 6 concurrency
+    // warnings. SCStream calls these on the registered queue either way.
 
     func stream(_ stream: SCStream,
                 didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
@@ -256,17 +186,14 @@ final class ScreenCaptureService: NSObject, @unchecked Sendable, SCStreamOutput,
 
         switch type {
         case .screen:
-            // SCStream sends .complete frames when the screen changes
-            // and .idle frames (no pixels) when it doesn't. Preview
-            // takes the real frames; the recording gets a steady grid
-            // (see `emitGrid`).
+            // .complete frames carry new pixels; .idle frames don't.
+            // Preview gets real frames, the recording gets the grid.
             let status = (CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]])?
                 .first?[.status] as? Int
             var isComplete = status == SCFrameStatus.complete.rawValue
             #if DEBUG
-            // UI tests: `-RecaptrUITestIgnoreFramesFor <s>` ignores real
-            // frames at the start, as if the source never changed, to
-            // exercise `seedFirstFrameIfNeeded`.
+            // UI test hook: `-RecaptrUITestIgnoreFramesFor <s>` ignores
+            // early frames to exercise `seedFirstFrameIfNeeded`.
             if isComplete, let until = ignoreFramesUntil, Date() < until { isComplete = false }
             #endif
             if isComplete {
@@ -285,17 +212,10 @@ final class ScreenCaptureService: NSObject, @unchecked Sendable, SCStreamOutput,
             }
 
         case .audio:
-            // System-audio loopback. The `CMSampleBuffer` carries PCM
-            // Float32 at the configured rate, with PTS in the same
-            // host-clock domain as video (so the recorder's
-            // session-anchor logic works without changes).
             onAudioBuffer?(sampleBuffer)
 
         case .microphone:
-            // macOS 15+ adds a separate `.microphone` output type for
-            // narration-on-top-of-system-audio capture. Not wired —
-            // would route through the AudioMixer alongside SCStream
-            // system audio with per-source levels.
+            // Not used. The mic goes through AudioMixer.
             break
 
         @unknown default:
@@ -305,21 +225,11 @@ final class ScreenCaptureService: NSObject, @unchecked Sendable, SCStreamOutput,
 
     // MARK: - Constant frame rate
 
-    // A screen recording made only of changed frames is variable
-    // frame rate: a still screen wrote nothing, and a 20 s take
-    // averaged 17 fps (2026-09-27). Final Cut conforms such files and
-    // the .fcpxml can't infer the rate. Instead the recording gets a
-    // frame on every tick of a fixed grid (60 or 30 fps) anchored at
-    // the first frame, each showing the newest real frame. Repeated
-    // frames cost the HEVC encoder almost nothing.
-    //
-    // Two things fill the grid: each arriving frame (real or idle)
-    // fills ticks up to its own time, and a timer fills ticks when
-    // nothing arrives. The timer matters: on a fully still screen
-    // SCStream sends nothing at all, and relying on arrivals left a
-    // 38 s freeze where a movie was paused (30-minute test,
-    // 2026-09-27); after a gap, arrivals also dumped a burst of frames
-    // that the real-time encoder partly dropped. Video queue only.
+    // SCStream only sends changed frames, which gives a variable frame
+    // rate file. The recording instead gets the newest frame on every
+    // tick of a fixed grid. Arriving frames fill ticks up to their own
+    // time; a timer fills ticks when nothing arrives, since a still
+    // screen sends nothing at all. Video queue only.
     private var lastImage: CVImageBuffer?
     #if DEBUG
     private let ignoreFramesUntil: Date? = {
@@ -331,17 +241,12 @@ final class ScreenCaptureService: NSObject, @unchecked Sendable, SCStreamOutput,
     private var gridNext: CMTime = .invalid
     private var gridStep = CMTime(value: 1, timescale: 60)
     private var gridTimer: DispatchSourceTimer?
-    /// How far the timer lets the grid run behind the clock before it
-    /// fills in, so it doesn't race a real frame still in flight.
+    /// How far the timer trails the clock, so it doesn't race a real
+    /// frame still in flight.
     private let fillLatency = CMTime(value: 50, timescale: 1000)
-    /// Most frames emitted in one go. More than this behind (the Mac
-    /// stalled) and the grid jumps ahead instead of flooding the writer.
-    ///
-    /// Must be well above `fillLatency` (3 frames at 60 fps): at 3,
-    /// ordinary timer jitter tripped the skip and dropped 2 frames
-    /// about once a second under load (a UI test measured 57.7 fps).
-    /// 8 frames (133 ms) only skips on a real stall, and a burst that
-    /// size is still small enough for the real-time encoder.
+    /// Most frames emitted at once. Further behind than this, the grid
+    /// skips ahead. Must stay well above `fillLatency` (3 frames at
+    /// 60 fps) or normal timer jitter triggers skips.
     private let maxBurst = 8
 
     private func resetFrameGrid(frameRate: Int) {
@@ -360,12 +265,9 @@ final class ScreenCaptureService: NSObject, @unchecked Sendable, SCStreamOutput,
         }
     }
 
-    /// SCStream sends pixels only when the content changes, so a still
-    /// window (or screen) can go without a single real frame: the grid
-    /// then has nothing to repeat and the recording had no video track
-    /// at all (a still Finder window, 2026-09-27). If nothing has
-    /// arrived shortly after starting, take one still of the source at
-    /// the same size and format and start from that.
+    /// A still source may never send a frame, leaving the grid nothing
+    /// to repeat. If none arrives shortly after start, seed it with a
+    /// screenshot at the same size and format.
     private func seedFirstFrameIfNeeded(filter: SCContentFilter, configuration: SCStreamConfiguration) {
         Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(300))
@@ -406,8 +308,7 @@ final class ScreenCaptureService: NSObject, @unchecked Sendable, SCStreamOutput,
         }
     }
 
-    /// Timer tick: fill grid ticks older than `fillLatency`. SCStream
-    /// stamps frames on the host clock, so the grid is too.
+    /// Timer tick. The grid uses the host clock, like SCStream's PTS.
     private func fillFromClock() {
         guard gridNext.isValid else { return }
         let now = CMClockGetTime(CMClockGetHostTimeClock())
@@ -431,9 +332,7 @@ final class ScreenCaptureService: NSObject, @unchecked Sendable, SCStreamOutput,
         }
     }
 
-    /// Format description for grid frames, reused while it still
-    /// matches the image (it only changes if the capture does), rather
-    /// than rebuilt 60 times a second. Video queue only.
+    /// Reused while it matches the image. Video queue only.
     private var gridFormat: CMVideoFormatDescription?
 
     private func makeFrame(_ image: CVImageBuffer, at pts: CMTime, duration: CMTime) -> CMSampleBuffer? {
@@ -454,13 +353,9 @@ final class ScreenCaptureService: NSObject, @unchecked Sendable, SCStreamOutput,
 
     // MARK: - SCStreamDelegate
     //
-    // `SCStream` can occasionally accept `startCapture()` and then,
-    // ~100 ms later, fire this method with "Failed to find any
-    // displays or windows to capture." The cause is a stale
-    // `SCContentFilter` resolution; the second attempt always
-    // succeeds, so we don't auto-retry — `onStreamStopped` lets
-    // `MainViewModel` surface the failure and the user can hit Start
-    // Preview again.
+    // SCStream sometimes starts, then fails ~100 ms later with "Failed to
+    // find any displays or windows". A second start works, so this isn't
+    // retried automatically.
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
         print("ScreenCaptureService: stream stopped with error: \(error.localizedDescription)")

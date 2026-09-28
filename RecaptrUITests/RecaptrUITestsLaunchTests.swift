@@ -2,10 +2,8 @@
 //  RecaptrUITestsLaunchTests.swift
 //  RecaptrUITests
 //
-//  Launch screenshots in Light and Dark so glass and color
-//  regressions show up in test reports. The chrome idle fade is
-//  disabled with `-RecaptrKeepChromeVisible YES` so the pills are in
-//  the shot.
+//  Screenshots for test reports. `-RecaptrKeepChromeVisible YES` keeps
+//  the controls from fading out.
 //
 
 import XCTest
@@ -27,8 +25,7 @@ final class RecaptrUITestsLaunchTests: XCTestCase {
         try captureLaunch(style: "Light")
     }
 
-    /// Settings window, opened from the gear, one screenshot per tab
-    /// (the window only, not the desktop).
+    /// One screenshot per Settings tab.
     @MainActor
     func testSettingsScreenshot() throws {
         let app = XCUIApplication()
@@ -54,8 +51,7 @@ final class RecaptrUITestsLaunchTests: XCTestCase {
         }
     }
 
-    /// Audio pill with a mic armed, resting and hovered (numbers
-    /// only appear on hover).
+    /// Audio pill with a mic armed, resting and hovered.
     @MainActor
     func testAudioPillScreenshot() throws {
         let app = XCUIApplication()
@@ -77,8 +73,7 @@ final class RecaptrUITestsLaunchTests: XCTestCase {
         }
     }
 
-    /// Main window with the source sidebar open (Elgato selected,
-    /// camera tuning showing).
+    /// Main window with the source sidebar open.
     @MainActor
     func testSidebarScreenshot() throws {
         let app = XCUIApplication()
@@ -95,14 +90,12 @@ final class RecaptrUITestsLaunchTests: XCTestCase {
             shot.lifetime = .keepAlways
             add(shot)
         }
-        // Before / open / closed again: the preview must survive the
-        // sidebar moving it around.
+        // The preview must survive the sidebar opening and closing.
         capture("1 before")
         toggle.click()
         XCTAssertTrue(app.descendants(matching: .any)["sourceSidebar"].waitForExistence(timeout: 5))
         Thread.sleep(forTimeInterval: 1.5)
         capture("2 open")
-        // Switch type from the sidebar's own switcher.
         app.buttons["mode-screen"].click()
         Thread.sleep(forTimeInterval: 2)
         capture("2b screen")
@@ -120,8 +113,7 @@ final class RecaptrUITestsLaunchTests: XCTestCase {
     @MainActor
     private func captureLaunch(style: String) throws {
         let app = XCUIApplication()
-        // Ignore saved window state so every run starts with the
-        // capture window open.
+        // Start with the capture window open, not restored state.
         app.launchArguments += ["-ApplePersistenceIgnoreState", "YES"]
         app.launchArguments += [
             "-AppleInterfaceStyle", style,

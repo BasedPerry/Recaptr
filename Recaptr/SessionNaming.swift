@@ -2,30 +2,18 @@
 //  SessionNaming.swift
 //  Recaptr
 //
-//  Series / Episode naming for recordings. A series (the game, the
-//  show) gets its own folder under the save folder, and each recording
-//  is named "Series – Episode". The episode is what the user typed, or,
-//  when left blank, "Ep N" plus an optional generated title
-//  ("Fire Emblem – Ep 4 – Fortuna Falls").
-//
-//  Recordings are written under a provisional name and renamed once
-//  the take has stopped, so the episode can be typed (or generated)
-//  after recording.
+//  Series and episode file naming. Recordings are renamed after the take.
 //
 
 import Foundation
 
 nonisolated enum SessionNaming {
 
-    /// Separator between name parts. An en dash with spaces reads well
-    /// in Finder and Final Cut and never appears in generated titles.
+    /// En dash with spaces: reads well in Finder and never appears in generated titles.
     static let separator = " – "
 
-    /// Make `text` safe as a file or folder name: no slashes, colons
-    /// swapped for a look-alike (U+A789) so "Fire Emblem: Fortune's
-    /// Weave" keeps reading that way ("-" made it "Fire Emblem-
-    /// Fortunes Weave"), no leading dots, single spaces, at most 80
-    /// characters.
+    /// Makes `text` safe as a file name. Colons become a look-alike (U+A789)
+    /// so titles still read naturally; leading dots go; 80 characters max.
     static func sanitize(_ text: String) -> String {
         var cleaned = text
             .replacingOccurrences(of: "/", with: "-")
@@ -42,8 +30,7 @@ nonisolated enum SessionNaming {
         root.appendingPathComponent(sanitize(series), isDirectory: true)
     }
 
-    /// Next auto episode number: one more than the highest "Ep N"
-    /// already in the folder for this series.
+    /// One more than the highest "Ep N" already in the series folder.
     static func nextEpisodeNumber(existing fileNames: [String], series: String) -> Int {
         let prefix = sanitize(series) + separator + "Ep "
         let numbers = fileNames.compactMap { name -> Int? in
@@ -53,8 +40,7 @@ nonisolated enum SessionNaming {
         return (numbers.max() ?? 0) + 1
     }
 
-    /// Episode text for a recording: the typed episode if there is
-    /// one, otherwise "Ep N", with a generated title when available.
+    /// The typed episode, or "Ep N" plus a generated title when there is one.
     static func episode(typed: String, number: Int, generatedTitle: String?) -> String {
         let typed = sanitize(typed)
         if !typed.isEmpty { return typed }
@@ -62,7 +48,7 @@ nonisolated enum SessionNaming {
         return title.isEmpty ? "Ep \(number)" : "Ep \(number)\(separator)\(title)"
     }
 
-    /// "Series – Episode".
+    /// Series and episode joined by `separator`.
     static func baseName(series: String, episode: String) -> String {
         sanitize(series) + separator + sanitize(episode)
     }

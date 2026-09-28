@@ -2,22 +2,9 @@
 //  Brand.swift
 //  Recaptr
 //
-//  Design tokens: palette, gradients, typography, spacing, radii.
-//
-//  Two kinds of color live here:
-//
-//    Chrome (text and icons sitting on glass) does NOT use brand
-//    colors. Use the system hierarchical styles instead:
-//    `.foregroundStyle(.primary / .secondary / .tertiary)` and
-//    `.fill(.quaternary)`. Those get vibrancy on glass and follow
-//    Light / Dark, Increase Contrast, and the Liquid Glass look
-//    setting automatically. Selection and focus use the system accent
-//    (`Color.accentColor`), which follows the user's accent choice.
-//
-//    Semantic brand colors carry meaning: mode identity, meters,
-//    markers, warnings. Each one is a dynamic color with Light, Dark,
-//    and high-contrast variants so it stays legible in every
-//    appearance. Record red is the system `.red`.
+//  Design tokens. Brand colors are for meaning (modes, meters, markers,
+//  warnings). Text and icons on glass use system hierarchical styles, and
+//  selection uses the system accent.
 //
 
 import SwiftUI
@@ -35,18 +22,15 @@ extension Color {
     /// Restore blue: Window mode identity, low end of the volume fill.
     nonisolated static let restore = Color.adaptive(
         light: 0x1F7FA8, dark: 0x5EB2D6, lightHC: 0x0F6187, darkHC: 0x8FD0EC)
-    /// Warm amber for "off / warning" semantics (mute, no signal).
+    /// Amber: off or warning (mute, no signal).
     nonisolated static let warningAmber = Color.adaptive(
         light: 0xB5650F, dark: 0xE89A3F, lightHC: 0x8F4E05, darkHC: 0xFFB860)
 
-    /// Graphite letterbox behind the video preview. Stays dark in
-    /// both appearances because it frames video, not chrome.
+    /// Letterbox behind the preview. Dark in both appearances because it frames video.
     nonisolated static let recaptrBackground = Color(
         red: 0x1B / 255, green: 0x1F / 255, blue: 0x23 / 255)
 
-    /// Dynamic color that resolves per appearance, including the
-    /// Increase Contrast variants. Resolves live when the user
-    /// changes appearance, so no relaunch is needed.
+    /// Resolves per appearance, including Increase Contrast, and updates live.
     nonisolated static func adaptive(
         light: UInt32, dark: UInt32, lightHC: UInt32, darkHC: UInt32
     ) -> Color {
@@ -78,12 +62,8 @@ private extension NSColor {
 
 // MARK: - Typography
 //
-// Space Grotesk (heading) + Inter (body) + IBM Plex Mono (telemetry).
-// The .ttf files go in Recaptr/Fonts/ and auto-register via the
-// INFOPLIST_KEY_ATSApplicationFontsPath build setting. As of
-// 2026-09-26 the folder holds only its README, so every BrandFont
-// currently falls back to the system font (Font.custom does this
-// silently).
+// Fonts in Recaptr/Fonts/ register via INFOPLIST_KEY_ATSApplicationFontsPath.
+// Font.custom silently falls back to the system font when a file is missing.
 
 enum BrandFont {
     case heading(weight: Font.Weight, size: CGFloat)
@@ -104,9 +84,7 @@ enum BrandFont {
         }
     }
 
-    // PostScript-name resolvers per weight. Match the names in
-    // Font Book's "PostScript name" field if swapping in different
-    // .ttf files.
+    // PostScript names, as shown in Font Book.
 
     private static func spaceGroteskName(for w: Font.Weight) -> String {
         switch w {
@@ -136,9 +114,7 @@ enum BrandFont {
     }
 }
 
-// MARK: - Spacing rhythm
-//
-// Strict 4 / 8 / 12 / 16 / 24 / 32 pt grid.
+// MARK: - Spacing
 
 enum Spacing {
     static let xxs:  CGFloat = 4

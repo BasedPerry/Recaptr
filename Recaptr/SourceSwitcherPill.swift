@@ -2,17 +2,8 @@
 //  SourceSwitcherPill.swift
 //  Recaptr
 //
-//  Top-bar source switcher: a 3-segment mode selector (Window /
-//  Screen / Camera) paired with a dropdown listing the available
-//  sources within the active mode.
-//
-//  The mode selector is a custom segmented control. Retested on
-//  macOS 27.0 (2026-09-26): native Picker(.segmented) still renders
-//  text only (the SF Symbols are dropped) and draws its own bezel
-//  track, which would sit as a second surface inside the glass pill.
-//  The custom version has no track: plain segments, with the active
-//  one marked by a system-accent capsule that slides between
-//  segments. The accent follows the user's accent color setting.
+//  Mode segments plus a source menu. The segments are custom because
+//  Picker(.segmented) drops SF Symbols and draws its own track inside the glass.
 //
 
 import SwiftUI
@@ -40,11 +31,7 @@ enum SourceMode: String, CaseIterable, Identifiable, Hashable {
         }
     }
 
-    /// Brand color per source type, for icons (the sidebar's source
-    /// rows and the pill's source menu). macOS 27 brought color back
-    /// to sidebar icons; one color per type also tells Camera, Screen
-    /// and Window apart at a glance. Selection itself stays the system
-    /// accent.
+    /// Icon color per source type. Selection still uses the system accent.
     var tint: Color {
         switch self {
         case .window: return .restore
@@ -54,11 +41,9 @@ enum SourceMode: String, CaseIterable, Identifiable, Hashable {
     }
 }
 
-// MARK: - Mode segments (shared with the sidebar)
+// MARK: - Mode segments
 
-/// Window / Screen / Camera switcher. Used by the floating pill and,
-/// when the sidebar is open, at the top of the sidebar (the pill's
-/// expanded form), so both look and behave the same.
+/// Window / Screen / Camera switcher, shared by the pill and the sidebar.
 struct SourceModeSegments: View {
     @Binding var activeMode: SourceMode
     /// Tighter spacing for the sidebar's width.
@@ -111,8 +96,7 @@ struct SourceModeSegments: View {
 
 // MARK: - Source descriptor
 
-/// Minimal shape the switcher needs to render a source menu. The
-/// view model maps its richer `VideoSource` into this.
+/// What the source menu needs from a `VideoSource`.
 struct PickableSource: Identifiable, Hashable {
     let id: String
     let name: String
@@ -122,8 +106,7 @@ struct PickableSource: Identifiable, Hashable {
 
 struct SourceSwitcherPill: View {
     @Binding var activeMode: SourceMode
-    /// Sources of the currently-active mode. Caller filters and maps
-    /// the catalog's full source list upstream.
+    /// Already filtered to the active mode by the caller.
     var sourcesForActiveMode: [PickableSource]
     @Binding var selectedSourceID: String?
 
@@ -189,7 +172,7 @@ struct SourceSwitcherPill: View {
 
 // MARK: - Preview
 
-// Debug only: ChromePreviewStage (Glass.swift) is a debug helper.
+// ChromePreviewStage is debug-only.
 #if DEBUG
 
 #Preview("Source Switcher, Dark") {

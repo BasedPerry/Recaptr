@@ -23,11 +23,8 @@ final class RecaptrUITests: XCTestCase {
         }
     }
 
-    /// Monitor volume reports as a slider (the accessibility role
-    /// that carries increment / decrement for VoiceOver) with a
-    /// readable value. XCUITest's drag-based `adjust` cannot drive a
-    /// represented slider, so the adjustment itself is covered by the
-    /// manual VoiceOver pass.
+    /// Monitor volume is a slider with a value. XCUITest's `adjust` can't drive
+    /// a represented slider, so adjusting is checked by hand with VoiceOver.
     @MainActor
     func testMonitorVolumeIsAdjustable() throws {
         let app = launchApp()
@@ -37,8 +34,7 @@ final class RecaptrUITests: XCTestCase {
         XCTAssertNotNil(volume.value)
     }
 
-    /// Typing a series in the sidebar shows where the next recording
-    /// will be saved.
+    /// Typing a series shows the next recording's save name.
     @MainActor
     func testSeriesFieldShowsSaveName() throws {
         let app = launchApp()
@@ -68,8 +64,7 @@ final class RecaptrUITests: XCTestCase {
     @MainActor
     private func launchApp() -> XCUIApplication {
         let app = XCUIApplication()
-        // Ignore saved window state so every run starts with the
-        // capture window open.
+        // Start with the capture window open, not restored state.
         app.launchArguments += ["-ApplePersistenceIgnoreState", "YES"]
         // Testing mode keeps typed names out of the user's settings.
         app.launchArguments += ["-RecaptrUITesting", "YES", "-RecaptrKeepChromeVisible", "YES"]

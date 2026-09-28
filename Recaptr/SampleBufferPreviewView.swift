@@ -2,29 +2,16 @@
 //  SampleBufferPreviewView.swift
 //  Recaptr
 //
-//  AVSampleBufferDisplayLayer-backed preview surface. Capture
-//  services push `CMSampleBuffer`s through `enqueue(_:)`; the layer
-//  renders them at native resolution.
-//
-//  The display layer is registered as the view's *backing* layer
-//  (via `makeBackingLayer()`) rather than added as a sublayer. This
-//  guarantees AppKit sizes and positions the layer automatically as
-//  the view participates in normal layout, and avoids timing issues
-//  where a sublayer attached during `init` may not see the host
-//  view's backing CALayer ready yet on macOS 26+.
-//
-//  Frames are only handed to the display layer while the window can
-//  actually be seen. Displaying a 1440p/4K frame 60 times a second is
-//  the single biggest cost of the camera path (Core Animation
-//  registering each frame, profiling 2026-09-27), and it's wasted when
-//  the window is covered, minimized or on another Space, which is
-//  common during a long take. Recording never goes through here.
+//  Live preview backed by AVSampleBufferDisplayLayer.
 //
 
 import SwiftUI
 import AVFoundation
 import Synchronization
 
+/// Preview view. Frames are skipped while the window isn't visible,
+/// since displaying them is the costliest part of the camera path.
+/// Recording doesn't go through here.
 final class SampleBufferPreviewLayer: NSView {
 
     private let displayLayer: AVSampleBufferDisplayLayer = {
@@ -46,15 +33,12 @@ final class SampleBufferPreviewLayer: NSView {
 
     required init?(coder: NSCoder) { fatalError() }
 
-    /// Returns the AVSampleBufferDisplayLayer as the view's backing
-    /// layer. AppKit calls this when `wantsLayer == true`.
+    /// A backing layer, not a sublayer, so AppKit handles its layout.
     override func makeBackingLayer() -> CALayer {
         return displayLayer
     }
 
-    /// Push a sample buffer to the underlying renderer. Thread-safe
-    /// per Apple's documentation; capture services call this from
-    /// their preview dispatch queues, not the main thread.
+    /// Thread-safe. Called from the capture services' preview queues.
     func enqueue(_ sampleBuffer: CMSampleBuffer) {
         guard onScreen.load(ordering: .relaxed) else { return }
         displayLayer.sampleBufferRenderer.enqueue(sampleBuffer)
@@ -78,12 +62,10 @@ final class SampleBufferPreviewLayer: NSView {
     private func updateOnScreen() {
         let visible = window.map { $0.occlusionState.contains(.visible) && !$0.isMiniaturized } ?? false
         let was = onScreen.exchange(visible, ordering: .relaxed)
-        // Coming back: drop whatever frame was left showing; the next
-        // live one arrives within a frame.
+        // Becoming visible: drop the stale frame left showing.
         if visible, !was { displayLayer.sampleBufferRenderer.flush() }
     }
 
-    /// Clear pending buffers from the renderer.
     func flush() {
         displayLayer.sampleBufferRenderer.flush()
     }

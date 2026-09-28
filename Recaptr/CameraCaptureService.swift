@@ -2,25 +2,14 @@
 //  CameraCaptureService.swift
 //  Recaptr
 //
-//  Video-only capture for an `AVCaptureDevice` (camera or capture
-//  card). Builds an `AVCaptureSession` with two parallel video
-//  outputs:
-//    - preview output → SampleBufferPreviewLayer (drops late frames)
-//    - record output  → callback for the recorder (no drops)
-//
-//  Audio is owned by `AudioMixer`, not this service.
-//
-//  Two non-obvious bits of capture-card plumbing are documented in
-//  `tryLockFormat`: the device must remain locked for the whole
-//  session lifetime (OBS pattern), and on macOS Tahoe, frame-rate
-//  setters validate `CMTime` by representation rather than numerical
-//  equivalence — pass the range's reported `minFrameDuration` through
-//  unchanged.
+//  Video capture from a camera or capture card. One output feeds the
+//  preview (drops late frames), the other the recorder (no drops).
+//  Audio is handled by AudioMixer.
 //
 
 import Foundation
 import AVFoundation
-import QuartzCore  // CACurrentMediaTime
+import QuartzCore
 
 /// Capture resolution preference for camera and capture-card sources.
 enum CaptureResolution: String, CaseIterable, Identifiable {
@@ -60,42 +49,30 @@ final class CameraCaptureService: NSObject, @unchecked Sendable, AVCaptureVideoD
     private let previewOutput = AVCaptureVideoDataOutput()
     private let recordOutput  = AVCaptureVideoDataOutput()
 
-    /// Resolution preference. Set before `start`. `.auto` takes the
-    /// highest resolution the device offers at 60 fps.
+    /// Set before `start`. `.auto` takes the highest resolution at 60 fps.
     var preferredResolution: CaptureResolution = .auto
 
-    /// Opt-in low-light noise reduction (macOS 27). Set before
-    /// `start`. Applied to the record connection only: Apple allows
-    /// the feature on one output at a time, and the recording is what
-    /// matters. Off by default because it changes the image.
+    /// Set before `start`. Applies to the record output only, since it's
+    /// allowed on one output at a time. Off by default: it changes the image.
     var lowLightNoiseReduction = false
-    /// Whether the active camera format supports it. Valid after
-    /// `start` returns.
+    /// Valid after `start` returns.
     private(set) var lowLightNoiseReductionSupported = false
 
     private weak var previewSinkLayer: SampleBufferPreviewLayer?
     private var activeDimensions: CMVideoDimensions = .init(width: 0, height: 0)
 
-    /// Live FPS counter on the preview path. Tracked on `previewQueue`
-    /// only (the delegate dispatches the preview output there
-    /// serially), reset every second. Used to identify where a
-    /// suspected frame-rate drop originates — the source device, the
-    /// capture session, or downstream of the delegate.
+    /// Preview-path FPS counter. previewQueue only.
     private var fpsCountFrames: Int = 0
     private var fpsLastReport: CFTimeInterval = 0
 
-    /// The configured device, kept here so the configuration lock
-    /// taken in `tryLockFormat` can be held for the entire session
-    /// lifetime (matching OBS's `OBSAVCapture.m` pattern). The device
-    /// only honors configured frame durations while it stays locked;
-    /// unlocking causes a silent revert to default behavior (typically
-    /// 30 fps for USB capture cards). Released in `stop()`.
+    /// Held locked for the whole session. The device only keeps the
+    /// configured frame rate while locked; unlocking silently reverts it
+    /// (often to 30 fps on capture cards). Released in `stop()`.
     private var lockedDevice: AVCaptureDevice?
 
     var onRecordBuffer: ((CMSampleBuffer) -> Void)?
 
-    /// Configure and start the session for video only. Audio is
-    /// handled by `AudioMixer` on a separate path.
+    /// Starts a video-only session and returns the capture size.
     func start(cameraUniqueID: String,
                previewSink: SampleBufferPreviewLayer) async throws -> CMVideoDimensions {
         self.previewSinkLayer = previewSink
@@ -117,9 +94,7 @@ final class CameraCaptureService: NSObject, @unchecked Sendable, AVCaptureVideoD
             if self.session.isRunning {
                 self.session.stopRunning()
             }
-            // Release the configuration lock held since `tryLockFormat`.
-            // Must happen AFTER `stopRunning()` so the session has a
-            // chance to flush in-flight frames.
+            // Unlock after stopRunning() so in-flight frames can flush.
             if let dev = self.lockedDevice {
                 dev.unlockForConfiguration()
                 self.lockedDevice = nil
@@ -134,35 +109,22 @@ final class CameraCaptureService: NSObject, @unchecked Sendable, AVCaptureVideoD
         session.inputs.forEach  { session.removeInput($0) }
         session.outputs.forEach { session.removeOutput($0) }
 
-        // ── Video device + format lock
         guard let videoDevice = AVCaptureDevice(uniqueID: cameraUniqueID) else {
             throw CaptureError.configurationFailed("Camera not found: \(cameraUniqueID)")
         }
 
-        // On macOS, set `activeFormat` AFTER `addInput`. The session's
-        // `sessionPreset` (default `.high`) is applied at addInput
-        // time and overrides any `activeFormat` set on the device
-        // pre-input, silently capping the framerate. iOS's
-        // `.inputPriority` preset, which opts out of this, isn't
-        // available on macOS — so the workaround is to set the
-        // format last and let Apple's documented behavior preserve it:
-        //
-        //   "If you change the active format on an AVCaptureDevice
-        //    that's providing input to a session, the session will
-        //    continue to use the input's active format."
+        // Set the format after addInput. The session preset is applied
+        // at addInput and would override an earlier format, capping the
+        // frame rate. macOS has no `.inputPriority` preset.
         let videoInput = try AVCaptureDeviceInput(device: videoDevice)
         guard session.canAddInput(videoInput) else {
             throw CaptureError.configurationFailed("Cannot add video input")
         }
         session.addInput(videoInput)
-        // Lock the format AFTER the input is in place. `tryLockFormat`
-        // acquires the device's configuration lock and keeps it held
-        // for the session's lifetime (released in `stop()`). The
-        // device only honors frame-duration settings while locked.
         tryLockFormat(for: videoDevice)
         activeDimensions = CMVideoFormatDescriptionGetDimensions(videoDevice.activeFormat.formatDescription)
 
-        // ── Output A — preview
+        // Preview output
         previewOutput.alwaysDiscardsLateVideoFrames = true
         previewOutput.videoSettings = [
             kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
@@ -173,7 +135,7 @@ final class CameraCaptureService: NSObject, @unchecked Sendable, AVCaptureVideoD
         }
         session.addOutput(previewOutput)
 
-        // ── Output B — video record
+        // Record output
         recordOutput.alwaysDiscardsLateVideoFrames = false
         recordOutput.videoSettings = [
             kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
@@ -187,7 +149,6 @@ final class CameraCaptureService: NSObject, @unchecked Sendable, AVCaptureVideoD
         if let conn = recordOutput.connection(with: .video) {
             lowLightNoiseReductionSupported = conn.isLowLightVideoNoiseReductionSupported
             if lowLightNoiseReductionSupported {
-                // Explicit control: never let the system decide.
                 conn.automaticallyEnablesLowLightVideoNoiseReduction = false
                 conn.isLowLightVideoNoiseReductionEnabled = lowLightNoiseReduction
             }
@@ -196,11 +157,7 @@ final class CameraCaptureService: NSObject, @unchecked Sendable, AVCaptureVideoD
     }
 
     private func tryLockFormat(for device: AVCaptureDevice) {
-        // Enumerate every format the device advertises. Surfacing the
-        // full list makes it visible whether higher-resolution formats
-        // (e.g. 2160p) are reachable through AVFoundation or whether
-        // the device only exposes them through vendor-specific CMIO
-        // properties.
+        // Log every format, to see what the device exposes.
         let allFormats = device.formats
         print("CameraCaptureService: \(device.localizedName) — \(allFormats.count) total format(s) available:")
         for (i, fmt) in allFormats.enumerated() {
@@ -213,22 +170,8 @@ final class CameraCaptureService: NSObject, @unchecked Sendable, AVCaptureVideoD
             print("  [\(i)] \(d.width)×\(d.height) subType=\(subTypeStr) ranges=\(ranges)")
         }
 
-        // Pick a format supporting the target rate, preferring USB-
-        // bandwidth-friendly resolutions in order. Raw NV12 at 4K60
-        // needs ~6 Gbps, which exceeds USB 3.0's ~5 Gbps usable
-        // bandwidth — devices on USB 3.0 will silently throttle to
-        // ~30–40 fps at 4K. 1080p60 NV12 is ~1.5 Gbps and fits
-        // comfortably on any USB 3.0 capture card.
-        //
-        // The range filter is epsilon-aware. Two range styles exist
-        // in the wild:
-        //   - Discrete single-point ranges where rates are reported
-        //     at CMTime-rational precision (e.g. "60 fps" = 60.000240),
-        //     so a strict `<= literal` comparison rejects them.
-        //   - Continuous wide ranges (e.g. 1.0–60.0 on a Continuity
-        //     Camera).
-        // ε = 0.5 handles the rational-precision case and also covers
-        // NTSC 59.94 if we ever target 60.
+        // Rates are often reported slightly off (60 fps as 60.000240),
+        // so match with a tolerance. 0.5 also covers 59.94.
         let targetRate: Double = 60.0
         let epsilon: Double    = 0.5
         let supportsTarget: (AVFrameRateRange) -> Bool = { range in
@@ -236,14 +179,10 @@ final class CameraCaptureService: NSObject, @unchecked Sendable, AVCaptureVideoD
             range.maxFrameRate >= targetRate - epsilon
         }
 
-        // Resolution preferences in priority order, from the user's
-        // Capture resolution setting. The old fixed order put 1080p
-        // first because 4K60 throttled to ~37 fps on a USB 3.0 port
-        // (May 2026); on a 10 Gb/s link the Elgato 4K X sustains it,
-        // so the choice is the user's, and Auto means highest.
+        // 4K60 needs about 6 Gbps uncompressed, more than USB 3.0 carries,
+        // so it only holds 60 fps on a 10 Gb/s link. Hence the setting.
         let preferredResolutions = preferredResolution.searchOrder
 
-        // Pick the first preferred resolution whose format supports the target rate.
         var picked: AVCaptureDevice.Format?
         for (w, h) in preferredResolutions {
             let matches = allFormats.filter {
@@ -251,11 +190,8 @@ final class CameraCaptureService: NSObject, @unchecked Sendable, AVCaptureVideoD
                 return d.width == w && d.height == h
                     && $0.videoSupportedFrameRateRanges.contains(where: supportsTarget)
             }
-            // Some devices list the same size twice. The Elgato 4K X
-            // offers two 3840×2160 formats: one tops out at 60 fps and
-            // actually delivers ~38 fps; the other also lists 120/144
-            // and delivers a clean 60 (tested 2026-09-26 on a 10 Gb/s
-            // link). Prefer the variant with the highest top rate.
+            // Some capture cards list a size twice. The one with the
+            // higher top rate is the one that actually delivers 60 fps.
             let fastest = matches.max { a, b in
                 (a.videoSupportedFrameRateRanges.map(\.maxFrameRate).max() ?? 0)
                     < (b.videoSupportedFrameRateRanges.map(\.maxFrameRate).max() ?? 0)
@@ -266,7 +202,7 @@ final class CameraCaptureService: NSObject, @unchecked Sendable, AVCaptureVideoD
             }
         }
 
-        // Last-resort fallback: any format supporting target rate.
+        // Fallback: any format at the target rate.
         if picked == nil {
             picked = allFormats.first { f in
                 f.videoSupportedFrameRateRanges.contains(where: supportsTarget)
@@ -284,30 +220,9 @@ final class CameraCaptureService: NSObject, @unchecked Sendable, AVCaptureVideoD
             .joined(separator: ", ")
         print("CameraCaptureService: picked format, supported ranges=\(pickedRanges)")
 
-        // Use the range's reported `minFrameDuration` as-is — do not
-        // synthesize a fresh `CMTime(value: 1, timescale: 60)`.
-        //
-        // Capture cards typically report 60 fps as a single-point
-        // range (60.0–60.0) with the frame duration encoded as a
-        // device-specific CMTime such as `CMTime(value: 1_000_000,
-        // timescale: 60_000_240)` — mathematically ~1/60.000240, not
-        // exactly 1/60. On macOS Tahoe, `AVCaptureDevice` validates
-        // the supplied CMTime by representation against its discrete
-        // supported durations: `CMTime(value: 1, timescale: 60)`
-        // throws `NSInvalidArgumentException` because it doesn't
-        // match any of the device's reported durations exactly, even
-        // though the rational value is "the same." Pre-Tahoe
-        // AVFoundation silently clamped invalid durations to the
-        // nearest supported one (typically 30 fps), which produced
-        // hard-to-diagnose "records at 30 fps even though we asked
-        // for 60" symptoms.
-        //
-        // Find a range containing the target rate, pull its
-        // `minFrameDuration` (the shortest duration = the fastest
-        // rate the range supports), and pass that CMTime to the
-        // device unchanged. Works for both single-point ranges
-        // (60–60 → minDuration = 1/60) and continuous ranges
-        // (1–60 → minDuration = 1/60 also).
+        // Use the range's own minFrameDuration, not CMTime(1, 60). The
+        // device matches durations by exact CMTime representation and
+        // throws NSInvalidArgumentException on anything else.
         guard let range60 = fmt.videoSupportedFrameRateRanges.first(where: supportsTarget) else {
             print("CameraCaptureService: format claimed \(Int(targetRate))p support but no matching range — bailing")
             return
@@ -320,28 +235,16 @@ final class CameraCaptureService: NSObject, @unchecked Sendable, AVCaptureVideoD
             range60.minFrameDuration.seconds
         ))
 
-        // Lock the device and HOLD the lock for the session's
-        // lifetime — do not defer the unlock. This matches the
-        // pattern in OBS's `OBSAVCapture.m`: `lockForConfiguration`,
-        // set `activeFormat` and frame durations, `commitConfiguration`,
-        // and don't unlock until the device input is being removed.
-        // The device only honors configured frame durations while it
-        // remains locked; unlocking causes a silent revert to default
-        // behavior. Stored in `lockedDevice` so `stop()` can release
-        // it.
+        // Don't defer the unlock. The lock is held until `stop()`
+        // (see `lockedDevice`).
         do {
             try device.lockForConfiguration()
             lockedDevice = device
             device.activeFormat = fmt
-            // Pass the range's CMTime as-is — the device validates by
-            // representation, not numerical equivalence (see comment
-            // above).
             device.activeVideoMinFrameDuration = range60.minFrameDuration
             device.activeVideoMaxFrameDuration = range60.minFrameDuration
 
-            // Verify the lock took. If AVCaptureSession overrode the
-            // request for any reason, surface it instead of silently
-            // running at the wrong rate.
+            // Log what was applied, in case the session overrode it.
             let appliedMin = device.activeVideoMinFrameDuration
             let appliedMax = device.activeVideoMaxFrameDuration
             let effectiveFps = appliedMin.seconds > 0 ? 1.0 / appliedMin.seconds : 0
@@ -354,9 +257,7 @@ final class CameraCaptureService: NSObject, @unchecked Sendable, AVCaptureVideoD
         }
     }
 
-    /// Convert a FourCC code (e.g. kCVPixelFormatType_422YpCbCr10) to a
-    /// 4-char readable string. Helpful for spotting 60p vs 30p formats
-    /// — some devices encode the rate intent in the codec subtype.
+    /// FourCC code as a readable 4-character string, for logging.
     private static func fourCCString(_ code: FourCharCode) -> String {
         let bytes: [UInt8] = [
             UInt8((code >> 24) & 0xff),
@@ -378,13 +279,8 @@ final class CameraCaptureService: NSObject, @unchecked Sendable, AVCaptureVideoD
         if output === previewOutput {
             previewSinkLayer?.enqueue(sampleBuffer)
 
-            // Live FPS counter on the preview path. Counts frames
-            // delivered by `AVCaptureSession` and prints once per
-            // second. A console reading of 30 while targeting 60 means
-            // the source is delivering 30; a reading of 60 with a
-            // 30 fps file means the bottleneck is downstream
-            // (encoder / muxer). The delegate queue is serial, so the
-            // counters don't need atomics.
+            // Logs the delivered rate once a second, to tell a slow
+            // source from a slow encoder. The queue is serial.
             fpsCountFrames += 1
             let now = CACurrentMediaTime()
             if fpsLastReport == 0 {
@@ -403,21 +299,14 @@ final class CameraCaptureService: NSObject, @unchecked Sendable, AVCaptureVideoD
         }
     }
 
-    /// Format description for relabeled frames, reused while frames
-    /// keep the same shape. Record queue only.
+    /// Reused while frames keep the same shape. recordQueue only.
     private var rec709Description: CMVideoFormatDescription?
 
-    /// Relabel a frame as standard HD (Rec. 709). Capture cards like
-    /// the Elgato 4K X tag HDMI video with the SMPTE 240M transfer
-    /// curve, which editors read as a different gamma. The pixels are
-    /// Rec. 709, so only the label changes.
-    ///
-    /// The writer takes the file's color tags from each sample
-    /// buffer's format description (fixed when the camera made it),
-    /// so the frame is rewrapped with a description built from the
-    /// relabeled pixel buffer. Asking the writer to convert to 709
-    /// instead cost up to 20% of frames at 1080p60 (tested
-    /// 2026-09-26). Falls back to the original frame on any failure.
+    /// Tags the frame as Rec. 709. Some capture cards tag HDMI video as
+    /// SMPTE 240M, which editors read as a different gamma. The writer
+    /// reads color tags from the format description, so the buffer is
+    /// rewrapped. Having the writer convert instead drops frames.
+    /// Returns the original frame on failure.
     private func relabeledAsRec709(_ sampleBuffer: CMSampleBuffer) -> CMSampleBuffer {
         guard let pb = CMSampleBufferGetImageBuffer(sampleBuffer) else { return sampleBuffer }
         CVBufferSetAttachment(pb, kCVImageBufferColorPrimariesKey, kCVImageBufferColorPrimaries_ITU_R_709_2, .shouldPropagate)

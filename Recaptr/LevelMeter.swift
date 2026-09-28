@@ -2,19 +2,11 @@
 //  LevelMeter.swift
 //  Recaptr
 //
-//  Live audio level meter, drawn with Core Animation layers that a
-//  30 Hz timer moves directly. No SwiftUI state changes per tick, so
-//  no view rebuilds and no layout: each tick is two layer frames.
+//  Audio level meter drawn with Core Animation layers moved by a 30 Hz
+//  timer. No SwiftUI state changes per tick, so no view rebuilds or layout.
+//  Don't drive it from @State or a TimelineView; both re-lay-out the window.
 //
-//  Why: profiling on 2026-09-27 found meters drove most of the app's
-//  main-thread work. First a 30 Hz timer updating @State rebuilt the
-//  whole audio card and re-ran window layout 30 times a second; a
-//  Canvas-in-TimelineView version still made the sidebar's Form (a
-//  table underneath) re-lay-out its rows every frame. Layers avoid
-//  both.
-//
-//  RMS fills through a green→amber→red gradient pinned to the whole
-//  track, so red only shows near 0 dBFS; a thin tick marks the peak.
+//  The gradient spans the whole track, so red only shows near 0 dBFS.
 //
 
 import AppKit
@@ -22,7 +14,7 @@ import SwiftUI
 
 struct LevelMeter: NSViewRepresentable {
     let levels: () -> (rms: Float, peak: Float)?
-    /// Pause updates (chrome hidden).
+    /// False pauses updates, e.g. while the chrome is hidden.
     var active = true
     var vertical = true
     /// Track thickness (width when vertical, height when horizontal).
@@ -137,7 +129,7 @@ final class MeterView: NSView {
             let timer = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
                 MainActor.assumeIsolated { self?.tick() }
             }
-            // A few ms of slack lets macOS batch wake-ups (energy).
+            // A few ms of slack lets macOS batch wake-ups.
             timer.tolerance = 0.005
             RunLoop.main.add(timer, forMode: .common)
             self.timer = timer
@@ -148,7 +140,6 @@ final class MeterView: NSView {
     }
 
     private func tick() {
-        // Nothing to draw into while the window is fully hidden.
         if let window, !window.occlusionState.contains(.visible) { return }
         apply(levels?())
     }

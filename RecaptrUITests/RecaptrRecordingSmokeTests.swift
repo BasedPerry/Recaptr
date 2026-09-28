@@ -2,14 +2,8 @@
 //  RecaptrRecordingSmokeTests.swift
 //  RecaptrUITests
 //
-//  End-to-end record tests: pick a source, record a few seconds,
-//  stop, and check what actually landed in the file using the app's
-//  own file probe (exposed to accessibility under -RecaptrUITesting).
-//  Files go to the sandbox container, never the user's footage folder.
-//
-//  These need real hardware and permissions: Screen Recording for the
-//  screen test, a connected camera or capture card for the camera
-//  test. A test skips rather than fails when its source is missing.
+//  End-to-end recording tests, checked with the app's file probe.
+//  They need real sources and permissions, and skip when a source is missing.
 //
 
 import XCTest
@@ -22,15 +16,11 @@ final class RecaptrRecordingSmokeTests: XCTestCase {
 
     @MainActor
     func testScreenRecording() throws {
-        // 1440p so the test checks the pipeline, not the Mac's limits:
-        // a 5K display downscaled to 4K60 under the UI-test harness's
-        // own load drops ~2% of frames (57.7 fps), while the same 4K
-        // capture holds 60.00 over a 10-minute take in normal use.
+        // 1440p: 4K60 drops a few frames under the test harness's own load.
         let probe = try record(modeKey: "2", seconds: 6, extraArgs: ["-RecaptrScreenResolution", "qhd"])
         XCTAssertEqual(probe.videoTracks, 1)
         XCTAssertGreaterThan(probe.duration, 4)
-        // Constant frame rate even on a still desktop (the grid fills
-        // frames SCStream doesn't send).
+        // Constant frame rate even on a still desktop.
         XCTAssertGreaterThanOrEqual(probe.fps, 59, "Screen capture isn't a steady 60: \(probe.raw)")
         XCTAssertTrue(probe.raw.contains("transfer=709"), "Screen capture should be Rec. 709: \(probe.raw)")
         XCTAssertTrue(probe.hasAudio, "Screen capture should carry the system audio track")
@@ -44,9 +34,7 @@ final class RecaptrRecordingSmokeTests: XCTestCase {
         XCTAssertTrue(probe.raw.contains("transfer=709"), "Window capture should be Rec. 709: \(probe.raw)")
     }
 
-    /// Screen capture without a mic has nothing to monitor (the system
-    /// audio already plays through the speakers), so the monitor
-    /// button is disabled.
+    /// Screen capture without a mic has nothing to monitor.
     @MainActor
     func testScreenMonitorNeedsAMic() throws {
         let app = XCUIApplication()
@@ -63,8 +51,7 @@ final class RecaptrRecordingSmokeTests: XCTestCase {
         XCTAssertTrue(waitUntil(timeout: 5, { !monitor.isEnabled }), "Monitor should be disabled for screen without a mic")
     }
 
-    /// Settings > Last recording > Rename renames the take and its
-    /// Final Cut file.
+    /// Rename in Settings renames the take and its Final Cut file.
     @MainActor
     func testRenameLastTake() throws {
         let probe = try record(modeKey: "3", seconds: 5, markers: 1,
@@ -74,7 +61,7 @@ final class RecaptrRecordingSmokeTests: XCTestCase {
         XCTAssertTrue(probe.status.contains("UITest Series – Before"), probe.status)
         let app = XCUIApplication()
         app.typeKey(",", modifierFlags: .command)
-        // Settings reopens on the last tab used; Rename is on Recording.
+        // Settings reopens on the last tab used.
         let recordingTab = app.toolbars.buttons["Recording"].firstMatch
         if recordingTab.waitForExistence(timeout: 5) { recordingTab.click() }
         let rename = app.buttons["renameTakeButton"]
@@ -91,8 +78,7 @@ final class RecaptrRecordingSmokeTests: XCTestCase {
                       "Rename didn't happen: \(text(of: status))")
     }
 
-    /// With a series and episode set, the take is filed as
-    /// "Series/Series – Episode.mov" and its markers go in the .fcpxml.
+    /// A take with a series and episode is filed in the series folder.
     @MainActor
     func testSeriesRecordingIsFiled() throws {
         let probe = try record(modeKey: "3", seconds: 6, markers: 1,
@@ -109,22 +95,19 @@ final class RecaptrRecordingSmokeTests: XCTestCase {
         let probe = try record(modeKey: "3", seconds: 6)
         XCTAssertEqual(probe.videoTracks, 1)
         XCTAssertGreaterThan(probe.duration, 4)
-        // Capture cards and webcams run 30 or 60; anything lower means
-        // the format lock regressed.
+        // Below 30 means the format lock regressed.
         XCTAssertGreaterThanOrEqual(probe.fps, 29)
         XCTAssertEqual(probe.audioTracks, 1, "Single source should write one audio track")
         XCTAssertEqual(probe.markers, 0, "No markers dropped")
         XCTAssertTrue(probe.raw.contains("transfer=709"), "Video should be tagged Rec. 709: \(probe.raw)")
-        // An audio track full of zero-fill is a silent recording. The
-        // channel must actually have pushed captured audio.
+        // A track of zero-fill is silent, so check audio was actually pushed.
         if probe.status.contains("push=") {
             XCTAssertGreaterThan(number(in: probe.status, after: "push=", until: " ") ?? 0, 0,
                                  "Audio channel captured nothing: \(probe.status)")
         }
     }
 
-    /// Two clip markers land in the Final Cut .fcpxml without costing
-    /// frames.
+    /// Two markers land in the .fcpxml without costing frames.
     @MainActor
     func testCameraRecordingWithMarkers() throws {
         let probe = try record(modeKey: "3", seconds: 6, markers: 2)
@@ -133,8 +116,7 @@ final class RecaptrRecordingSmokeTests: XCTestCase {
         XCTAssertTrue(probe.raw.contains(".fcpxml"), "Expected a Final Cut marker file: \(probe.raw)")
     }
 
-    /// Each encoding preset records a valid 60 fps file in the right
-    /// codec.
+    /// Each encoding preset records 60 fps in the right codec.
     @MainActor
     func testCameraRecordingPresets() throws {
         for (preset, codec) in [("high", "hevc"), ("compatible", "h264")] {
@@ -146,17 +128,14 @@ final class RecaptrRecordingSmokeTests: XCTestCase {
         }
     }
 
-    /// The sidebar's mic picker really changes the recorded audio:
-    /// open the sidebar while previewing, pick a mic, record, and the
-    /// mic channel must capture and get its own track.
+    /// A mic picked in the sidebar during preview gets recorded on its own track.
     @MainActor
     func testMicChosenInSidebarIsRecorded() throws {
         let probe = try record(modeKey: "3", seconds: 6) { app in
             Thread.sleep(forTimeInterval: 2)
             let toggle = app.buttons["sidebarToggle"]
             toggle.click()
-            // Outside a Form the picker may not report as a pop-up
-            // button, so match the identifier on any element type.
+            // Outside a Form the picker may not be a pop-up button.
             let picker = app.descendants(matching: .any)["micDevicePicker"].firstMatch
             XCTAssertTrue(picker.waitForExistence(timeout: 5))
             XCTAssertTrue(picker.isEnabled, "Mic picker is disabled during preview")
@@ -173,16 +152,13 @@ final class RecaptrRecordingSmokeTests: XCTestCase {
         assertSourceTracks(probe)
     }
 
-    /// Audio hardware change mid-recording (macOS stops the capture
-    /// engine and posts a configuration change, as when the output
-    /// switches from AirPods to speakers). Capture must recover.
+    /// Capture recovers when macOS stops the engine and posts a configuration change.
     @MainActor
     func testAudioRecoversFromHardwareChange() throws {
         try assertAudioRecovers(mode: "notify")
     }
 
-    /// Engine stops with no notification at all: the runtime
-    /// watchdog must notice the stall and recover.
+    /// The watchdog recovers when the engine stops with no notification.
     @MainActor
     func testAudioRecoversFromSilentStall() throws {
         try assertAudioRecovers(mode: "silent")
@@ -194,17 +170,14 @@ final class RecaptrRecordingSmokeTests: XCTestCase {
                                extraArgs: ["-RecaptrUITestSimulateAudioReset", mode])
         let part = probe.status.components(separatedBy: " · ").first { $0.hasPrefix("Audio:") } ?? ""
         XCTAssertTrue(part.contains("recovered="), "No recovery happened: \(part)")
-        // Captured audio must keep pace with the mixer after recovery:
-        // a dead channel would stop pushing at the 6 s mark.
+        // A dead channel would stop pushing at the 6 s mark.
         let pushed = number(in: part, after: "push=", until: " ") ?? 0
         let pulled = number(in: part, after: "pull=", until: " ") ?? 1
         XCTAssertGreaterThan(pushed / pulled, 0.85, "Audio stopped after the reset: \(part)")
     }
 
-    /// Capture card plus a second input on the mic channel. Uses the
-    /// Jump Desktop virtual microphone so the test runs without a
-    /// physical second mic; it delivers silence, which still proves
-    /// both channels capture and mix.
+    /// Camera plus mic. The Jump Desktop virtual mic delivers silence,
+    /// which is enough to prove both channels capture.
     @MainActor
     func testCameraRecordingWithMic() throws {
         let probe = try record(modeKey: "3", seconds: 6,
@@ -214,8 +187,7 @@ final class RecaptrRecordingSmokeTests: XCTestCase {
         assertSourceTracks(probe)
     }
 
-    /// Narration over a screen capture: SCStream system audio and the
-    /// mic are mixed into the file.
+    /// Screen capture with system audio and a mic.
     @MainActor
     func testScreenRecordingWithMic() throws {
         let probe = try record(modeKey: "2", seconds: 6,
@@ -226,8 +198,7 @@ final class RecaptrRecordingSmokeTests: XCTestCase {
         assertSourceTracks(probe)
     }
 
-    /// Two sources: one enabled track per source and no separate mix,
-    /// so Final Cut shows each as a component and players sum them.
+    /// One enabled track per source and no mix track; players sum them.
     private func assertSourceTracks(_ probe: Probe) {
         XCTAssertEqual(probe.audioTracks, 2, "Expected one track per source: \(probe.raw)")
         XCTAssertEqual(probe.enabledAudioTracks, 2, "Every source track should be enabled: \(probe.raw)")
@@ -247,9 +218,7 @@ final class RecaptrRecordingSmokeTests: XCTestCase {
         }
     }
 
-    /// Instant replay: with the option on, previewing a screen source
-    /// for a while and pressing Shift-Cmd-R saves a clip of the last
-    /// few seconds, without recording.
+    /// Shift-Cmd-R during preview saves the last few seconds.
     @MainActor
     func testScreenInstantReplay() throws {
         let app = XCUIApplication()
@@ -299,17 +268,15 @@ final class RecaptrRecordingSmokeTests: XCTestCase {
                         markers: Int = 0, extraArgs: [String] = [], waitForFiling: Bool = false,
                         beforeRecording: ((XCUIApplication) throws -> Void)? = nil) throws -> Probe {
         let app = XCUIApplication()
-        // Ignore saved window state so every run starts with the
-        // capture window open.
+        // Start with the capture window open, not restored state.
         app.launchArguments += ["-ApplePersistenceIgnoreState", "YES"]
         app.launchArguments += ["-RecaptrUITesting", "YES",
                                 "-RecaptrKeepChromeVisible", "YES"] + extraArgs
-        // Experiments: TEST_RUNNER_RECAPTR_EXTRA_ARGS="-Key value ..."
-        // on the xcodebuild command line adds launch arguments.
+        // TEST_RUNNER_RECAPTR_EXTRA_ARGS on the xcodebuild line adds launch arguments.
         if let extra = ProcessInfo.processInfo.environment["RECAPTR_EXTRA_ARGS"] {
             app.launchArguments += extra.split(separator: " ").map(String.init)
         }
-        // Deterministic encoding: don't inherit the user's saved choice.
+        // Don't inherit the user's saved quality.
         if !app.launchArguments.contains("-RecaptrVideoQuality") {
             app.launchArguments += ["-RecaptrVideoQuality", "standard"]
         }
@@ -335,7 +302,7 @@ final class RecaptrRecordingSmokeTests: XCTestCase {
         }
 
         window.typeKey("r", modifierFlags: .command)
-        // Spread any markers evenly through the take (Cmd+B).
+        // Spread markers evenly through the take.
         let slice = seconds / Double(markers + 1)
         for _ in 0..<markers {
             Thread.sleep(forTimeInterval: slice)
@@ -349,8 +316,7 @@ final class RecaptrRecordingSmokeTests: XCTestCase {
         XCTAssertTrue(probeText.waitForExistence(timeout: 5))
         let gotProbe = waitUntil(timeout: 20, { text(of: probeText).hasPrefix("Probe →") })
         if markers > 0 || waitForFiling {
-            // The Final Cut file is noted after the probe, and after
-            // marker naming (Apple Intelligence can take a while).
+            // The .fcpxml appears after marker naming, which can be slow.
             _ = waitUntil(timeout: 60, { text(of: probeText).contains(".fcpxml") })
         }
         let status = XCTAttachment(string: text(of: statusText))
@@ -378,8 +344,7 @@ final class RecaptrRecordingSmokeTests: XCTestCase {
         )
     }
 
-    /// SwiftUI Text on macOS exposes its string as the element value;
-    /// fall back to the label.
+    /// SwiftUI Text on macOS puts its string in the value, not the label.
     private func text(of element: XCUIElement) -> String {
         if let v = element.value as? String, !v.isEmpty { return v }
         return element.label

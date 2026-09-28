@@ -2,18 +2,8 @@
 //  MarkerNamer.swift
 //  Recaptr
 //
-//  Names clip markers, and titles the episode, with Apple Intelligence
-//  once a recording has stopped. For each marker the on-device model
-//  sees the frame at that moment and what was said on the mic from
-//  20 s before to 3 s after, and returns a short label ("Fortuna Phase
-//  Two, Barely"). The labels then give the episode a title when the
-//  user left it blank.
-//
-//  Everything runs on the Mac: Foundation Models' on-device model
-//  (image input is new in macOS 27) and SpeechAnalyzer for the
-//  transcript. It runs after the take, never during it, so it can't
-//  compete with capture. Without Apple Intelligence it does nothing
-//  and markers keep their numbers.
+//  Names markers and titles the episode with the on-device model.
+//  Runs after the take, never during capture.
 //
 
 import AVFoundation
@@ -72,9 +62,7 @@ nonisolated enum MarkerNamer {
             #endif
             let used = labels.compactMap { $0 }
             var name = await label(frames: frames, said: said, series: series, alreadyUsed: used)
-            // The small model often ignores "don't repeat" (two markers
-            // both came back "Remember Something"), so check here: one
-            // retry with more variety, then number it.
+            // The model often ignores "don't repeat". Retry once, then number it.
             if let first = name, used.contains(where: { isNearDuplicate($0, first) }) {
                 name = await label(frames: frames, said: said, series: series, alreadyUsed: used, insist: true)
                 if let retry = name, used.contains(where: { isNearDuplicate($0, retry) }) {
@@ -108,8 +96,6 @@ nonisolated enum MarkerNamer {
         var context = ""
         if let series { context += "Series: \(series)\n" }
         if let said, !said.isEmpty { context += "Heard on the commentary mic just before the marker: \"\(said)\"\n" }
-        // Two presses on one scene came back as "Support Level Failure"
-        // and "Support Level Failed" (2026-09-27 take).
         if !alreadyUsed.isEmpty {
             context += "Names already used in this recording: \(alreadyUsed.joined(separator: "; ")). "
                 + "Don't reuse them; if this is the same scene, name what changed.\n"
@@ -142,8 +128,7 @@ nonisolated enum MarkerNamer {
         }
     }
 
-    /// Same name or nearly ("Support Level Failure" vs "Support Level
-    /// Failed"): most words share their first four letters.
+    /// True when most words share their first four letters ("Failure" vs "Failed").
     static func isNearDuplicate(_ a: String, _ b: String) -> Bool {
         func stems(_ s: String) -> Set<String> {
             Set(s.lowercased().split { !$0.isLetter && !$0.isNumber }.map { String($0.prefix(4)) })
@@ -157,8 +142,7 @@ nonisolated enum MarkerNamer {
     static func clean(_ text: String, maxWords: Int) -> String? {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines.union(CharacterSet(charactersIn: "\"'.!")))
         let words = trimmed.split(separator: " ").prefix(maxWords)
-        // Title case (brand voice), leaving words that already have
-        // capitals ("HP", "iPhone") as they are.
+        // Title case, leaving words that already have capitals ("HP", "iPhone").
         let small: Set<String> = ["a", "an", "and", "at", "for", "in", "of", "on", "or", "the", "to", "vs"]
         let result = words.enumerated().map { index, word -> String in
             let w = String(word)
@@ -171,13 +155,9 @@ nonisolated enum MarkerNamer {
 
     // MARK: - Inputs
 
-    /// Up to two frames from around the marker (1.5 s before, at, and
-    /// 1.5 s after), leaving out flat ones (black, a loading or blank
-    /// screen) and keeping the two with the most detail, in time
-    /// order. A single frame at the press named two 2026-09-27 markers
-    /// "Black Screen" and "Empty Screen" because the press landed on a
-    /// transition. 960 px each keeps two images within the model's
-    /// context.
+    /// The two most detailed of three frames around the marker, in time order.
+    /// Flat frames (black, loading screens) are skipped. 960 px keeps two
+    /// images within the model's context.
     private static func informativeFrames(_ asset: AVURLAsset, around seconds: Double) async -> [CGImage] {
         let generator = AVAssetImageGenerator(asset: asset)
         generator.maximumSize = CGSize(width: 960, height: 960)
@@ -192,8 +172,7 @@ nonisolated enum MarkerNamer {
         print("MarkerNamer: at \(Int(seconds)) s frame detail " + all.map { String(format: "%.3f", $0.detail) }.joined(separator: " "))
         #endif
         let detailed = all.filter { $0.detail >= minimumDetail }
-        // All flat: a dark, low-contrast scene rather than a blank one
-        // is still worth showing; only a truly black frame isn't.
+        // All flat: still show a dark scene, but never a truly black frame.
         let pool = detailed.isEmpty ? Array(all.filter { $0.detail >= blackDetail }.sorted { $0.detail > $1.detail }.prefix(1)) : detailed
         return pool.sorted { $0.detail > $1.detail }.prefix(2)
             .sorted { $0.time < $1.time }.map(\.image)
@@ -205,9 +184,7 @@ nonisolated enum MarkerNamer {
     /// Below this a frame is effectively black and never shown.
     static let blackDetail = 0.005
 
-    /// How much a frame varies: the standard deviation of its
-    /// luminance, measured on a 32x32 grey thumbnail. Near 0 for black,
-    /// white or single-colour screens.
+    /// Luminance standard deviation on a 32x32 grey thumbnail. Near 0 for flat screens.
     static func luminanceDetail(_ image: CGImage) -> Double {
         let side = 32
         var pixels = [UInt8](repeating: 0, count: side * side)
@@ -222,8 +199,7 @@ nonisolated enum MarkerNamer {
         return variance.squareRoot()
     }
 
-    /// The mic track when the file has per-source tracks ("Mic"),
-    /// otherwise the only audio track.
+    /// The "Mic" track when tracks are split by source, otherwise the only audio track.
     private static func commentaryTrack(in asset: AVURLAsset) async -> AVAssetTrack? {
         guard let tracks = try? await asset.loadTracks(withMediaType: .audio), !tracks.isEmpty else { return nil }
         for track in tracks {
@@ -248,8 +224,7 @@ nonisolated final class Transcriber: Sendable {
         self.format = format
     }
 
-    /// Nil when the language isn't supported or its model can't be
-    /// installed; labels then come from the frame alone.
+    /// Nil when the language or its model is unavailable; labels then use frames only.
     static func make() async -> Transcriber? {
         guard let locale = await SpeechTranscriber.supportedLocale(equivalentTo: .current) else { return nil }
         let probe = SpeechTranscriber(locale: locale, preset: .transcription)
@@ -290,8 +265,7 @@ nonisolated final class Transcriber: Sendable {
         return text.isEmpty ? nil : text
     }
 
-    /// Decode a stretch of `track` into a temporary file in the
-    /// transcriber's preferred format.
+    /// Decodes a stretch of `track` to a temp file in the transcriber's format.
     private func writeClip(asset: AVAsset, track: AVAssetTrack, from start: Double, duration: Double) throws -> AVAudioFile {
         let reader = try AVAssetReader(asset: asset)
         reader.timeRange = CMTimeRange(start: CMTime(seconds: start, preferredTimescale: 48_000),

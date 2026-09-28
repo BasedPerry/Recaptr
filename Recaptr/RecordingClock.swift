@@ -2,10 +2,8 @@
 //  RecordingClock.swift
 //  Recaptr
 //
-//  The readouts that change every second while recording (elapsed
-//  time, file size, whether the first frame has anchored the file).
-//  Kept apart from MainViewModel so a tick only updates the views that
-//  show them, not every view observing the view model.
+//  Per-second recording readouts, kept out of MainViewModel so a tick
+//  only redraws the views that show them.
 //
 
 import Combine
@@ -14,7 +12,7 @@ import Foundation
 final class RecordingClock: ObservableObject {
     @Published var elapsed: TimeInterval = 0
     @Published var bytes: Int64 = 0
-    /// The writer has started its file (first frame arrived).
+    /// True once the first frame has started the file.
     @Published var anchored = false
 
     /// "mm:ss", or "h:mm:ss" past an hour.

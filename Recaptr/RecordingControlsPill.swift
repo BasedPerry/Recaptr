@@ -2,21 +2,8 @@
 //  RecordingControlsPill.swift
 //  Recaptr
 //
-//  Three-button capture controls pill following the Apple-native
-//  record-button convention (iOS Camera, Voice Memos): red circle
-//  that morphs to a red rounded square while recording, with an
-//  outline ring framing it.
-//
-//  Layout: [Screenshot]   [● Record/Stop]   [Marker]
-//
-//  Side buttons are compact icon buttons; the center record button
-//  is intentionally larger and louder as the primary action. The
-//  Screenshot, Record, and Marker actions are wired as closures so
-//  the parent view owns their behavior.
-//
-//  The pill is the only glass layer. Side buttons are borderless on
-//  purpose: glass buttons inside a glass pill would stack glass on
-//  glass, which Apple's Liquid Glass guidance says to avoid.
+//  Screenshot, record, and marker buttons. Side buttons are plain because
+//  glass buttons inside a glass pill would stack glass on glass.
 //
 
 import SwiftUI
@@ -51,14 +38,11 @@ struct RecordingControlsPill: View {
         }
         .padding(.horizontal, 22)
         .padding(.vertical, 12)
-        // Neutral glass so the record button stays the loudest element;
-        // a faint red tint while recording says "live" from across the
-        // room.
         .recaptrGlass(tint: isRecording ? Color.red.opacity(0.12) : nil)
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: isRecording)
     }
 
-    // MARK: Side button (Screenshot / Marker)
+    // MARK: Side button
 
     @ViewBuilder
     private func sideButton(
@@ -70,8 +54,7 @@ struct RecordingControlsPill: View {
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
-            // Disabled is .secondary, not fainter: over dark video
-            // anything dimmer looked like a rendering glitch.
+            // Anything dimmer than .secondary looks broken over dark video.
             Image(systemName: icon)
                 .font(.system(size: 19, weight: .medium))
                 .foregroundStyle(enabled ? .primary : .secondary)
@@ -90,9 +73,7 @@ struct RecordingControlsPill: View {
     private var recordButton: some View {
         Button(action: onToggleRecord) {
             ZStack {
-                // Outer ring. While recording, fills with the brand
-                // gradient so the active state visually echoes the
-                // app icon. Idle stays neutral.
+                // Brand gradient ring while recording.
                 Group {
                     if isRecording {
                         Circle()
@@ -112,8 +93,6 @@ struct RecordingControlsPill: View {
                 .frame(width: 60, height: 60)
                 .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: isRecording)
 
-                // Inner indicator morphs between circle (idle) and
-                // rounded square (recording).
                 Group {
                     if isRecording {
                         RoundedRectangle(cornerRadius: 6, style: .continuous)
@@ -140,7 +119,7 @@ struct RecordingControlsPill: View {
 
 // MARK: - Preview
 
-// Debug only: ChromePreviewStage (Glass.swift) is a debug helper.
+// ChromePreviewStage is debug-only.
 #if DEBUG
 
 #Preview("Recording Controls, Dark") {

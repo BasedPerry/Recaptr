@@ -2,10 +2,8 @@
 //  LevelTracker.swift
 //  Recaptr
 //
-//  Thread-safe peak / RMS reading for audio that bypasses the mixer
-//  (SCStream system audio on a screen source with no mic), so the
-//  level meters work for every source. Fed on the audio queue, read by
-//  the UI at 30 fps. Same smoothing as the mixer channels.
+//  Levels for audio that bypasses the mixer (SCStream system audio with
+//  no mic). Fed on the audio queue, read by the UI.
 //
 
 import Foundation

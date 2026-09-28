@@ -2,22 +2,8 @@
 //  MainViewModel.swift
 //  Recaptr
 //
-//  Central viewmodel and single source of truth for the UI. Owns the
-//  DeviceCatalog, preview sample-buffer layer, Recorder, AudioMixer,
-//  and the active CameraCaptureService / ScreenCaptureService, plus
-//  user-facing state (selected source, gain, monitor, recording
-//  status, permission flags, markers, last file probe).
-//
-//  Two pipelines feed the recorder:
-//    - Camera sources push frames through CameraCaptureService and
-//      audio through the AudioMixer (mic capture).
-//    - Screen / window sources push frames AND audio from the same
-//      SCStream (system loopback), bypassing the mixer.
-//
-//  The AudioMixer is N-channel internally; the UI currently exposes a
-//  single audio input plus a live monitor toggle. The mixer's lifecycle
-//  is scoped to preview, so VU meters and the monitor work before any
-//  recording starts.
+//  Main view model: owns the capture services, recorder, and audio mixer,
+//  and holds the UI state.
 //
 
 import Foundation
@@ -31,12 +17,8 @@ import CoreGraphics
 import ScreenCaptureKit
 
 // MARK: - Frame cache
-//
-// Thread-safe holder for the most recent preview CVPixelBuffer. Camera
-// and screen services write on their capture queues; the @MainActor
-// screenshot path reads on demand. Not @MainActor so writers don't
-// have to hop threads; marked @unchecked Sendable because all access
-// is serialized through the NSLock.
+/// Latest preview frame. Capture queues write it; screenshots read it.
+/// `@unchecked Sendable` because the lock serializes all access.
 final class PreviewFrameCache: @unchecked Sendable {
     private let lock = NSLock()
     private var pixelBuffer: CVPixelBuffer?
@@ -66,21 +48,17 @@ final class MainViewModel: ObservableObject {
     @Published var catalog = DeviceCatalog()
     @Published var selectedMainSource: VideoSource?
 
-    /// User-selected save location: security-scoped bookmark in
-    /// UserDefaults with a sandbox-container fallback. UI surfaces
-    /// `displayLabel` / `displayPath` / `hasUserLocation`; startRecording
-    /// resolves the actual directory via `resolveSaveDirectory()`.
+    /// Save location: a security-scoped bookmark, with a sandbox fallback.
     @Published var recordingStorage = RecordingStorage()
 
-    // Channel 1: source audio (capture card HDMI audio, or the
-    // camera's paired mic). Auto-selected to match the video source.
+    // Channel 1: source audio (capture card HDMI audio or the camera's mic),
+    // auto-selected to match the video source.
     @Published var ch1DeviceID: String?
     @Published var ch1Gain: Double = 1.0
     @Published var ch1Enabled: Bool = true
 
-    // Channel 2: commentary mic. Off until the user picks a device.
-    // Never auto-selected, and not routed to the monitor (hearing
-    // your own voice back with latency is distracting).
+    // Channel 2: commentary mic. Never auto-selected and never monitored
+    // (hearing your own voice with latency is distracting).
     @Published var ch2DeviceID: String?
     @Published var ch2Gain: Double = 1.0
     @Published var ch2Enabled: Bool = true
@@ -108,8 +86,8 @@ final class MainViewModel: ObservableObject {
     }
     // MARK: Series / Episode naming
 
-    /// Series (the game or show). Recordings go in a folder of this
-    /// name, named "Series – Episode". Empty: the old timestamp names.
+    /// Series (game or show). Recordings go in a folder of this name,
+    /// named "Series – Episode". Empty uses timestamp names.
     @Published var seriesName: String = UserDefaults.standard.string(forKey: "RecaptrSeries") ?? "" {
         didSet { if !Self.isUITesting { UserDefaults.standard.set(seriesName, forKey: "RecaptrSeries") } }
     }
@@ -120,15 +98,13 @@ final class MainViewModel: ObservableObject {
     @Published var seriesHistory: [String] = UserDefaults.standard.stringArray(forKey: "RecaptrSeriesHistory") ?? [] {
         didSet { if !Self.isUITesting { UserDefaults.standard.set(seriesHistory, forKey: "RecaptrSeriesHistory") } }
     }
-    /// A Bool setting with a default when unset. `bool(forKey:)` also
-    /// reads "YES"/"NO" given as launch arguments, which `as? Bool`
-    /// doesn't (a -RecaptrShowCaptureOutline NO run left it on).
+    /// A Bool setting with a default. `bool(forKey:)` also reads "YES"/"NO"
+    /// launch arguments, which `as? Bool` doesn't.
     private static func bool(_ key: String, default value: Bool) -> Bool {
         UserDefaults.standard.object(forKey: key) == nil ? value : UserDefaults.standard.bool(forKey: key)
     }
 
-    /// Test runs share the real app's settings; naming changes made by
-    /// test hooks must not leak into the user's next recording.
+    /// Test runs share the app's settings, so test hooks don't save naming.
     private static let isUITesting = UserDefaults.standard.bool(forKey: "RecaptrUITesting")
     /// Name markers and blank episodes with Apple Intelligence.
     @Published var aiNamingEnabled: Bool =
@@ -213,12 +189,8 @@ final class MainViewModel: ObservableObject {
     @Published var status: String = "Idle"
     @Published var lastRecordedFile: URL?
 
-    // Telemetry surfaced to the UI.
-    /// Per-second recording readouts, in their own small observable so
-    /// only the views that show them (timer pill, menu bar) update each
-    /// second. When these were @Published here, every tick rebuilt the
-    /// whole app: every window, Settings, and the menu bar item
-    /// (profiling, 2026-09-27).
+    /// Per-second readouts live in their own observable so only the views
+    /// that show them redraw each tick.
     let clock = RecordingClock()
     var recordingElapsed: TimeInterval {
         get { clock.elapsed }
@@ -241,82 +213,60 @@ final class MainViewModel: ObservableObject {
     @Published var audioPermissionStatus: AVAuthorizationStatus = .notDetermined
     @Published var lastFileProbeSummary: String?
 
-    /// Screen Recording TCC state. CoreGraphics exposes this as a bare
-    /// Bool via `CGPreflightScreenCaptureAccess()` (not the 4-state
-    /// `AVAuthorizationStatus` enum). TCC quirk: granting Screen
-    /// Recording typically only takes effect for `SCStream` after the
-    /// app is relaunched.
+    /// Screen Recording permission. A new grant usually only reaches
+    /// `SCStream` after a relaunch.
     @Published var screenCapturePermissionGranted: Bool = false
 
-    /// Preserves recorder + mixer counters past the file-probe
-    /// completion. The probe's status update would otherwise overwrite
-    /// the only place those counters were surfaced.
+    /// Recorder and mixer counters from the last take, kept apart so the
+    /// file-probe status doesn't overwrite them.
     @Published var lastRecordingSummary: String?
 
     // Observers retained so they can be removed in deinit.
     private var didBecomeActiveObserver: NSObjectProtocol?
 
-    /// Fires when any `AVCaptureDevice` is unplugged. The handler checks
-    /// whether the unplugged device was the active source and stops
-    /// cleanly if so.
+    /// Stops cleanly when the active device is unplugged.
     private var deviceDisconnectObserver: NSObjectProtocol?
 
-    /// Fires when a new `AVCaptureDevice` appears (replug). Refreshes
-    /// the catalog so the device shows up in the source dropdown, and
-    /// auto-prefers a capture card when the current source is nil or a
-    /// Continuity Camera fallback.
+    /// Refreshes the catalog on replug and switches to a capture card if
+    /// nothing, or Continuity Camera, is selected.
     private var deviceConnectObserver: NSObjectProtocol?
 
-    // Combine subscriptions for live gain / monitor / permission state.
     private var cancellables = Set<AnyCancellable>()
 
     let previewSinkLayer = SampleBufferPreviewLayer(frame: .zero)
 
-    /// Most recent preview frame, cached on every video sample from the
-    /// camera or screen service. Read on demand by `captureScreenshot()`.
-    /// Cleared in `stopPreview()` so a stale frame from a previous
-    /// source can't accidentally be saved as a screenshot.
+    /// Latest preview frame for `captureScreenshot()`. Cleared on stop so a
+    /// frame from the previous source can't be saved.
     let frameCache = PreviewFrameCache()
 
-    /// Clip markers dropped during a recording session, each a
-    /// `recordingElapsed` timestamp in seconds. Cleared at
-    /// `startRecording`. `dropMarker()` is called from both the in-app
-    /// button and the menu-bar item.
+    /// Marker times in seconds. Cleared when a recording starts.
     @Published var markers: [TimeInterval] = []
     static let markerDebounce: TimeInterval = 1
 
     private var cameraService: CameraCaptureService?
     private var screenService: ScreenCaptureService?
     private let recorder = Recorder()
-    /// Plays SCStream system audio while monitoring a screen or
-    /// window capture. The mic monitor lives on the AudioMixer channel.
-    /// Levels for system audio on the direct (no-mic) screen path,
-    /// which never passes through the mixer.
+    /// System audio levels on the screen path without a mic, which skips
+    /// the mixer.
     private let screenAudioLevels = LevelTracker()
     private let audioMixer: AudioMixer
     private var activeDims: CMVideoDimensions = .init(width: 0, height: 0)
-    private var hasAudio = false  // Snapshot at startRecording — locked until stopRecording
+    private var hasAudio = false  // Snapshot at startRecording, fixed until stopRecording
 
-    /// True when the active preview is a screen source with `SCStream`
-    /// system audio wired (audio comes from the stream's `.audio`
-    /// output, not the AudioMixer). Set in `startPreview`, cleared in
-    /// `stopPreview`. Read by `startRecording` to populate `hasAudio`.
+    /// True when a screen source's audio comes from the `SCStream` instead
+    /// of the mixer.
     @Published var hasScreenAudio: Bool = false
 
-    /// True while `startPreview` is building the session, so live
-    /// audio changes made during startup (auto-select) don't trigger a
-    /// second restart; startup applies the current selection anyway.
+    /// True while `startPreview` builds the session, so audio changes made
+    /// during startup don't trigger a second restart.
     private var isStartingPreview = false
 
     private var recordingStartedAt: Date?
     /// ⌃⌥⌘B drops a marker from any app, registered only while
     /// recording so the combo is free the rest of the time.
     private var markerHotKey: GlobalHotKey?
-    /// Held while recording so idle sleep can't cut a long capture
-    /// short. Keeps the display awake too: with only system sleep
-    /// blocked, the display slept after 10 idle minutes and the
-    /// capture card stalled for ~1 s several times as it did (two
-    /// takes, 2026-09-26/27).
+    /// Held while recording so idle sleep can't cut a capture short. Also
+    /// keeps the display awake: capture cards stall briefly when it sleeps.
     private var recordingActivity: NSObjectProtocol?
     private var recorderStatsTimer: Timer?
 
@@ -335,7 +285,6 @@ final class MainViewModel: ObservableObject {
         let systemChannel = AudioInputChannel(label: "System", outputFormat: outputFormat, isExternal: true)
         self.audioMixer = AudioMixer(channels: [sourceChannel, micChannel, systemChannel])
 
-        // Wire mixer → recorder.
         audioMixer.onMixedSampleBuffer = { [weak self] sb in
             self?.recorder.appendAudio(sb)
         }
@@ -349,12 +298,8 @@ final class MainViewModel: ObservableObject {
             self?.recorder.appendAudio(sb, source: label)
         }
 
-        // Push live gain changes into the mixer. Gain is read on every
-        // tap callback, so updating the channel.gain Float is enough —
-        // no engine restart required.
-        // Device / enable changes apply live while previewing (the
-        // Settings pickers used to be locked during preview, which is
-        // always). Debounced so a burst of changes restarts once.
+        // Device and enable changes apply live while previewing, debounced so
+        // a burst of changes restarts once.
         Publishers.Merge4(
             $ch1DeviceID.map { _ in () }, $ch1Enabled.map { _ in () },
             $ch2DeviceID.map { _ in () }, $ch2Enabled.map { _ in () }
@@ -364,6 +309,7 @@ final class MainViewModel: ObservableObject {
         .sink { [weak self] in self?.applyAudioSelectionChange() }
         .store(in: &cancellables)
 
+        // Gain is read on every tap callback, so no restart is needed.
         $ch2Gain
             .sink { [weak self] value in
                 self?.audioMixer.channel(at: 1)?.gain = Float(value)
@@ -375,10 +321,8 @@ final class MainViewModel: ObservableObject {
             }
             .store(in: &cancellables)
 
-        // Monitor toggle + volume wired live (same no-restart pattern).
-        // The monitor plays one channel: the camera's source audio, or
-        // for screen and window captures the mic (see
-        // `monitorChannelIndex`).
+        // The monitor plays one channel: the camera's source audio, or the mic
+        // for screen and window captures (see `monitorChannelIndex`).
         $monitorEnabled
             .sink { [weak self] enabled in
                 guard let self else { return }
@@ -396,11 +340,8 @@ final class MainViewModel: ObservableObject {
             }
             .store(in: &cancellables)
 
-        // Permission-revocation watchers. The user can flip Privacy
-        // & Security toggles mid-session; we stop preview/recording
-        // cleanly so we don't stream silence or black frames.
-        // `.dropFirst()` skips the initial-state emission so startup
-        // doesn't trip the handler.
+        // Stop cleanly if a permission is revoked mid-session instead of
+        // recording silence or black frames.
         $audioPermissionStatus
             .removeDuplicates()
             .dropFirst()
@@ -422,21 +363,15 @@ final class MainViewModel: ObservableObject {
             }
             .store(in: &cancellables)
 
-        // Log identity at startup so `tccutil reset Microphone <bundle>`
-        // can be confirmed against the right identifier when debugging
-        // permission issues.
+        // The bundle ID is logged for checking `tccutil reset` targets.
         let bundleID = Bundle.main.bundleIdentifier ?? "<unknown>"
         let initialMic = AVCaptureDevice.authorizationStatus(for: .audio)
         let initialScreen = CGPreflightScreenCaptureAccess()
         screenCapturePermissionGranted = initialScreen
         print("Recaptr launched — bundle=\(bundleID), mic permission=\(Self.permissionLabel(initialMic)), screen recording=\(initialScreen ? "granted" : "not granted")")
 
-        // Recheck permissions whenever the app comes back to front
-        // (the user may have toggled them in System Settings).
-        //
-        // The `guard let strongSelf` inside the closure is required
-        // for Swift 6 strict concurrency: the Task needs to capture an
-        // immutable `let`, not a weak `var` optional.
+        // Recheck permissions when the app comes to the front. `strongSelf` is
+        // a let so the Task can capture it under Swift 6 concurrency.
         let center = NotificationCenter.default
         didBecomeActiveObserver = center.addObserver(
             forName: NSApplication.didBecomeActiveNotification,
@@ -450,9 +385,6 @@ final class MainViewModel: ObservableObject {
             }
         }
 
-        // Route AVCaptureDevice disconnect notifications through
-        // handleDeviceDisconnect, which decides whether the unplugged
-        // device was the active source and stops cleanly if so.
         deviceDisconnectObserver = center.addObserver(
             forName: AVCaptureDevice.wasDisconnectedNotification,
             object: nil,
@@ -464,9 +396,6 @@ final class MainViewModel: ObservableObject {
             }
         }
 
-        // Route AVCaptureDevice connect notifications so the catalog
-        // refreshes and we can auto-switch to a freshly-plugged capture
-        // card when appropriate.
         deviceConnectObserver = center.addObserver(
             forName: AVCaptureDevice.wasConnectedNotification,
             object: nil,
@@ -478,14 +407,11 @@ final class MainViewModel: ObservableObject {
             }
         }
 
-        // Populate catalog first, then auto-pick a startup source so
-        // the picker sees a populated list.
+        // Load the catalog before picking a startup source.
         Task {
             await self.refreshCatalog()
-            // UI tests asking for a screen or window source: displays
-            // and windows can arrive a moment after cameras, and
-            // picking early silently fell back to a camera (which
-            // skewed a profiling comparison, 2026-09-27). Wait for them.
+            // UI tests with a screen or window source: those can arrive after the
+            // cameras, so wait rather than fall back to a camera.
             if Self.isUITesting, let want = UserDefaults.standard.string(forKey: "RecaptrUITestSource") {
                 let kind: VideoSource.Kind = want == "display" ? .screenDisplay : .screenWindow
                 for _ in 0..<20 where !self.catalog.videoSources.contains(where: { $0.kind == kind }) {
@@ -495,16 +421,12 @@ final class MainViewModel: ObservableObject {
             }
             await MainActor.run {
                 self.autoSelectStartupSource()
-                // UI tests: `-RecaptrUITestMicInput <name>` binds the
-                // mic channel to the first input whose name contains
-                // <name>, so multi-source runs without clicking.
-                // `-RecaptrUITestSeries <name>` / `-RecaptrUITestEpisode
-                // <name>` preset the naming fields (not saved; see
-                // isUITesting).
+                // -RecaptrUITestSeries / -RecaptrUITestEpisode <name>: preset the naming fields (not saved).
                 if Self.isUITesting {
                     if let series = UserDefaults.standard.string(forKey: "RecaptrUITestSeries") { self.seriesName = series }
                     if let episode = UserDefaults.standard.string(forKey: "RecaptrUITestEpisode") { self.episodeName = episode }
                 }
+                // -RecaptrUITestMicInput <name>: bind the mic to the first input whose name contains <name>.
                 if UserDefaults.standard.bool(forKey: "RecaptrUITesting"),
                    let want = UserDefaults.standard.string(forKey: "RecaptrUITestMicInput"),
                    let match = self.availableAudioSources.first(where: {
@@ -516,9 +438,7 @@ final class MainViewModel: ObservableObject {
         }
         Task { await self.requestAudioPermissionIfNeeded() }
         #if DEBUG
-        // UI tests: `-RecaptrUITestProbeLatest YES` probes the newest
-        // recording (for example one cut off by a force-quit), prints
-        // what's in it, and quits.
+        // -RecaptrUITestProbeLatest YES: probe the newest recording, print what's in it, and quit.
         if Self.isUITesting, UserDefaults.standard.bool(forKey: "RecaptrUITestProbeLatest") {
             Task { @MainActor in
                 if let newest = self.newestRecording() {
@@ -531,9 +451,8 @@ final class MainViewModel: ObservableObject {
             }
         }
         #endif
-        // Screen Recording is requested on demand (see
-        // `screenModeSelected`), not at launch, so camera-only users
-        // never see the prompt.
+        // Screen Recording is requested when a screen source is chosen, not at
+        // launch, so camera-only users never see the prompt.
     }
 
     deinit {
@@ -548,13 +467,9 @@ final class MainViewModel: ObservableObject {
         }
     }
 
-    /// Fires the macOS microphone TCC prompt at app startup if the
-    /// user hasn't seen it yet. Goes through
-    /// `AVCaptureDevice.requestAccess(for: .audio)`, which uses the
-    /// `NSMicrophoneUsageDescription` entitlement. Calling this
-    /// explicitly is more reliable than letting `AVAudioEngine` trip
-    /// the prompt later — when that path fails silently, the recording
-    /// just contains silence with no user-facing signal.
+    /// Shows the microphone prompt if it hasn't been answered. Asking
+    /// explicitly is more reliable than letting AVAudioEngine trigger it,
+    /// which can fail silently and record silence.
     func requestAudioPermissionIfNeeded() async {
         let current = AVCaptureDevice.authorizationStatus(for: .audio)
         audioPermissionStatus = current
@@ -572,12 +487,7 @@ final class MainViewModel: ObservableObject {
         }
     }
 
-    /// Re-poll the OS for the current mic permission state and update
-    /// both the published flag and the status line. Called from the
-    /// `NSApplication.didBecomeActive` observer and from a UI button.
-    /// Does not fire a TCC prompt — for that, call
-    /// `requestAudioPermissionIfNeeded()` (which only prompts on
-    /// `.notDetermined`).
+    /// Rereads mic permission and updates the status line. Doesn't prompt.
     func recheckAudioPermission(reason: String) {
         let current = AVCaptureDevice.authorizationStatus(for: .audio)
         let was = audioPermissionStatus
@@ -588,24 +498,20 @@ final class MainViewModel: ObservableObject {
 
         switch current {
         case .authorized:
-            // Clear any leftover "denied" status — only if the
-            // current status is still the denied message (don't
-            // clobber a probe result or a recording status).
+            // Clear only the denied message; don't overwrite other status.
             if status.hasPrefix("Microphone permission denied") {
                 status = "Idle"
             }
         case .denied, .restricted:
             status = "Microphone permission denied — recordings will be silent. Open System Settings → Privacy & Security → Microphone to enable."
         case .notDetermined:
-            // Fire the prompt asynchronously.
             Task { await self.requestAudioPermissionIfNeeded() }
         @unknown default:
             break
         }
     }
 
-    /// Open System Settings directly to the Microphone privacy panel
-    /// so the user doesn't have to navigate manually.
+    /// Opens the Microphone privacy pane in System Settings.
     func openMicrophonePrivacyPane() {
         let urls = [
             "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone",
@@ -617,7 +523,7 @@ final class MainViewModel: ObservableObject {
                 return
             }
         }
-        // Last-ditch fallback: open the privacy pane root.
+        // Fall back to the privacy pane root.
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security") {
             NSWorkspace.shared.open(url)
         }
@@ -625,18 +531,8 @@ final class MainViewModel: ObservableObject {
 
     // MARK: - Screen recording permission (TCC)
 
-    /// Fires the macOS Screen Recording TCC prompt when needed. Routes
-    /// through `CGRequestScreenCaptureAccess`, the canonical entry
-    /// point for screen-capture permission.
-    /// `CGPreflightScreenCaptureAccess` reports current state without
-    /// prompting; `CGRequestScreenCaptureAccess` fires the prompt on
-    /// first call and returns the user's decision.
-    ///
-    /// TCC quirk: even after the user grants Screen Recording in
-    /// Settings, the calling process typically needs to be relaunched
-    /// before the grant takes effect for `SCStream`. The status
-    /// message surfaces this so the user knows quitting is part of
-    /// the recipe.
+    /// Shows the Screen Recording prompt if needed. A grant usually only
+    /// takes effect for `SCStream` after a relaunch, so the status says so.
     func requestScreenCapturePermissionIfNeeded() {
         if CGPreflightScreenCaptureAccess() {
             screenCapturePermissionGranted = true
@@ -652,17 +548,14 @@ final class MainViewModel: ObservableObject {
         }
     }
 
-    /// Called when the user switches to Window or Screen mode. Asks
-    /// for Screen Recording the first time it's actually needed.
+    /// Called on switching to Window or Screen mode, so the permission is
+    /// requested the first time it's needed.
     func screenModeSelected() {
         guard !CGPreflightScreenCaptureAccess() else { return }
         requestScreenCapturePermissionIfNeeded()
     }
 
-    /// Re-poll Screen Recording permission. Called from the
-    /// `NSApplication.didBecomeActive` observer (and can be called
-    /// from a UI button). Does not trigger a prompt — only reads the
-    /// current state.
+    /// Rereads Screen Recording permission. Doesn't prompt.
     func recheckScreenCapturePermission(reason: String) {
         let current = CGPreflightScreenCaptureAccess()
         let was = screenCapturePermissionGranted
@@ -679,8 +572,7 @@ final class MainViewModel: ObservableObject {
         }
     }
 
-    /// Open System Settings directly to the Screen Recording privacy
-    /// panel. Same fallback pattern as `openMicrophonePrivacyPane`.
+    /// Opens the Screen Recording privacy pane in System Settings.
     func openScreenCapturePrivacyPane() {
         let urls = [
             "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
@@ -711,9 +603,7 @@ final class MainViewModel: ObservableObject {
         await catalog.refresh()
     }
 
-    /// Exposes all video sources (cameras + displays + windows) to the
-    /// picker. The `startPreview()` switch routes each kind to the
-    /// right service.
+    /// Cameras, displays, and windows for the source picker.
     var availableMainSources: [VideoSource] {
         catalog.videoSources
     }
@@ -722,28 +612,19 @@ final class MainViewModel: ObservableObject {
         catalog.audioSources
     }
 
-    /// Single-channel: armed when a device is selected and the toggle is on.
+    /// True when either channel has a device and is enabled.
     private var anyChannelArmed: Bool {
         (ch1Enabled && ch1DeviceID != nil) || (ch2Enabled && ch2DeviceID != nil)
     }
 
     // MARK: - Auto audio selection
 
-    /// Auto-pick Channel 1 to match the current video source.
+    /// Picks Channel 1 to match the current video source.
     ///
-    /// Camera mode: find an audio source whose name matches the camera
-    /// (exact → camera-contains-audio → audio-contains-camera, all
-    /// case-insensitive). Capture cards like the Elgato 4K X expose a
-    /// paired mic with the same name; built-in cameras pair with
-    /// "Built-in Microphone" etc. Setting `ch1DeviceID` flows through
-    /// the existing mixer plumbing.
-    ///
-    /// Screen / Window mode: leave Ch1 alone. The user's commentary
-    /// mic stays as configured, and system audio comes through SCStream
-    /// loopback on a separate path.
-    ///
-    /// Idempotent — a no-op when the chosen audio source is already
-    /// selected.
+    /// Cameras: the audio source whose name matches (exact, then either
+    /// name containing the other). Capture cards expose a paired audio
+    /// device with the same name. Screen and window sources leave Channel 1
+    /// alone; their audio comes from the SCStream.
     func autoSelectAudioForCurrentSource() {
         guard let src = selectedMainSource else { return }
         switch src.kind {
@@ -757,20 +638,15 @@ final class MainViewModel: ObservableObject {
                 status = "Audio auto-selected: \(m.name)"
             }
         case .screenDisplay, .screenWindow:
-            // Leave Ch1 alone. Commentary mic stays; system audio is
-            // handled by SCStream's `.audio` output, not Ch1.
+            // System audio comes from the SCStream, not Channel 1.
             break
         }
     }
 
     // MARK: - Fast audio level polling (for VU meter)
     //
-    // The general `mixerStats` publisher updates on a 1 Hz timer —
-    // fine for telemetry, too slow for a VU meter (which should feel
-    // continuous at ~30 fps). `currentAudioLevels()` lets a view poll
-    // at whatever cadence it wants without bumping the global stats
-    // tick rate. `AudioMixer.snapshot()` is cheap (just reads atomics
-    // computed per-buffer in the tap), so 30 Hz polling is fine.
+    // Views poll these for the meters (about 30 Hz); `mixerStats` only
+    // updates once a second. Snapshots are cheap reads.
 
     /// Channel 1 audio levels in dBFS. Returns nil when the mixer
     /// isn't running. Both values are smoothed inside the mixer.
@@ -798,8 +674,7 @@ final class MainViewModel: ObservableObject {
 
     // MARK: - Screenshot + Marker
 
-    /// Errors surfaced from the screenshot path. Status line picks
-    /// up the localizedDescription so users see what went wrong.
+    /// Screenshot errors, shown on the status line.
     enum ScreenshotError: LocalizedError {
         case noFrame
         case conversionFailed
@@ -814,24 +689,15 @@ final class MainViewModel: ObservableObject {
         }
     }
 
-    /// Capture the most recent preview frame as PNG and write it to
-    /// the user-picked save folder. Filename includes a UTC timestamp
-    /// (matches the recording filename convention). Returns the URL
-    /// of the file that was written.
-    ///
-    /// Why pull from frameCache instead of re-rendering the preview
-    /// layer: the cache holds the raw CVPixelBuffer at source resolution
-    /// (1080p, 4K, whatever the device is producing), independent of
-    /// the on-screen preview's display size. The user gets a full-quality
-    /// PNG, not a downscaled screenshot of a SwiftUI view.
+    /// Saves the latest preview frame as a PNG in the save folder and
+    /// returns its URL. Uses the cached pixel buffer, so the image is at
+    /// source resolution, not preview size.
     func captureScreenshot() async throws -> URL {
         guard let pixelBuffer = frameCache.latest() else {
             throw ScreenshotError.noFrame
         }
 
-        // CVPixelBuffer → CIImage → CGImage → NSBitmapImageRep → PNG Data.
-        // CIContext.createCGImage is the part that touches the GPU /
-        // does the colorspace conversion; everything else is light.
+        // CIContext does the color conversion; the rest is cheap.
         let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
         let context = CIContext()
         guard let cgImage = context.createCGImage(ciImage, from: ciImage.extent) else {
@@ -868,11 +734,8 @@ final class MainViewModel: ObservableObject {
         return url
     }
 
-    /// Append the current `recordingElapsed` time to `markers`. No-op
-    /// when not recording. Markers live in memory and reset at the
-    /// start of each new recording.
-    /// Save the last 15 seconds of the current screen source (instant
-    /// replay). Works whether or not a recording is running.
+    /// Saves the last 15 seconds of the current screen source (instant
+    /// replay), whether or not a recording is running.
     func saveReplay() async {
         guard let svc = screenService, svc.isReplayBuffering else {
             status = instantReplay
@@ -886,8 +749,7 @@ final class MainViewModel: ObservableObject {
             try await svc.exportReplay(to: url)
             lastRecordedFile = url
             lastFileProbeSummary = nil
-            // The status line should describe this clip, not the last
-            // recording.
+            // The status line should describe this clip, not the last recording.
             lastRecordingSummary = nil
             status = "Replay saved → \(url.lastPathComponent)"
             await probeRecordedFile(url)
@@ -896,12 +758,12 @@ final class MainViewModel: ObservableObject {
         }
     }
 
+    /// Adds a marker at the current recording time. No-op when not recording.
     func dropMarker() {
         guard isRecording else { return }
         // Exact time; recordingElapsed only ticks once a second.
         let t = recordingStartedAt.map { Date().timeIntervalSince($0) } ?? recordingElapsed
-        // One marker per second: extra presses (a mashed or held key)
-        // are ignored. A 2026-09-27 take got five markers in 0.9 s.
+        // One marker per second: extra presses from a mashed or held key are ignored.
         if let last = markers.last, t - last < Self.markerDebounce { return }
         markers.append(t)
         // Precise capture-clock time, for the .fcpxml.
@@ -911,21 +773,12 @@ final class MainViewModel: ObservableObject {
 
     // MARK: - Auto startup source
 
-    /// Picks a sensible default source on first launch (or any time
-    /// the user lands at the "Select a source" hint). Preference:
-    ///
-    ///   1. Capture card (Elgato / Magewell / AverMedia / etc.)
-    ///   2. Non-Continuity camera (built-in FaceTime HD, USB webcam)
-    ///   3. Any camera at all (last resort — Continuity iPhone Camera)
-    ///
-    /// Screens and windows are never auto-picked — those require
-    /// user intent (you wouldn't want Recaptr to silently grab a
-    /// random display the moment it launches).
+    /// Picks a default source when none is selected: a capture card, then a
+    /// non-Continuity camera, then any camera. Screens and windows are never
+    /// auto-picked.
     func autoSelectStartupSource() {
         guard selectedMainSource == nil else { return }
-        // UI tests: `-RecaptrUITestSource display|window:<name>` starts
-        // on the first display, or the first window whose title
-        // contains <name>, instead of a camera.
+        // -RecaptrUITestSource display|window:<name>: start on the first display, or the first window whose title contains <name>.
         let d = UserDefaults.standard
         if d.bool(forKey: "RecaptrUITesting"), let want = d.string(forKey: "RecaptrUITestSource") {
             let pick: VideoSource? = want == "display"
@@ -949,26 +802,18 @@ final class MainViewModel: ObservableObject {
         if let chosen = pick {
             selectedMainSource = chosen
             status = "Source: \(chosen.name)"
-            // Trigger the existing audio auto-select so Ch1 also
-            // lands on the matching mic.
             autoSelectAudioForCurrentSource()
         }
     }
 
     // MARK: - Device disconnect handler
 
-    /// Handles `AVCaptureDevice.wasDisconnectedNotification`. Only
-    /// reacts when the disconnected device matches the active camera
-    /// source — at which point we stop the recording cleanly (writer
-    /// finalizes, partial file is preserved), stop preview, clear the
-    /// selection, refresh the catalog so the gone device drops out of
-    /// the list, and surface a status message.
+    /// Stops recording (keeping the partial file) and preview when the
+    /// active camera is unplugged, then clears the selection.
     @MainActor
     private func handleDeviceDisconnect(_ note: Notification) async {
         guard let device = note.object as? AVCaptureDevice else { return }
-        // Only react if the unplugged device is the one currently in use.
-        // Screen / window paths are handled separately by SCStream's
-        // onStreamStopped delegate.
+        // Screen and window sources are handled by SCStream's onStreamStopped.
         guard let activeID = selectedMainSource?.cameraUniqueID,
               activeID == device.uniqueID else { return }
 
@@ -976,33 +821,24 @@ final class MainViewModel: ObservableObject {
         let wasRecording = isRecording
 
         if wasRecording {
-            // stopRecording finalizes the writer so the partial file
-            // is playable. Without this the user loses everything.
+            // Finalizes the writer so the partial file is playable.
             await stopRecording()
         }
         if isPreviewing {
             stopPreview()
         }
 
-        // Clear the dead source — UI returns to the "Select a source"
-        // hint state until the user picks another or replugs.
+        // Back to the "Select a source" hint until the user picks or replugs.
         selectedMainSource = nil
 
         status = wasRecording
             ? "Device disconnected: \(deviceName) — recording saved."
             : "Device disconnected: \(deviceName)"
 
-        // Refresh so the unplugged device drops out of the catalog;
-        // if a replacement is now available (different capture card,
-        // built-in camera), the user can pick it from the pill.
         await catalog.refresh()
 
-        // Capture cards typically expose a paired audio device with
-        // the same name — unplugging the card removes both the camera
-        // and the mic. If `ch1DeviceID` points at a gone audio source,
-        // clear it so the Audio picker doesn't carry an orphan
-        // selection (which SwiftUI's `Picker` flags with a "selection
-        // invalid and does not have an associated tag" warning).
+        // Unplugging a capture card also removes its audio device. Clear the
+        // orphaned selection, which SwiftUI's Picker warns about.
         if let currentCh1 = ch1DeviceID,
            !availableAudioSources.contains(where: { $0.id == currentCh1 }) {
             ch1DeviceID = availableAudioSources.first?.id
@@ -1014,26 +850,17 @@ final class MainViewModel: ObservableObject {
         }
     }
 
-    /// Posted by AVCaptureDevice when a new capture device is plugged
-    /// in. Refreshes the catalog so the new device appears in the
-    /// dropdown, then optionally auto-switches to it.
-    ///
-    /// Auto-switch policy: only override the current selection when
-    /// (a) nothing is selected, or (b) the user is currently on a
-    /// Continuity Camera and a capture card just appeared (creator
-    /// replugged their Elgato after their iPhone took over the slot).
-    /// Doesn't override an explicit user choice of a built-in camera
-    /// or non-Continuity USB webcam.
+    /// Refreshes the catalog when a device is plugged in. Switches to it
+    /// only if nothing is selected, or if it's a capture card replacing a
+    /// Continuity Camera. An explicit camera choice is kept.
     @MainActor
     private func handleDeviceConnect(_ note: Notification) async {
         guard let device = note.object as? AVCaptureDevice else { return }
 
         await catalog.refresh()
 
-        // Find the catalog entry for the newly-connected device.
-        // DeviceCatalog ids use the "camera:<uniqueID>" prefix; if
-        // the catalog refresh hasn't yet seen the device, bail out
-        // (the next launch / manual refresh will catch it).
+        // Catalog ids are "camera:<uniqueID>". If the refresh hasn't seen the
+        // device yet, a later refresh will.
         let newSourceID = "camera:\(device.uniqueID)"
         guard let newSource = catalog.videoSources.first(where: { $0.id == newSourceID }) else {
             return
@@ -1051,13 +878,9 @@ final class MainViewModel: ObservableObject {
         }
 
         if shouldAutoSwitch {
-            // Wait for the paired audio device to register in CoreAudio
-            // HAL before flipping the video source. The camera
-            // notification fires before CoreAudio has registered the
-            // audio counterpart; switching too early leaves the
-            // AudioMixer unable to resolve the UID and the recording
-            // ends up video-only. Most capture cards settle within a
-            // few hundred milliseconds; cap the wait at 1.2 s.
+            // The camera notification arrives before CoreAudio registers the
+            // paired audio device. Switching early leaves the recording video-only,
+            // so wait up to 1.2 s.
             await waitForPairedAudio(matching: newSource, timeout: 1.2)
 
             if isPreviewing {
@@ -1065,19 +888,14 @@ final class MainViewModel: ObservableObject {
             }
             selectedMainSource = newSource
             status = "Capture card connected: \(newSource.name)"
-            // Audio auto-select runs via the .onChange(of: selectedMainSource)
-            // observer in ContentViewNext (same path used at launch).
+            // Audio auto-select runs from ContentViewNext's onChange(of: selectedMainSource).
         }
     }
 
     // MARK: - Permission revocation handlers
 
-    /// Microphone permission changed. Only reacts to "no longer
-    /// authorized" while previewing or recording — initial state
-    /// transitions during startup are filtered by `.dropFirst()` on
-    /// the publisher. Stops cleanly so the file is preserved up to
-    /// the moment of revocation; surfaces a status message so the
-    /// user knows why.
+    /// Stops preview and recording (keeping the file) when mic permission
+    /// is revoked mid-session.
     @MainActor
     private func handleAudioPermissionChange(_ status: AVAuthorizationStatus) async {
         guard status != .authorized else { return }
@@ -1097,14 +915,11 @@ final class MainViewModel: ObservableObject {
         )
     }
 
-    /// Screen Recording permission changed. Only reacts when the
-    /// active source is a screen / window — revoking Screen Recording
-    /// while previewing a camera shouldn't tear anything down.
+    /// Stops a screen or window capture when Screen Recording is revoked.
+    /// Cameras don't need it.
     @MainActor
     private func handleScreenPermissionChange(_ granted: Bool) async {
         guard !granted else { return }
-        // Only stop if we're on a screen / window path. Cameras don't
-        // use TCC screen recording.
         let activeKind = selectedMainSource?.kind
         let onScreenSource = activeKind == .screenDisplay || activeKind == .screenWindow
         guard onScreenSource, isPreviewing || isRecording else { return }
@@ -1123,8 +938,7 @@ final class MainViewModel: ObservableObject {
         )
     }
 
-    /// Shared status-line composer for both permission handlers.
-    /// Keeps the phrasing consistent.
+    /// Status line for a revoked permission.
     private func status_setRevoked(wasRecording: Bool, label: String, settingsHint: String) {
         if wasRecording {
             status = "\(label) permission revoked — recording stopped and saved. Re-enable in \(settingsHint), then restart preview."
@@ -1133,11 +947,8 @@ final class MainViewModel: ObservableObject {
         }
     }
 
-    /// Poll `availableAudioSources` for an audio device whose name
-    /// matches the given video source (same heuristic as the audio
-    /// auto-select). Returns as soon as a match appears, or after
-    /// `timeout` seconds. Refreshes the catalog on each poll tick.
-    /// No-op if a match is already present.
+    /// Polls until an audio device matching `source` appears or `timeout`
+    /// passes. Uses the same name match as audio auto-select.
     @MainActor
     private func waitForPairedAudio(matching source: VideoSource, timeout: TimeInterval) async {
         let deadline = Date().addingTimeInterval(timeout)
@@ -1149,13 +960,11 @@ final class MainViewModel: ObservableObject {
                 $0.name.localizedCaseInsensitiveContains(source.name)
             })
             if match != nil { return }
-            // 150 ms between polls — responsive without hammering
-            // AVFoundation.
+            // Responsive without hammering AVFoundation.
             try? await Task.sleep(for: .milliseconds(150))
         }
-        // Timed out. Proceed anyway: the AudioMixer will log a
-        // "No Core Audio device matches UID" warning and continue
-        // without that channel — better than blocking indefinitely.
+        // Timed out. Carry on; the mixer logs the missing device and records
+        // without that channel.
     }
 
     // MARK: - Preview
@@ -1165,9 +974,7 @@ final class MainViewModel: ObservableObject {
         defer { isStartingPreview = false }
         stopPreview()
 
-        // Recheck mic permission right before any capture work. If the
-        // user just granted access in System Settings, this clears the
-        // stale "denied" status.
+        // Clears a stale "denied" status if access was just granted.
         recheckAudioPermission(reason: "startPreview")
 
         guard let src = selectedMainSource else {
@@ -1175,9 +982,8 @@ final class MainViewModel: ObservableObject {
             return
         }
 
-        // Screen sources need Screen Recording TCC. Surface the missing
-        // permission state before SCStream errors out — it would, but
-        // with a less-readable message.
+        // Catch missing Screen Recording permission here; SCStream's own error
+        // is less readable.
         if src.kind != .camera {
             recheckScreenCapturePermission(reason: "startPreview")
             guard screenCapturePermissionGranted else {
@@ -1197,10 +1003,7 @@ final class MainViewModel: ObservableObject {
                 }
                 let svc = CameraCaptureService()
                 svc.onRecordBuffer = { [weak self] sb in
-                    // Stash the latest frame for the Screenshot button.
-                    // Cheap pointer copy; CIImage conversion only
-                    // happens when the user actually triggers a
-                    // screenshot.
+                    // Keep the latest frame for screenshots (a pointer copy).
                     if let pb = CMSampleBufferGetImageBuffer(sb) {
                         self?.frameCache.store(pb)
                     }
@@ -1218,20 +1021,14 @@ final class MainViewModel: ObservableObject {
                     status = "Display source missing displayID"
                     return
                 }
-                // Re-fetch SCShareableContent so we get fresh SCDisplay/
-                // SCWindow objects (VideoSource only carries the IDs).
-                // Cheap call — SCShareableContent caches internally.
+                // VideoSource only carries IDs, so fetch fresh SCDisplay objects.
                 let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
                 guard let display = content.displays.first(where: { $0.displayID == targetID }) else {
                     status = "Display \(targetID) no longer available — hit Refresh and reselect."
                     return
                 }
-                // Exclude Recaptr's own windows from the captured
-                // frame. Without this, capturing the display Recaptr
-                // is running on creates an infinite-mirror artifact
-                // (preview shows itself showing itself…).
-                // Excluding the app rather than its current windows also
-                // keeps out windows opened later (the capture outline).
+                // Exclude Recaptr to avoid an infinite mirror. Excluding the app, not
+                // its current windows, also covers windows opened later (the outline).
                 let myBundleID = Bundle.main.bundleIdentifier
                 let filter: SCContentFilter
                 if let me = content.applications.first(where: { $0.bundleIdentifier == myBundleID }) {
@@ -1256,10 +1053,7 @@ final class MainViewModel: ObservableObject {
                     status = "Window \(targetID) no longer available — hit Refresh and reselect."
                     return
                 }
-                // SCContentFilter has a desktop-independent window
-                // initializer specifically for the single-window case.
-                // No exclusion needed — only the chosen window is in
-                // the capture.
+                // A single-window filter captures only that window; nothing to exclude.
                 let filter = SCContentFilter(desktopIndependentWindow: window)
                 let svc = makeScreenService(audioViaMixer: micArmed)
                 let size = screenResolution.fit(ScreenResolution.pixelSize(of: window))
@@ -1274,22 +1068,13 @@ final class MainViewModel: ObservableObject {
             scheduleUITestAutoRecordIfRequested()
             replayAvailable = screenService?.isReplayBuffering ?? false
 
-            // Audio pipeline depends on source kind:
-            //   .camera  → AudioMixer (mic capture)
-            //   .screen* → SCStream's .audio output (system loopback)
-            //
-            // The mixer is bypassed entirely for screen sources so we
-            // don't end up with two competing audio inputs at the
-            // recorder. Mixing mic narration on top of system audio
-            // would require routing SCStream audio + mic through the
-            // mixer with per-source levels — not the current shape.
+            // Cameras use the mixer. Screen sources send system audio straight to
+            // the recorder, or through the mixer when a mic is armed.
             let audioLabel: String
             switch src.kind {
             case .camera:
                 hasScreenAudio = false
-                // Start the audio mixer so VU meters work pre-record.
-                // The mixer keeps running through Record / Stop; it
-                // only stops when preview ends.
+                // The mixer runs for the whole preview so meters work before recording.
                 configureMixerFromUIState()
                 if audioMixer.hasAnyEnabledChannel {
                     do {
@@ -1330,31 +1115,22 @@ final class MainViewModel: ObservableObject {
         }
     }
 
-    /// Factor screen-service construction so display and window cases
-    /// share the same callback wiring.
-    ///
-    /// - `onRecordBuffer` pushes frames into the recorder and stashes
-    ///   the latest pixel buffer for the Screenshot button.
-    /// - `onAudioBuffer` wires SCStream system audio directly into the
-    ///   recorder, bypassing the AudioMixer (mic-only path).
-    /// - `onStreamStopped` tears down preview cleanly when the stream
-    ///   dies (display disconnected, window closed mid-capture,
-    ///   permission revoked while running).
+    /// Builds a screen service with the callbacks shared by display and
+    /// window capture. Preview stops if the stream dies (display unplugged,
+    /// window closed, permission revoked).
     private func makeScreenService(audioViaMixer: Bool) -> ScreenCaptureService {
         let svc = ScreenCaptureService()
         svc.instantReplay = instantReplay
         svc.onRecordBuffer = { [weak self] sb in
-            // Cache the latest pixel buffer for the Screenshot button
-            // (same pattern as the camera path).
+            // Keep the latest frame for screenshots.
             if let pb = CMSampleBufferGetImageBuffer(sb) {
                 self?.frameCache.store(pb)
             }
             self?.recorder.appendVideo(sb)
         }
-        // Without a mic, system audio goes straight to the recorder
-        // with its own capture timestamps (tightest A/V sync). With a
-        // mic, it goes through the mixer's System channel so the two
-        // can be mixed.
+        // Without a mic, system audio goes straight to the recorder with its
+        // own timestamps (tightest A/V sync). With a mic, it goes through the
+        // mixer's System channel.
         let systemChannel = audioMixer.channel(at: 2)
         svc.onAudioBuffer  = { [weak self] sb in
             if audioViaMixer {
@@ -1379,22 +1155,18 @@ final class MainViewModel: ObservableObject {
         if isRecording {
             Task { await self.stopRecording() }
         }
-        // Mixer + stats timer tear down with preview. The mixer's
-        // lifecycle is scoped to preview, not recording.
+        // The mixer lives as long as the preview, not the recording.
         if audioMixer.running { audioMixer.stop() }
         stopStatsTimer()
-        // Reset transient mixer stats so VU meters go dark when
-        // preview is off (otherwise the last-known values linger).
+        // Reset so the meters go dark instead of holding the last value.
         mixerStats = AudioMixerStats()
 
         cameraService?.stop()
         cameraService = nil
         lowLightNoiseReductionSupported = false
 
-        // Tear down the screen service if one is active.
-        // `SCStream.stopCapture` is async; hand it off to a Task so
-        // `stopPreview()` stays sync. Nil the reference immediately so
-        // any new `startPreview()` doesn't see the old one.
+        // `stop()` is async; nil the reference first so a new preview doesn't
+        // see the old service.
         if let svc = screenService {
             screenService = nil
             Task { await svc.stop() }
@@ -1404,8 +1176,7 @@ final class MainViewModel: ObservableObject {
         captureOutline.hide()
 
         previewSinkLayer.flush()
-        // Clear the cached preview frame so a stale frame from this
-        // source can't be saved as a "screenshot" after preview ends.
+        // Drop the cached frame so it can't be saved after preview ends.
         frameCache.clear()
         isPreviewing = false
         if status.hasPrefix("Previewing") { status = "Idle" }
@@ -1421,20 +1192,14 @@ final class MainViewModel: ObservableObject {
         }
         guard !isRecording else { return }
 
-        // Fresh markers list for the new session.
         markers = []
 
-        // Audio path forks on source kind. Screen sources use
-        // `SCStream`'s `.audio` output (`hasScreenAudio`); camera
-        // sources use the AudioMixer (already running from preview).
-        // Either path produces an audio track in the file.
+        // Screen sources record the SCStream audio; cameras use the mixer,
+        // already running from preview.
         hasAudio = hasScreenAudio || (audioMixer.running && audioMixer.hasAnyEnabledChannel)
 
-        // Resolve the save directory before starting the writer.
-        // User-selected folder when set and accessible, sandbox
-        // container otherwise. Per-recording resolution is cheap
-        // (one FS-existence check) and lets a newly-attached external
-        // drive pick up without an app restart.
+        // Resolved per recording so a newly attached drive works without a
+        // restart.
         let saveDir: URL
         do {
             saveDir = try recordingStorage.resolveSaveDirectory()
@@ -1443,12 +1208,8 @@ final class MainViewModel: ObservableObject {
             return
         }
 
-        // Disk-space pre-check. 1080p60 H.264 averages ~135 MB/min
-        // and 4K60 closer to 400 MB/min; aborting under 2 GB free
-        // prevents starting a recording that would fail several
-        // minutes in when the writer can't extend the file. Uses
-        // `.volumeAvailableCapacityForImportantUsageKey` so iCloud,
-        // Time Machine, and Spotlight reserved space is excluded.
+        // Refuse to start under 2 GB free (4K60 runs about 400 MB/min) rather
+        // than fail minutes in.
         let minFreeBytes: Int64 = 2_000_000_000
         do {
             let values = try saveDir.resourceValues(
@@ -1463,10 +1224,7 @@ final class MainViewModel: ObservableObject {
                 return
             }
         } catch {
-            // Probe failed — don't block recording on this. The user
-            // might be on a volume that doesn't report capacity
-            // (e.g. a network mount with a bad responder). Better to
-            // let the recorder try and fail honestly.
+            // Some volumes (network mounts) don't report capacity. Don't block on it.
             print("Recaptr: disk space probe failed (continuing): \(error.localizedDescription)")
         }
 
@@ -1498,16 +1256,13 @@ final class MainViewModel: ObservableObject {
                 reason: "Recaptr is recording"
             )
             recordingElapsed = 0
-            // Don't reset mixerStats — preview's VU/state continuity
-            // is more useful than a clean slate at the moment record
-            // starts.
+            // mixerStats aren't reset so the meters stay continuous.
             liveStats = RecorderStats()
             lastRecordedFile = nil
             lastFileProbeSummary = nil
             let audioLabel = hasAudio ? " + audio (mixer)" : " (video only — no audio armed)"
             status = "Recording → \(url.lastPathComponent)\(audioLabel)"
-            // Stats timer is already running from preview — no need
-            // to restart.
+            // The stats timer is already running from preview.
         } catch {
             status = "Recorder error: \(error.localizedDescription)"
         }
@@ -1515,8 +1270,7 @@ final class MainViewModel: ObservableObject {
 
     func stopRecording() async {
         guard isRecording else { return }
-        // Mixer + stats timer keep running for ongoing preview /
-        // monitoring. Only the recorder stops here.
+        // Only the recorder stops; the mixer and stats timer keep running.
         let url = await recorder.stop()
         isRecording = false
         markerHotKey?.unregister()
@@ -1530,9 +1284,7 @@ final class MainViewModel: ObservableObject {
         recordingURL = nil
         lastRecordedFile = url
 
-        // Take one final stats snapshot AFTER stop() so accurate
-        // numbers reach the summary even if the last tick came
-        // moments before the user pressed Stop.
+        // Snapshot after stop() so the summary has the final numbers.
         liveStats = recorder.stats()
         mixerStats = audioMixer.snapshot()
 
@@ -1547,11 +1299,8 @@ final class MainViewModel: ObservableObject {
         status = url.map { "Saved → \($0.lastPathComponent)  ·  \(summary)" } ?? "Recording stopped (no file)  ·  \(summary)"
 
 
-        // Open the file we just wrote and confirm what tracks
-        // actually made it in. Async so the UI doesn't block; updates
-        // `lastFileProbeSummary` + status when done. Catches the
-        // silent-recording case where the file lands but has no audio
-        // track.
+        // Probe the file's tracks (catches a take saved without audio), then
+        // name and file it.
         if let url {
             let markerSeconds = recorder.lastMarkerSeconds
             let series = SessionNaming.sanitize(seriesName)
@@ -1621,8 +1370,7 @@ final class MainViewModel: ObservableObject {
         if base != take.url.deletingPathExtension().lastPathComponent {
             target = SessionNaming.uniqueURL(in: folder, base: base, ext: "mov")
             try FileManager.default.moveItem(at: take.url, to: target)
-            // The old Final Cut file points at the old name; it's
-            // replaced below.
+            // The old .fcpxml points at the old name; it's rewritten below.
             try? FileManager.default.removeItem(at: take.url.deletingPathExtension().appendingPathExtension("fcpxml"))
         }
         for index in take.markers.indices where index < markerTitles.count {
@@ -1637,9 +1385,8 @@ final class MainViewModel: ObservableObject {
         status = "Renamed to \(target.lastPathComponent)"
     }
 
-    /// Readable summary built from the final stat snapshots. Includes
-    /// per-channel state and any errors so a silent-recording cause
-    /// shows itself without needing the console.
+    /// Counters from the final stats snapshots, so the cause of a silent
+    /// take shows without the console.
     private static func buildRecordingSummary(rec: RecorderStats, mix: AudioMixerStats) -> String {
         var recPart = "v=\(rec.videoAccepted) a=\(rec.audioAccepted) drop(pre/notReady/reject)=\(rec.audioDroppedPreAnchor)/\(rec.audioDroppedNotReady)/\(rec.audioAppendRejected)"
         if rec.videoDroppedNotReady > 0 || rec.videoAppendRejected > 0 {
@@ -1688,6 +1435,7 @@ final class MainViewModel: ObservableObject {
                                       eventName: String?) async {
         do {
             if let xml = try await FinalCutMarkers.writeIfNeeded(for: url, markers: markers, eventName: eventName) {
+                // UI tests print the .fcpxml.
                 if UserDefaults.standard.bool(forKey: "RecaptrUITesting"),
                    let text = try? String(contentsOf: xml, encoding: .utf8) {
                     print("RecaptrUITest: fcpxml BEGIN\n\(text)RecaptrUITest: fcpxml END")
@@ -1700,14 +1448,9 @@ final class MainViewModel: ObservableObject {
         }
     }
 
-    /// Open the saved .mov and report what's actually in it.
-    /// "Audio track missing entirely" is a common silent-recording
-    /// failure mode; this surfaces it on the status line so it can't
-    /// be missed.
+    /// Opens the saved .mov and reports what's in it, so a missing audio
+    /// track shows on the status line.
     private func probeRecordedFile(_ url: URL) async {
-        // `AVAsset(url:)` was deprecated in macOS 15.0. `AVURLAsset`
-        // is the supported entry point; it inherits from AVAsset so
-        // `loadTracks` / `load(.duration)` still apply.
         let asset = AVURLAsset(url: url)
         do {
             let videoTracks = try await asset.loadTracks(withMediaType: .video)
@@ -1764,10 +1507,8 @@ final class MainViewModel: ObservableObject {
                     + " · vdrop notReady=\(r.videoDroppedNotReady) reject=\(r.videoAppendRejected) ptsRegression=\(r.videoDroppedPtsRegression) accepted=\(r.videoAccepted)"
             }
             #endif
-            // Combine with the recording summary so the final status
-            // shows both "what we tried to record" and "what's actually
-            // in the file." Newline separates them in the Diagnostics
-            // text in Settings > Recording.
+            // Status shows what was recorded, then what's in the file (also the
+            // Diagnostics text in Settings).
             if let pre = lastRecordingSummary {
                 status = "\(pre)\n\(probeSummary)"
             } else {
@@ -1788,10 +1529,8 @@ final class MainViewModel: ObservableObject {
 
     // MARK: - UI test hook: record without keystrokes
 
-    /// `-RecaptrUITesting YES -RecaptrUITestAutoRecord <seconds>`
-    /// records once, 3 s after preview starts, for <seconds>, then
-    /// quits after the file probe prints. Lets a capture be verified
-    /// from the command line without sending keystrokes.
+    /// `-RecaptrUITestAutoRecord <seconds>`: record once, 3 s after preview
+    /// starts, then quit after the file probe prints.
     private var uiTestAutoRecordDone = false
     private func scheduleUITestAutoRecordIfRequested() {
         let d = UserDefaults.standard
@@ -1799,8 +1538,7 @@ final class MainViewModel: ObservableObject {
         let seconds = d.double(forKey: "RecaptrUITestAutoRecord")
         guard seconds > 0 else { return }
         uiTestAutoRecordDone = true
-        // `-RecaptrUITestResetNaming YES` clears the saved series and
-        // history (cleanup after earlier test runs saved them).
+        // -RecaptrUITestResetNaming YES: clear the saved series and history.
         if d.bool(forKey: "RecaptrUITestResetNaming") {
             UserDefaults.standard.removeObject(forKey: "RecaptrSeries")
             UserDefaults.standard.removeObject(forKey: "RecaptrSeriesHistory")
@@ -1811,36 +1549,33 @@ final class MainViewModel: ObservableObject {
         Task { @MainActor in
             try? await Task.sleep(for: .seconds(3))
             await startRecording()
-            // `-RecaptrUITestMonitor YES` monitors the source during
-            // the take (latency tests: the mic hears the speakers).
-            // Live levels a few seconds in: proves channels carry sound,
-            // not just silent buffers.
+            // Levels a few seconds in show the channels carry sound, not silence.
             Task { @MainActor in
                 try? await Task.sleep(for: .seconds(4))
                 let fmt: ((rms: Float, peak: Float)?) -> String = { l in l.map { String(format: "%.1f dBFS peak", $0.peak) } ?? "none" }
                 print("RecaptrUITest: levels source=\(fmt(self.channelLevels(0))) mic=\(fmt(self.channelLevels(1)))")
             }
-            // Outline check: is a Recaptr window up at status-bar level?
+            // Window layers, for the outline check.
             let mine = (CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? [])
                 .filter { ($0[kCGWindowOwnerPID as String] as? Int32) == ProcessInfo.processInfo.processIdentifier }
                 .compactMap { $0[kCGWindowLayer as String] as? Int }
             print("RecaptrUITest: own window layers \(mine.sorted())")
-            // The capture outline: a Recaptr window at status-bar level
-            // the size of a display (the menu bar item is also at that
-            // level, so layer alone proves nothing).
+            // The outline: a display-sized Recaptr window at status-bar level (the
+            // menu bar item shares that level, so layer alone proves nothing).
             let outlines = (CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? [])
                 .filter { ($0[kCGWindowOwnerPID as String] as? Int32) == ProcessInfo.processInfo.processIdentifier
                     && ($0[kCGWindowLayer as String] as? Int) == 25
                     && (($0[kCGWindowBounds as String] as? [String: CGFloat])?["Width"] ?? 0) > 800 }
             print("RecaptrUITest: capture outline windows \(outlines.count)")
+            // -RecaptrUITestMonitor YES: monitor the source during the take (latency tests).
             if d.bool(forKey: "RecaptrUITestMonitor") {
-                // `-RecaptrUITestMonitorVolume 0` keeps a mic monitor
-                // silent (no feedback through speakers).
+                // -RecaptrUITestMonitorVolume <n>: monitor volume (0 avoids speaker feedback).
                 if let v = d.object(forKey: "RecaptrUITestMonitorVolume") as? NSNumber { monitorVolume = v.doubleValue }
                 else if let v = d.string(forKey: "RecaptrUITestMonitorVolume"), let n = Double(v) { monitorVolume = n }
                 monitorEnabled = true
             }
             #if DEBUG
+            // -RecaptrUITestMeasureMonitorLag YES: log monitor buffer fill every 10 s, then measure lag.
             if d.bool(forKey: "RecaptrUITestMeasureMonitorLag") {
                 Task { @MainActor [weak self] in
                     for _ in 0..<Int(seconds / 10) {
@@ -1856,8 +1591,7 @@ final class MainViewModel: ObservableObject {
                 }
             }
             #endif
-            // `-RecaptrUITestAutoMarkers <n>` drops n markers spread
-            // evenly through the take.
+            // -RecaptrUITestAutoMarkers <n>: drop n markers spread evenly through the take.
             let markerCount = max(0, d.integer(forKey: "RecaptrUITestAutoMarkers"))
             let slice = seconds / Double(markerCount + 1)
             for _ in 0..<markerCount {
@@ -1888,12 +1622,10 @@ final class MainViewModel: ObservableObject {
 
     // MARK: - Live audio device changes
 
-    /// Apply a changed device or enable selection while previewing.
-    /// Camera sources restart only the audio mixer, so video keeps
-    /// running. Screen sources route system audio differently with and
-    /// without a mic, so arming or disarming the mic restarts the
-    /// preview; changing which mic restarts only the mixer. Locked
-    /// while recording (Settings disables the pickers).
+    /// Applies a device or enable change while previewing. Cameras restart
+    /// only the mixer. Screen sources route system audio differently with
+    /// and without a mic, so arming or disarming the mic restarts preview.
+    /// Ignored while recording.
     func applyAudioSelectionChange() {
         guard isPreviewing, !isRecording, !isStartingPreview,
               let src = selectedMainSource else { return }
@@ -1972,13 +1704,9 @@ final class MainViewModel: ObservableObject {
     /// True when a commentary mic is chosen and switched on.
     private var micArmed: Bool { ch2Enabled && ch2DeviceID != nil }
 
-    /// Snapshot UI state into the mixer's channels before
-    /// `mixer.start()` (called from `startPreview`).
-    ///
-    /// Camera sources mix source audio (channel 1) with the mic.
-    /// Screen sources mix SCStream system audio (the System channel)
-    /// with the mic; channel 1 stays off because its device belongs to
-    /// the camera path.
+    /// Copies UI state into the mixer's channels before `start()`. Screen
+    /// sources mix the System channel with the mic; channel 1 stays off
+    /// because its device belongs to the camera path.
     private func configureMixerFromUIState(screenSource: Bool = false) {
         let ch1 = audioMixer.channel(at: 0)
         ch1?.deviceUniqueID = ch1DeviceID
@@ -1993,9 +1721,8 @@ final class MainViewModel: ObservableObject {
         ch2?.deviceLabel = label(forAudioDeviceID: ch2DeviceID)
         ch2?.gain = Float(ch2Gain)
         ch2?.enabled = micArmed
-        // Screen and window captures monitor the mic only: the system
-        // audio already plays through the speakers, and monitoring it
-        // too doubled everything (Brandon, 2026-09-27).
+        // Screen captures monitor only the mic: system audio already plays
+        // through the speakers.
         ch2?.monitorEnabled = monitorEnabled && screenSource
         ch2?.monitorVolume = Float(monitorVolume)
 
@@ -2015,9 +1742,7 @@ final class MainViewModel: ObservableObject {
 
     private func startStatsTimer() {
         stopStatsTimer()
-        // The `guard let strongSelf` inside the closure is required
-        // for Swift 6 strict concurrency: the Task needs to capture
-        // an immutable `let`, not a weak `var` optional.
+        // `strongSelf` is a let so the Task can capture it under Swift 6 concurrency.
         let timer = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
             guard let strongSelf = self else { return }
             Task { @MainActor in
@@ -2035,8 +1760,7 @@ final class MainViewModel: ObservableObject {
     /// Free space left when a take is stopped cleanly rather than
     /// letting the writer fail on a full disk.
     static var stopBelowBytes: Int64 {
-        // `-RecaptrUITestStopBelowGB <n>` raises it so tests can
-        // trigger the stop without filling a drive.
+        // -RecaptrUITestStopBelowGB <n>: raise the threshold so tests can trigger the stop.
         let override = UserDefaults.standard.double(forKey: "RecaptrUITestStopBelowGB")
         return isUITesting && override > 0 ? Int64(override * 1e9) : 1_000_000_000
     }
@@ -2047,7 +1771,7 @@ final class MainViewModel: ObservableObject {
     /// Set when Recaptr stops a take itself; shown above the summary.
     private var stopReason: String?
 
-    /// Once a second while recording (disk checked every 10 s).
+    /// Runs once a second while recording; disk is checked every 10 s.
     private func checkRecordingHealth() {
         if Date().timeIntervalSince(lastDiskCheck) >= Self.diskCheckInterval,
            let dir = recordingURL?.deletingLastPathComponent(),
@@ -2073,8 +1797,8 @@ final class MainViewModel: ObservableObject {
         }
     }
 
-    /// Seconds between free-space checks (`-RecaptrUITestDiskCheckSeconds`
-    /// shortens it in tests).
+    /// Seconds between free-space checks. `-RecaptrUITestDiskCheckSeconds <n>`
+    /// overrides it in tests.
     private static var diskCheckInterval: TimeInterval {
         let override = UserDefaults.standard.double(forKey: "RecaptrUITestDiskCheckSeconds")
         return isUITesting && override > 0 ? override : 10
@@ -2086,9 +1810,8 @@ final class MainViewModel: ObservableObject {
     }
 
     private func tickStats() {
-        // Mixer stats refresh whenever the mixer is running (preview
-        // AND recording). Recorder stats and the elapsed timer only
-        // refresh during actual recording.
+        // Mixer stats update during preview and recording; recorder stats and
+        // the timer only while recording.
         if audioMixer.running {
             mixerStats = audioMixer.snapshot()
         }
@@ -2105,8 +1828,7 @@ final class MainViewModel: ObservableObject {
         liveStats = snapshot
         checkRecordingHealth()
 
-        // Surface a writer failure mid-recording so a long session
-        // doesn't burn 20 minutes producing nothing.
+        // Stop on a writer failure so a long take doesn't record nothing.
         if snapshot.writerStatus == .failed {
             let msg = snapshot.writerErrorDescription ?? "writer failed"
             stopReason = "Writer failed mid-recording: \(msg)"

@@ -2,14 +2,8 @@
 //  FinalCutMarkers.swift
 //  Recaptr
 //
-//  Writes a Final Cut Pro XML file next to a recording that has clip
-//  markers. The .fcpxml is where markers live (the .mov has none; see
-//  Recorder): double-click it (or File > Import > XML) and the clip
-//  arrives with every marker on its frame.
-//
-//  Frame size, rate and length are read back from the finished file.
-//  FCPXML 1.11 (Final Cut 10.6.6 and later); validated against Final
-//  Cut's bundled DTD.
+//  Writes an FCPXML 1.11 file (Final Cut 10.6.6+) beside a recording.
+//  Markers live here, not in the .mov.
 //
 
 import Foundation
@@ -17,11 +11,8 @@ import AVFoundation
 
 enum FinalCutMarkers {
 
-    /// Write `<recording>.fcpxml` beside `movURL` when the take had
-    /// markers or belongs to a series (the file's event is the series,
-    /// so episodes import together). `markers` are titles and offsets
-    /// from the first frame. Returns the written URL, or nil when
-    /// there was nothing to write.
+    /// Writes `<recording>.fcpxml` when the take has markers or a series.
+    /// The event is named after the series so episodes import together.
     @discardableResult
     static func writeIfNeeded(for movURL: URL, markers: [(title: String, seconds: Double)],
                               eventName: String? = nil) async throws -> URL? {
@@ -42,11 +33,8 @@ enum FinalCutMarkers {
         return out
     }
 
-    /// The capture's real frame rate, from the typical spacing of the
-    /// first frames. The track's nominal rate is an average, so frames
-    /// lost to a source dropout pull it down: a 2026-09-27 hour at 60
-    /// fps averaged 59.944, which read as 59.94 and gave Final Cut the
-    /// wrong frame rate.
+    /// The real frame rate from the first frames' spacing. The nominal rate
+    /// is an average, so source dropouts pull 60 down toward 59.94.
     static func frameRate(of video: AVAssetTrack, in asset: AVURLAsset) async throws -> Double {
         let nominal = Double(try await video.load(.nominalFrameRate))
         let reader = try AVAssetReader(asset: asset)
@@ -65,10 +53,8 @@ enum FinalCutMarkers {
         return frameRate(fromTimes: times) ?? nominal
     }
 
-    /// Frame rate from frame times: the mean spacing, leaving out
-    /// dropouts (spacings over 1.5x the median), snapped to a standard
-    /// rate when close. The mean, not the median, because capture
-    /// timestamps jitter by a millisecond or so. Nil with too few frames.
+    /// Mean frame spacing, skipping gaps over 1.5x the median, snapped to a
+    /// standard rate. Mean rather than median because timestamps jitter.
     static func frameRate(fromTimes times: [Double]) -> Double? {
         let sorted = times.sorted()
         guard sorted.count >= 30 else { return nil }

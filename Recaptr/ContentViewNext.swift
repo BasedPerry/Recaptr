@@ -2,28 +2,7 @@
 //  ContentViewNext.swift
 //  Recaptr
 //
-//  Video-first window surface. All chrome floats over the preview,
-//  fades on idle, wakes on mouse move — modeled after QuickTime
-//  Player's borderless playback chrome.
-//
-//  Surface plan (each overlay is positioned with alignment on the
-//  preview):
-//    Top center       — SourceSwitcherPill
-//    Top right        — Settings gear (opens the Settings window)
-//    Right edge       — AudioModule (gain + VU + monitor toggle)
-//    Bottom center    — RecordingControlsPill
-//    Bottom left      — Recording telemetry pill (only while recording)
-//    Center (empty)   — "Select a source" hint when nothing is picked
-//
-//  Behavior:
-//    - Mouse idle for `fadeDelay` seconds → chrome fades to 0 % opacity.
-//    - Mouse moves (`onContinuousHover .active`) → chrome wakes.
-//    - When no source is selected, chrome stays visible regardless.
-//    - When recording, fade still applies; click anywhere to wake.
-//    - The gear (and ⌘, from the app menu) opens the Settings window.
-//
-//  Paired with `.windowStyle(.hiddenTitleBar)` in RecaptrApp.swift so
-//  the preview runs edge-to-edge under the traffic lights.
+//  Main window: full-bleed preview with floating chrome that fades on idle.
 //
 
 import SwiftUI
@@ -33,39 +12,28 @@ struct ContentViewNext: View {
 
     @EnvironmentObject var vm: MainViewModel
 
-    /// Source sidebar open? While it is, the floating source pill
-    /// steps aside (the sidebar is its expanded form).
+    /// The floating source pill hides while the sidebar is open.
     @Binding var sidebarVisible: Bool
 
-    // Local UI state.
     @State private var activeMode: SourceMode = .camera
     @Environment(\.openSettings) private var openSettings
 
-    // Fade-out behavior.
     @State private var chromeOpacity: Double = 1.0
     @State private var fadeTask: Task<Void, Never>? = nil
     private let fadeDelay: TimeInterval = 3.0
 
-    // Soft brand-gradient halo pulsed on a successful screenshot.
     @State private var screenshotFlashOpacity: Double = 0
-    // Green edge glow pulsed when a clip marker lands.
     @State private var markerFlashOpacity: Double = 0
 
-    // System state the chrome follows.
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         ZStack {
-            // Layer 0 — graphite ground beneath the preview (visible
-            // around the preview if aspect ratios disagree).
             Color.recaptrBackground.ignoresSafeArea()
 
-            // Layer 1 — Preview surface (edge to edge).
-            // Inside a black device-style bezel (rounded picture, black
-            // surround), like a MacBook display. Preview only: the
-            // recording is untouched.
-            // The view takes the picture's own shape first, so the
-            // rounded corners land on the picture, not the letterbox.
+            // Aspect ratio first, then clip, so the rounded corners land
+            // on the picture and not the letterbox. Preview only; the
+            // recording is not affected.
             SampleBufferPreviewRepresentable(vm: vm)
                 .aspectRatio(previewAspect, contentMode: .fit)
                 .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
@@ -74,18 +42,13 @@ struct ContentViewNext: View {
                 .background(Color.black)
                 .ignoresSafeArea()
 
-            // Layer 2 — Hint shown only when nothing is selected.
             if vm.selectedMainSource == nil {
                 noSourceHint
             }
 
-            // Layer 3 — Floating chrome (fades on idle).
-            // One container for every floating glass surface so the
-            // system renders them as a single glass layer.
-            // No extra dimming when the window is inactive: the glass
-            // already takes the system's inactive look, and dimming on
-            // top of it made the controls nearly invisible whenever
-            // another app (Final Cut) had focus.
+            // One container so the system renders all floating glass as
+            // one layer. Don't add inactive-window dimming: glass already
+            // dims itself, and doubling it makes the controls unreadable.
             GlassEffectContainer {
                 chromeLayer
             }
@@ -96,8 +59,7 @@ struct ContentViewNext: View {
                 .animation(reduceMotion ? .linear(duration: 0.1) : .easeInOut(duration: 0.35),
                            value: chromeOpacity)
 
-            // Layer 3b — recording status. Outside the fading chrome
-            // so the elapsed time is always visible while recording.
+            // Outside the fading chrome so elapsed time stays visible.
             if vm.isRecording {
                 telemetryFloating
                     .padding(.bottom, 28)
@@ -108,15 +70,10 @@ struct ContentViewNext: View {
                                 : .opacity.combined(with: .move(edge: .bottom)))
             }
 
-            // Layer 4 — screenshot flash. Brand-gradient angular
-            // border, blurred for glow, pulses once on a successful
-            // screenshot (~0.6 s total so it doesn't disrupt the
-            // recording).
             screenshotFlashOverlay
                 .allowsHitTesting(false)
 
-            // Layer 5 — marker glow. Only in the hierarchy while it
-            // plays, so it costs nothing the rest of the time.
+            // Only in the hierarchy while it plays, so it costs nothing otherwise.
             if markerFlashOpacity > 0 {
                 markerFlashOverlay
                     .allowsHitTesting(false)
@@ -127,9 +84,6 @@ struct ContentViewNext: View {
             if new > old { triggerMarkerFlash() }
         }
         .frame(minWidth: 980, minHeight: 620)
-        // Mouse-move tracking that wakes the chrome and resets the
-        // idle timer. `.onContinuousHover` fires continuously while
-        // the mouse is moving inside the view.
         .onContinuousHover { phase in
             switch phase {
             case .active:
@@ -138,21 +92,6 @@ struct ContentViewNext: View {
                 break
             }
         }
-        // Window-level keyboard shortcuts:
-        //   ⌘,   Settings (provided by the Settings scene's app menu item)
-        //   ⌘R   Toggle record / stop
-        //   ⌘K   Toggle monitor mute
-        //   ⌘B   Drop clip marker (⌃⌥⌘B from any app while recording,
-        //        see GlobalHotKey)
-        //   ⇧⌘R  Save instant replay (last 15 s, screen sources)
-        //   ⌃⌘S  Show / hide the source sidebar
-        //   ⌘1   Switch to Window mode
-        //   ⌘2   Switch to Screen mode
-        //   ⌘3   Switch to Camera mode
-        //
-        // SwiftUI binds `.keyboardShortcut` to a real Button in the
-        // view hierarchy; hidden buttons inside `shortcutCarrier`
-        // carry the bindings without taking visual space.
         .background(shortcutCarrier)
         .overlay(alignment: .bottomTrailing) { uiTestProbe }
         .onAppear {
@@ -163,16 +102,9 @@ struct ContentViewNext: View {
         .onChange(of: vm.selectedMainSource) { _, new in
             syncActiveModeFromVM()
             resetFadeIfNeeded()
-            // When the video source changes, also auto-pick the
-            // matching audio (camera-mode only — see
-            // `MainViewModel.autoSelectAudioForCurrentSource`).
             vm.autoSelectAudioForCurrentSource()
-            // Always restart preview when the source changes. Guarding
-            // on `!vm.isPreviewing` here would let a source switch
-            // appear to take effect in the UI while the preview surface
-            // kept showing the old source; `startPreview()` handles
-            // stop-then-start internally so calling it unconditionally
-            // is safe.
+            // Restart unconditionally. Guarding on `isPreviewing` leaves
+            // the old source on screen; startPreview() stops first itself.
             if new != nil {
                 Task { await vm.startPreview() }
             }
@@ -181,9 +113,7 @@ struct ContentViewNext: View {
 
     // MARK: - Floating chrome layer
 
-    /// All floating glass elements positioned with alignment on the
-    /// preview. Wraps a Color.clear base so overlays anchor to the
-    /// available space.
+    /// Floating controls, anchored by overlay alignment on a clear base.
     private var chromeLayer: some View {
         Color.clear
             .overlay(alignment: .top) {
@@ -211,9 +141,6 @@ struct ContentViewNext: View {
                     .padding(.trailing, 16)
             }
             .overlay(alignment: .trailing) {
-                // Right-edge audio surface: GAIN + live VU on top,
-                // MONITOR toggle on bottom. Reads `vm.monitorEnabled`
-                // and `vm.monitorVolume` directly.
                 AudioModule()
                     .environmentObject(vm)
                     .padding(.trailing, 16)
@@ -264,8 +191,6 @@ struct ContentViewNext: View {
                 .font(.system(size: 15, weight: .medium))
                 .frame(width: 28, height: 28)
         }
-        // System glass button: follows the Liquid Glass look setting
-        // and gets the native hover / press response for free.
         .buttonStyle(.glass)
         .buttonBorderShape(.circle)
         .controlSize(.large)
@@ -274,16 +199,13 @@ struct ContentViewNext: View {
         .accessibilityIdentifier("settingsButton")
     }
 
-    // MARK: - Recording status (always visible while recording)
+    // MARK: - Recording status
 
-    /// Small and quiet on purpose: red dot, elapsed time, file size,
-    /// and the marker count once there is one. Stays up while the rest
-    /// of the chrome fades, so the time is readable without hovering.
     private var telemetryFloating: some View {
         RecordingPill(clock: vm.clock, markerCount: vm.markers.count)
     }
 
-    // MARK: - "Select a source" hint (center, no source picked)
+    // MARK: - No-source hint
 
     private var noSourceHint: some View {
         VStack(spacing: 10) {
@@ -299,8 +221,7 @@ struct ContentViewNext: View {
         }
         .padding(24)
         .frame(maxWidth: 360)
-        // Sits on the always-dark letterbox, not on glass, so pin
-        // the hierarchical styles to their dark variants.
+        // Sits on the always-dark letterbox, not glass.
         .environment(\.colorScheme, .dark)
     }
 
@@ -314,12 +235,9 @@ struct ContentViewNext: View {
         scheduleFade()
     }
 
-    /// Schedule a fade-out after `fadeDelay` seconds. Cancelled by
-    /// any mouse move via `wakeChrome`.
     private func scheduleFade() {
-        guard vm.selectedMainSource != nil else { return }  // keep visible when nothing selected
-        // Launch argument `-RecaptrKeepChromeVisible YES` disables the
-        // idle fade for UI tests and screenshot passes.
+        guard vm.selectedMainSource != nil else { return }
+        // `-RecaptrKeepChromeVisible YES` disables the fade for UI tests and screenshots.
         guard !UserDefaults.standard.bool(forKey: "RecaptrKeepChromeVisible") else { return }
         fadeTask?.cancel()
         fadeTask = Task { @MainActor in
@@ -329,10 +247,7 @@ struct ContentViewNext: View {
         }
     }
 
-    /// Re-evaluate whether the fade should be active. Called when
-    /// the selected source changes — if it just became nil, hold
-    /// the chrome visible; if it just became non-nil, start the
-    /// fade timer.
+    /// Chrome stays visible while no source is selected.
     private func resetFadeIfNeeded() {
         if vm.selectedMainSource == nil {
             fadeTask?.cancel()
@@ -375,8 +290,7 @@ struct ContentViewNext: View {
     private func pickableSources(for mode: SourceMode) -> [PickableSource] {
         vm.catalog.videoSources
             .filter { matchesMode(mode, kind: $0.kind) }
-            // The mode segment already says the kind, so drop the
-            // "Camera — " style prefix.
+            // The mode segment already names the kind, so drop the prefix.
             .map { PickableSource(id: $0.id, name: SourceSidebar.displayName($0)) }
     }
 
@@ -401,10 +315,6 @@ struct ContentViewNext: View {
     // MARK: - Action handlers
 
     private func handleScreenshot() {
-        // Captures the latest preview pixel buffer (held by
-        // `vm.frameCache`) and writes PNG to the user-picked save
-        // folder. On success, triggers the brand-gradient flash so
-        // the user gets a visible acknowledgment.
         Task {
             do {
                 _ = try await vm.captureScreenshot()
@@ -417,10 +327,8 @@ struct ContentViewNext: View {
 
     // MARK: - Screenshot flash
 
-    /// Soft brand-gradient halo on screenshot. Thin stroke with heavy
-    /// blur reads as a glow, not a border. Static (no rotation) so it
-    /// breathes evenly instead of strobing; max opacity is capped well
-    /// below 1.0 so the brand colors stay calm.
+    /// Brand-gradient glow on a successful screenshot. Opacity is capped
+    /// so the colors stay soft.
     private var screenshotFlashOverlay: some View {
         RoundedRectangle(cornerRadius: 14, style: .continuous)
             .strokeBorder(
@@ -437,10 +345,8 @@ struct ContentViewNext: View {
             .ignoresSafeArea()
     }
 
-    /// Run the flash sequence. Long-ish ease-in-out on both sides
-    /// (~250ms in, ~200ms hold, ~500ms out) so it reads as a calm
-    /// breath rather than a snap. With Reduce Motion on, it becomes a
-    /// brief static highlight with no animated ramp.
+    /// About 250 ms in, 200 ms hold, 500 ms out. Reduce Motion shows a
+    /// brief static highlight instead.
     private func triggerScreenshotFlash() {
         Task { @MainActor in
             if reduceMotion {
@@ -461,10 +367,8 @@ struct ContentViewNext: View {
 
     // MARK: - Marker flash
 
-    /// Green edge glow when a marker lands. Three plain strokes stacked
-    /// at falling opacity instead of a blur: a full-window blur runs a
-    /// filter pass every frame of the fade, stacked strokes are drawn
-    /// once and only their opacity animates.
+    /// Green edge glow when a marker lands. Stacked strokes instead of a
+    /// blur: a full-window blur re-filters every frame of the fade.
     private var markerFlashOverlay: some View {
         ZStack {
             Rectangle().strokeBorder(Color.signal.opacity(0.16), lineWidth: 30)
@@ -477,12 +381,9 @@ struct ContentViewNext: View {
         .accessibilityHidden(true)
     }
 
-    /// ~0.1 s in, short hold, ~0.45 s out. Reduce Motion: a brief
-    /// static glow with no ramp.
     private func triggerMarkerFlash() {
         Task { @MainActor in
-            // Screenshot passes: `-RecaptrUITestHoldMarkerFlash YES`
-            // holds the glow for 4 s so it can be captured.
+            // `-RecaptrUITestHoldMarkerFlash YES` holds the glow 4 s for screenshots.
             let d = UserDefaults.standard
             if d.bool(forKey: "RecaptrUITesting"), d.bool(forKey: "RecaptrUITestHoldMarkerFlash") {
                 markerFlashOpacity = 1
@@ -509,7 +410,6 @@ struct ContentViewNext: View {
             if vm.isRecording {
                 await vm.stopRecording()
             } else {
-                // Make sure preview is running first.
                 if !vm.isPreviewing {
                     await vm.startPreview()
                 }
@@ -519,16 +419,13 @@ struct ContentViewNext: View {
     }
 
     private func handleMark() {
-        // `vm.dropMarker()` appends to `vm.markers` (cleared at each
-        // `startRecording`) and updates the status line.
         vm.dropMarker()
     }
 
     // MARK: - UI test hook
 
-    /// With `-RecaptrUITesting YES`, exposes the last file-probe
-    /// summary to accessibility so UI tests can verify what actually
-    /// landed in the recorded file. Invisible and absent otherwise.
+    /// With `-RecaptrUITesting YES`, exposes the last file probe and
+    /// status line to accessibility for UI tests. Absent otherwise.
     @ViewBuilder
     private var uiTestProbe: some View {
         if UserDefaults.standard.bool(forKey: "RecaptrUITesting") {
@@ -545,12 +442,10 @@ struct ContentViewNext: View {
         }
     }
 
-    // MARK: - Keyboard shortcut carrier
-    //
-    // Hidden buttons embedded in the view hierarchy carry the
-    // `.keyboardShortcut` bindings without taking visual space. Each
-    // shortcut needs its own explicit Button (a ForEach loop won't
-    // attach the modifier chain per-button correctly).
+    // MARK: - Keyboard shortcuts
+
+    /// Hidden buttons that carry the window's shortcuts. Each needs its
+    /// own Button; a ForEach doesn't attach the shortcuts reliably.
     private var shortcutCarrier: some View {
         Group {
             Button("") { handleToggleRecord() }
@@ -574,10 +469,8 @@ struct ContentViewNext: View {
         .accessibilityHidden(true)
     }
 
-    /// Programmatic mode-switch that mirrors what tapping a segment in
-    /// the SourceSwitcherPill does — flips activeMode AND auto-picks
-    /// the first available source in that mode (so ⌘1/2/3 don't leave
-    /// the preview empty).
+    /// Same as tapping a switcher segment: also picks the first source
+    /// so ⌘1/2/3 don't leave the preview empty.
     private func selectMode(_ mode: SourceMode) {
         activeMode = mode
         if mode != .camera { vm.screenModeSelected() }
@@ -622,9 +515,8 @@ struct RecaptrRootView: View {
         }
         .navigationSplitViewStyle(.prominentDetail)
         .onAppear {
-            // UI tests start from a known layout: sidebar closed. (A
-            // launch argument can't do this: it would override the
-            // stored value for the whole run, so toggling would fail.)
+            // UI tests start with the sidebar closed. Not a launch
+            // argument: that would pin the value and break toggling.
             if UserDefaults.standard.bool(forKey: "RecaptrUITesting") {
                 sidebarVisible = false
             }
@@ -633,14 +525,12 @@ struct RecaptrRootView: View {
 }
 
 extension EnvironmentValues {
-    /// Whether the floating chrome is showing. Live meters pause when
-    /// it isn't.
+    /// Whether the floating chrome is showing. Live meters pause when it isn't.
     @Entry var chromeVisible: Bool = true
 }
 
-/// The recording status pill: red dot, elapsed time, file size, and
-/// the marker count once there is one. Observes only the recording
-/// clock, so its once-a-second update touches nothing else.
+/// Red dot, elapsed time, file size, marker count. Observes only the
+/// clock so its once-a-second tick doesn't redraw the window.
 private struct RecordingPill: View {
     @ObservedObject var clock: RecordingClock
     let markerCount: Int
@@ -662,8 +552,6 @@ private struct RecordingPill: View {
                     .font(BrandFont.mono(weight: .regular, size: 11).swiftUI)
                     .foregroundStyle(.secondary)
             }
-            // Marker count, once there is one; animates in so each
-            // drop reads as an acknowledgment.
             if markerCount > 0 {
                 HStack(spacing: 3) {
                     Image(systemName: "bookmark.fill")
@@ -679,7 +567,6 @@ private struct RecordingPill: View {
         .animation(reduceMotion ? nil : .spring(duration: 0.28, bounce: 0.35), value: markerCount)
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
-        // Plain glass: the red dot already says "recording".
         .recaptrGlass()
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("telemetryPill")

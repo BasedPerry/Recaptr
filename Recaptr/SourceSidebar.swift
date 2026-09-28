@@ -2,18 +2,8 @@
 //  SourceSidebar.swift
 //  Recaptr
 //
-//  Left sidebar: the expanded form of the floating source pill. When
-//  it's open the pill steps aside; when it's closed (the default) the
-//  preview is the whole window, QuickTime style.
-//
-//  Top: the Window / Screen / Camera switcher (the same control as the
-//  pill). Middle: that type's sources; click to switch.
-//  Bottom: tuning for the selected method (camera resolution, noise
-//  reduction, source audio; instant replay for screens and windows)
-//  plus the commentary mic, which applies to every method.
-//
-//  App-wide settings (save folder, encoding, permissions) stay in the
-//  Settings window.
+//  Sidebar form of the source pill: sources, naming, and per-source tuning.
+//  App-wide settings live in the Settings window.
 //
 
 import SwiftUI
@@ -33,16 +23,11 @@ struct SourceSidebar: View {
         )
     }
 
-    /// Type shown in the sidebar. Follows the selected source; set it
-    /// to switch type (picks that type's first source, as the pill
-    /// does).
+    /// Follows the selected source. Setting it picks that type's first source.
     @State private var mode: SourceMode = .camera
 
     var body: some View {
-        // Switcher on top, then one grouped, scrolling form: that
-        // type's sources, then that type's tuning. (A separate list
-        // and tuning area competed for height and pushed the tuning
-        // off the bottom of the window.)
+        // One scrolling form, so tuning can't be pushed off the bottom.
         VStack(spacing: 0) {
             SourceModeSegments(activeMode: modeBinding, compact: true)
                 .padding(4)
@@ -51,9 +36,6 @@ struct SourceSidebar: View {
                 .padding(.top, 8)
                 .padding(.bottom, 2)
 
-            // Apple's order: what you're capturing, then how it's
-            // named, then how it's tuned. Plain-text section headers,
-            // as in System Settings and Finder.
             Form {
                 Section("Source") {
                     sourceRows
@@ -62,8 +44,7 @@ struct SourceSidebar: View {
                 TuningSections()
             }
             .formStyle(.grouped)
-            // Sidebar meters stop while the sidebar is collapsed (its
-            // views stay alive when hidden).
+            // Collapsed sidebar views stay alive, so stop their meters.
             .environment(\.chromeVisible, isVisible)
             .scrollContentBackground(.hidden)
             .controlSize(.small)
@@ -99,8 +80,7 @@ struct SourceSidebar: View {
             Text(kind == .camera ? "No cameras connected" : kind == .screenDisplay ? "No displays" : "No windows open")
                 .foregroundStyle(.secondary)
         } else if kind == .screenWindow {
-            // Windows can be many: a menu keeps the sidebar compact,
-            // grouped by app with just the window title in each group.
+            // A menu grouped by app keeps a long window list compact.
             Picker("Window", selection: selectedID) {
                 ForEach(Self.windowGroups(sources), id: \.app) { group in
                     Section(group.app) {
@@ -146,8 +126,8 @@ struct SourceSidebar: View {
         .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 
-    /// Window names are "App: Title" after the prefix. Split on the
-    /// first ": " (titles may contain more).
+    /// Window names are "App: Title". Splits on the first ": " since
+    /// titles may contain more.
     private static func splitWindow(_ source: VideoSource) -> (app: String, title: String) {
         let name = displayName(source)
         guard let range = name.range(of: ": ") else { return (name, name) }
@@ -163,8 +143,7 @@ struct SourceSidebar: View {
             .sorted { $0.app.localizedCaseInsensitiveCompare($1.app) == .orderedAscending }
     }
 
-    /// Catalog names carry a kind prefix ("Camera — Elgato 4K X")
-    /// that the section header already says.
+    /// Strips the catalog's kind prefix, which the UI already shows.
     static func displayName(_ source: VideoSource) -> String {
         for prefix in ["Camera — ", "Screen — ", "Window — "] where source.name.hasPrefix(prefix) {
             return String(source.name.dropFirst(prefix.count))
@@ -175,9 +154,8 @@ struct SourceSidebar: View {
 
 // MARK: - Naming
 
-/// Series and Episode for recordings. Stays editable while recording:
-/// the file is renamed when the take stops, so the episode can be
-/// typed mid-take.
+/// Series and episode names. Editable while recording because the file
+/// is renamed when the take stops.
 private struct NamingSection: View {
     @EnvironmentObject var vm: MainViewModel
 
@@ -234,10 +212,7 @@ private struct NamingSection: View {
 
 // MARK: - Tuning
 
-/// Per-type tuning sections, grouped like System Settings: Video
-/// (camera), Audio (every type), Instant Replay (screen and window).
-/// Only the groups that apply are shown. Lives inside the sidebar's
-/// form, below the Source section.
+/// Video, audio, and instant replay settings for the selected source type.
 private struct TuningSections: View {
     @EnvironmentObject var vm: MainViewModel
 
@@ -252,8 +227,7 @@ private struct TuningSections: View {
                         ForEach(CaptureResolution.allCases) { Text($0.shortLabel).tag($0) }
                     }
                     .onChange(of: vm.captureResolution) { _, _ in restartCameraPreview() }
-                    // Only webcams and Continuity Camera support it;
-                    // a capture card would just show a dead switch.
+                    // Webcams and Continuity Camera only; capture cards don't support it.
                     if vm.lowLightNoiseReductionSupported {
                         Toggle("Low-light cleanup", isOn: $vm.lowLightNoiseReduction)
                             .onChange(of: vm.lowLightNoiseReduction) { _, _ in restartCameraPreview() }
@@ -276,7 +250,7 @@ private struct TuningSections: View {
                     .onChange(of: vm.screenFrameRate) { _, _ in restartScreenPreview() }
                     Toggle("Show cursor", isOn: $vm.screenShowsCursor)
                         .onChange(of: vm.screenShowsCursor) { _, _ in restartScreenPreview() }
-                    // Never recorded; green while previewing, red while recording.
+                    // Never recorded. Green while previewing, red while recording.
                     Toggle("Outline what's captured", isOn: $vm.showCaptureOutline)
                 } header: {
                     Text("Video")
@@ -287,8 +261,7 @@ private struct TuningSections: View {
 
             Section {
                 if isCamera {
-                    // "Input", not "Source": the section above is the
-                    // video source, and the two read as the same thing.
+                    // "Input", not "Source", to avoid confusion with the video source.
                     devicePicker("Input", selection: $vm.ch1DeviceID, id: "sourceDevicePicker")
                     gainRow($vm.ch1Gain)
                 } else {
@@ -355,11 +328,9 @@ private struct TuningSections: View {
         }
     }
 
-    /// Auto keeps the source's own size up to 4K; the note says what
-    /// that came to.
+    /// Shows the actual size, since Auto keeps the source's own size up to 4K.
     private var screenVideoFooter: String {
-        // Nothing until capture starts, rather than a generic line
-        // that flashes on every source switch.
+        // Empty until capture starts, so it doesn't flash on every switch.
         guard let size = vm.activeCaptureSize else { return "" }
         return "Capturing \(size.width)×\(size.height) at \(vm.screenFrameRate) fps."
     }
@@ -377,8 +348,7 @@ private struct TuningSections: View {
     }
 }
 
-/// Live horizontal level meter (Core Animation layers; see
-/// LevelMeter.swift).
+/// Live horizontal level meter.
 private struct LevelRow: View {
     let levels: () -> (rms: Float, peak: Float)?
     @Environment(\.chromeVisible) private var visible
@@ -392,7 +362,6 @@ private struct LevelRow: View {
 }
 
 extension CaptureResolution {
-    /// Compact label for the sidebar.
     var shortLabel: String {
         switch self {
         case .auto: return "Auto"

@@ -2,31 +2,7 @@
 //  Recorder.swift
 //  Recaptr
 //
-//  `AVAssetWriter` wrapper that muxes the active video pipeline
-//  (camera or SCStream) and, optionally, an audio track into an .mov.
-//
-//  Key non-obvious behaviors documented inline:
-//    - The writing session is anchored on the FIRST arriving sample
-//      of any media type, video or audio, so a recording doesn't drop
-//      the initial 50–200 ms of audio while waiting for the first
-//      video frame.
-//    - `appendVideo` enforces a strict-monotonic PTS guard.
-//      `AVAssetWriter` accepts equal or earlier PTS but the muxer
-//      emits non-monotonic-DTS warnings and the resulting file's
-//      frame timing is unreliable. `SCStream` occasionally delivers
-//      buffers with equal PTS; `AVCaptureSession` does not.
-//    - The recorder publishes a thread-safe `RecorderStats` snapshot
-//      so a long session shows live evidence that buffers are landing.
-//      The counters distinguish "rejected by our guards", "input not
-//      ready", and "rejected by the writer" (a thrown append error,
-//      typically a format mismatch with the configured output).
-//    - Uses the macOS 26 receiver API: `AVAssetWriter.inputReceiver`
-//      replaces `add(_:)`, `start()` replaces `startWriting()`, and
-//      `appendImmediately` replaces the `isReadyForMoreMediaData` +
-//      `append` pair. `appendImmediately` returns false when the input
-//      isn't ready and throws when the writer rejects a buffer, so
-//      neither case can fail silently. `expectsMediaDataInRealTime`
-//      stays on deliberately; see `_startSync`.
+//  Writes video and optional audio tracks to a .mov with AVAssetWriter.
 //
 
 import Foundation
@@ -34,10 +10,8 @@ import AVFoundation
 import CoreMedia
 import VideoToolbox
 
-/// Recording presets. Chosen from a measured comparison on 1080p60
-/// gameplay (2026-09-26): HEVC gives about 2 dB PSNR more than H.264
-/// at the same size, and the macOS 27 constant-quality factor had no
-/// effect through AVAssetWriter, so presets are codec + bitrate.
+/// Recording presets: codec plus bitrate. The constant-quality setting
+/// has no effect through AVAssetWriter, so it isn't used.
 enum VideoQuality: String, CaseIterable, Identifiable {
     /// HEVC 20 Mbps (~8 GB/hour). Matches H.264 at 30 Mbps.
     case standard
@@ -78,9 +52,8 @@ enum VideoQuality: String, CaseIterable, Identifiable {
         }
     }
 
-    /// Bitrate for a capture size: same bits per pixel as the 1080p60
-    /// measurement, so a 4K recording looks as good per pixel as a
-    /// 1080p one (4K Standard = 80 Mbps).
+    /// Bitrate scaled to keep the same bits per pixel as 1080p60
+    /// (4K Standard = 80 Mbps).
     func bitrate(width: Int32, height: Int32) -> Int {
         let scale = Double(width) * Double(height) / (1920.0 * 1080.0)
         return Int(Double(bitrateAt1080p60) * max(scale, 0.25))
@@ -102,22 +75,13 @@ struct RecorderStats: Equatable {
     var audioDroppedPreAnchor: Int = 0
     var audioDroppedNotReady: Int = 0
     var videoDroppedNotReady: Int = 0
-    /// Buffers that passed our guards but were rejected by
-    /// `AVAssetWriterInput.append()` returning false. If this climbs
-    /// while `audioAccepted` stays at zero, the writer is rejecting
-    /// our buffers — usually a format mismatch with the configured
-    /// AAC output.
+    /// Audio buffers the writer rejected. Climbing while `audioAccepted`
+    /// stays at zero usually means a format mismatch with the AAC output.
     var audioAppendRejected: Int = 0
-    /// Video buffers the writer rejected with a thrown error. Stays
-    /// at zero in a healthy recording.
+    /// Video buffers the writer rejected. Zero in a healthy recording.
     var videoAppendRejected: Int = 0
-    /// Video buffers dropped because their PTS was less than or equal
-    /// to the previously accepted video buffer's PTS. `SCStream`
-    /// occasionally delivers consecutive samples with equal PTS, which
-    /// `AVAssetWriter` accepts but the muxer warns about
-    /// (non-monotonic DTS). `AVCaptureSession` is monotonic by
-    /// contract, so this counter stays at zero for camera recordings
-    /// and climbs modestly during screen captures.
+    /// Video buffers dropped for a PTS not after the previous one.
+    /// SCStream sometimes repeats a PTS; camera capture never does.
     var videoDroppedPtsRegression: Int = 0
     var writerErrorDescription: String?
     /// Most recent append error thrown by either receiver.
@@ -133,33 +97,22 @@ final class Recorder: @unchecked Sendable {
     private var writer: AVAssetWriter?
     private var videoReceiver: AVAssetWriterInput.SampleBufferReceiver?
     private var audioReceiver: AVAssetWriterInput.SampleBufferReceiver?
-    /// Clip marker times on the capture clock. Kept in memory and
-    /// handed to the Final Cut .fcpxml when the take stops, not
-    /// written into the .mov.
-    ///
-    /// History (tested 2026-09-26): markers used to be a timed-metadata
-    /// track written live. Final Cut ignores that track, QuickTime
-    /// doesn't list it, and in 4K takes a second marker sample made
-    /// the writer fail the next append (-11800 / -17771) about 0.5 s
-    /// later, losing the whole file: 4 of 9 takes as contiguous
-    /// ranges, 9 of 9 as frame-long samples, with or without the
-    /// chapter-list link. Writing the samples at stop instead left a
-    /// file AVFoundation couldn't open.
+    /// Clip marker times on the capture clock. They go to the .fcpxml at
+    /// stop, not into the .mov: a metadata track makes the writer fail
+    /// (-11800) and Final Cut ignores it anyway.
     private var markerTimes: [CMTime] = []
-    /// Marker offsets in seconds from the first frame of the last
-    /// finished take. Set by `stop()` before it returns.
+    /// Marker offsets in seconds from the start of the last take.
     private(set) var lastMarkerSeconds: [Double] = []
 
-    /// Per-source audio tracks keyed by mixer channel label ("Audio",
-    /// "Mic", "System"). Empty for single-source recordings.
+    /// Per-source audio tracks keyed by mixer channel label. Empty for
+    /// single-source recordings.
     private var sourceReceivers: [String: AVAssetWriterInput.SampleBufferReceiver] = [:]
-    /// First source track; counted as the audio track in stats when
-    /// there is no separate mix track.
+    /// Counted as the audio track in stats when there's no mix track.
     private var primarySource: String?
     private var sessionStartTime: CMTime = .invalid
     private var isWriting = false
 
-    // Telemetry — only mutated on writerQueue, snapshotted via stats().
+    // Telemetry. Mutated on writerQueue only.
     private var videoAccepted: Int = 0
     private var audioAccepted: Int = 0
     private var audioDroppedPreAnchor: Int = 0
@@ -170,34 +123,18 @@ final class Recorder: @unchecked Sendable {
     private var videoDroppedPtsRegression: Int = 0
     private var lastAppendError: String?
     private var sourceTrackAccepted: Int = 0
-    /// Last accepted video PTS, used for the strict-monotonic guard
-    /// in `appendVideo`. Reset to `.invalid` in `_startSync`.
-    /// Newest video PTS accepted into `pendingVideo` (or written).
+    /// Newest video PTS accepted, for the monotonic guard in `appendVideo`.
     private var lastVideoPTS: CMTime = .invalid
-    /// Video frames waiting for the encoder. In real-time mode the
-    /// encoder is occasionally "not ready" for a moment; dropping those
-    /// frames cost ~2 fps under load (a UI test run measured 57.7 fps,
-    /// 2026-09-27). Holding a few and appending them as soon as it's
-    /// ready turns a brief stall into a few ms of delay. Capped so a
-    /// stuck encoder can't hold camera buffers the capture pool needs.
-    /// writerQueue only.
+    /// Frames waiting out a brief encoder "not ready" stall instead of
+    /// being dropped. Capped so a stuck encoder can't hold buffers the
+    /// capture pool needs. writerQueue only.
     private var pendingVideo: [CMSampleBuffer] = []
     private static let maxPendingVideo = 4
 
-    /// Configure and start the writer. Pass `withAudio: true` to add
-    /// the AAC audio input. The decision must be made before
-    /// `start()`; `AVAssetWriter` doesn't allow inputs to be added
-    /// afterward.
-    ///
-    /// `sourceTracks` switches to one audio track per named source
-    /// (mixer channel labels) for multi-source recordings, all enabled
-    /// and without a separate mix track: editors get each source as its
-    /// own component and players sum them.
-    ///
-    /// `saveDirectory` is the resolved folder (user-selected via
-    /// `RecordingStorage`, with the sandbox container as a fallback).
-    /// The caller is responsible for holding security scope on that
-    /// directory for the lifetime of the write.
+    /// Configures and starts the writer. Inputs can't be added after
+    /// start, so audio must be decided here. `sourceTracks` writes one
+    /// audio track per source instead of a single mix. The caller holds
+    /// security scope on `saveDirectory` for the whole write.
     func start(width: Int32, height: Int32, withAudio: Bool, sourceTracks: [String] = [],
                quality: VideoQuality = .standard,
                saveDirectory: URL) async throws -> URL {
@@ -223,28 +160,25 @@ final class Recorder: @unchecked Sendable {
 
         let url = try Self.makeOutputURL(in: saveDirectory)
         let writer = try AVAssetWriter(outputURL: url, fileType: .mov)
-        // Crash safety: write the movie in fragments, so if the Mac
-        // crashes, loses power or Recaptr is force-quit mid-take, the
-        // file still opens with everything up to the last fragment.
-        // Without this the index is only written at stop, and an
-        // interrupted take was unreadable.
+        // Fragments keep an interrupted take readable up to the last
+        // fragment. Without them the index is only written at stop.
         writer.movieFragmentInterval = Self.fragmentInterval
         #if DEBUG
+        // UI test hook: record without fragments.
         if UserDefaults.standard.bool(forKey: "RecaptrUITesting"),
            UserDefaults.standard.bool(forKey: "RecaptrUITestNoFragments") {
             writer.movieFragmentInterval = .invalid
         }
         #endif
 
-        // Video — HEVC or H.264 per preset, SDR.
         let videoSettings: [String: Any] = [
             AVVideoCodecKey: quality.codec,
             AVVideoWidthKey: NSNumber(value: width),
             AVVideoHeightKey: NSNumber(value: height),
             AVVideoCompressionPropertiesKey: Self.compressionProperties(for: quality, width: width, height: height),
         ]
-        // A setting the encoder rejects would raise an uncatchable
-        // exception at input creation; check first.
+        // Rejected settings raise an uncatchable exception at input
+        // creation, so check first.
         guard writer.canApply(outputSettings: videoSettings, forMediaType: .video) else {
             throw CaptureError.writerFailed("Encoder rejected the \(quality.label) settings")
         }
@@ -255,7 +189,6 @@ final class Recorder: @unchecked Sendable {
         }
         let videoReceiver = writer.inputReceiver(for: videoInput)
 
-        // Audio — AAC stereo, 48 kHz, single track.
         var audioReceiver: AVAssetWriterInput.SampleBufferReceiver?
         if withAudio {
             let audioSettings: [String: Any] = [
@@ -272,13 +205,9 @@ final class Recorder: @unchecked Sendable {
             if sourceTracks.isEmpty {
                 audioReceiver = writer.inputReceiver(for: ai)
             } else {
-                // Multi-source: one enabled track per source and no
-                // separate mix. Final Cut shows each as its own audio
-                // component (it ignores disabled tracks, so the earlier
-                // mix + disabled-alternates layout showed only the
-                // mix), and players sum the enabled tracks into the
-                // mix. The mixer's linked limiter keeps that sum under
-                // full scale. Tested in Final Cut 2026-09-26.
+                // One enabled track per source, no mix track. Final Cut
+                // ignores disabled tracks; players sum the enabled ones.
+                // The mixer's limiter keeps that sum under full scale.
                 for label in sourceTracks {
                     let si = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
                     Self.markRealTime(si)
@@ -307,7 +236,6 @@ final class Recorder: @unchecked Sendable {
         self.sessionStartTime = .invalid
         self.isWriting = true
 
-        // Reset counters for this session.
         self.videoAccepted = 0
         self.audioAccepted = 0
         self.audioDroppedPreAnchor = 0
@@ -325,9 +253,8 @@ final class Recorder: @unchecked Sendable {
         return url
     }
 
-    /// Anchor the writing session on whichever sample type arrives
-    /// first — video OR audio. Must be called on writerQueue while
-    /// holding `writer`.
+    /// Starts the session at the first sample of either type, so audio
+    /// before the first video frame isn't lost. writerQueue only.
     private func anchorSessionIfNeeded(at pts: CMTime, writer: AVAssetWriter) {
         guard self.sessionStartTime == .invalid else { return }
         writer.startSession(atSourceTime: pts)
@@ -336,9 +263,8 @@ final class Recorder: @unchecked Sendable {
 
     // MARK: - Markers
 
-    /// Drop a clip marker at the current moment. Stamped from the host
-    /// clock, the same time base as the capture PTS, so the marker
-    /// lines up with the frame on screen when the key was pressed.
+    /// Adds a clip marker now. Uses the host clock, the same time base
+    /// as capture PTS.
     func addMarker() {
         let now = CMClockGetTime(CMClockGetHostTimeClock())
         writerQueue.async { [weak self] in
@@ -351,7 +277,7 @@ final class Recorder: @unchecked Sendable {
         }
     }
 
-    /// How much a crash can cost at most.
+    /// The most a crash can lose.
     static let fragmentInterval = CMTime(seconds: 5, preferredTimescale: 600)
 
     private static func compressionProperties(for quality: VideoQuality,
@@ -365,8 +291,8 @@ final class Recorder: @unchecked Sendable {
         ]
     }
 
-    /// Error with its domain, code, and underlying error, for the
-    /// recording summary (the localized text alone is too generic).
+    /// Domain, code and underlying error. The localized text is too
+    /// generic for the recording summary.
     static func describe(_ error: Error) -> String {
         let ns = error as NSError
         var text = "\(ns.domain) \(ns.code)"
@@ -376,14 +302,10 @@ final class Recorder: @unchecked Sendable {
         return text
     }
 
-    /// Every input runs in real-time mode. Swift marks this deprecated
-    /// at macOS 27 in favor of the receiver's appendImmediately, but it
-    /// is still required. Tested 2026-09-26 with an Elgato 4K X at
-    /// 1080p60: without it the writer holds video back to interleave
-    /// with audio and appendImmediately reports "not ready" for ~40% of
-    /// frames (33.9 fps file); with it, 60.00 fps and zero drops. The
-    /// async append alternative would queue up to ~0.5 s of frames and
-    /// risks starving the capture buffer pool on long takes.
+    /// Deprecated in macOS 27 but still required. Without it the writer
+    /// holds video back to interleave with audio and drops ~40% of
+    /// frames as "not ready". Async append would queue up to ~0.5 s and
+    /// can starve the capture buffer pool.
     private static func markRealTime(_ input: AVAssetWriterInput) {
         input.expectsMediaDataInRealTime = true
     }
@@ -395,7 +317,7 @@ final class Recorder: @unchecked Sendable {
                   let writer = self.writer,
                   let receiver = self.videoReceiver else { return }
             guard writer.status == .writing else {
-                // Writer transitioned to .failed/.cancelled — stop accepting.
+                // Failed or cancelled.
                 self.isWriting = false
                 return
             }
@@ -403,13 +325,8 @@ final class Recorder: @unchecked Sendable {
             let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
             self.anchorSessionIfNeeded(at: pts, writer: writer)
 
-            // Strict-monotonic PTS guard. `AVAssetWriter` accepts
-            // equal or earlier PTS but the muxer emits
-            // non-monotonic-DTS warnings and the resulting file's
-            // frame timing becomes unreliable for downstream tools
-            // (ffprobe, video editors). Drop the offending buffer
-            // with a counter so the failure surfaces instead of
-            // hiding inside the .mov.
+            // The writer accepts a repeated or earlier PTS, but the file
+            // ends up with unreliable frame timing. Drop and count it.
             if self.lastVideoPTS != .invalid,
                CMTimeCompare(pts, self.lastVideoPTS) <= 0 {
                 self.videoDroppedPtsRegression &+= 1
@@ -426,8 +343,7 @@ final class Recorder: @unchecked Sendable {
         }
     }
 
-    /// Append queued video frames, oldest first, until the encoder
-    /// says it isn't ready. writerQueue only.
+    /// Appends queued frames until the encoder isn't ready. writerQueue only.
     private func drainPendingVideo(receiver: AVAssetWriterInput.SampleBufferReceiver, writer: AVAssetWriter) {
         while let next = pendingVideo.first {
             do {
@@ -441,9 +357,8 @@ final class Recorder: @unchecked Sendable {
         }
     }
 
-    /// Append audio to the mix track, or with `source` to that
-    /// source's own track. Buffers for sources without a track are
-    /// ignored (single-source recordings).
+    /// Appends to the mix track, or to `source`'s own track. Sources
+    /// without a track are ignored.
     func appendAudio(_ sampleBuffer: CMSampleBuffer, source: String? = nil) {
         writerQueue.async { [weak self] in
             guard let self,
@@ -463,15 +378,9 @@ final class Recorder: @unchecked Sendable {
             }
 
             let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-            // The first sample of any kind anchors the session, so we
-            // don't lose the audio that arrives before the first video
-            // frame.
             self.anchorSessionIfNeeded(at: pts, writer: writer)
 
-            // If the anchor was set by a later video frame and an
-            // older audio buffer is in flight behind it,
-            // `AVAssetWriter` rejects it. Drop explicitly so the
-            // counter shows what's happening.
+            // Audio older than a video-set anchor would be rejected.
             if CMTimeCompare(pts, self.sessionStartTime) < 0 {
                 self.audioDroppedPreAnchor &+= 1
                 return
@@ -485,17 +394,13 @@ final class Recorder: @unchecked Sendable {
                     self.audioDroppedNotReady &+= 1
                 }
             } catch {
-                // If `audioAccepted` stays at zero while this climbs,
-                // the writer is refusing our buffers, usually because
-                // their format doesn't match the AAC output settings.
                 self.audioAppendRejected &+= 1
                 self.lastAppendError = "audio\(source.map { "[\($0)]" } ?? ""): \(Self.describe(error)) writer=\(writer.status.rawValue) \(writer.error.map { Self.describe($0) } ?? "")"
             }
         }
     }
 
-    /// Snapshot of recorder state for UI polling. Safe to call from
-    /// any thread — hops onto writerQueue synchronously to read.
+    /// Recorder state for UI polling. Safe from any thread.
     func stats() -> RecorderStats {
         writerQueue.sync {
             RecorderStats(
@@ -525,7 +430,7 @@ final class Recorder: @unchecked Sendable {
                     return
                 }
                 self.isWriting = false
-                // Hand over any frames still waiting (brief retries).
+                // Flush queued frames, with brief retries.
                 if let receiver = self.videoReceiver {
                     for _ in 0..<20 where !self.pendingVideo.isEmpty {
                         self.drainPendingVideo(receiver: receiver, writer: writer)
@@ -557,19 +462,13 @@ final class Recorder: @unchecked Sendable {
         }
     }
 
-    /// Build the output URL inside the caller-provided save directory.
-    /// `RecordingStorage` handles the user-selected-vs-sandbox-fallback
-    /// decision and security-scoped access; this method just writes
-    /// inside the resolved directory. The folder is created if it
-    /// doesn't already exist, in case it was removed between
-    /// `resolveSaveDirectory` and the start of the write.
+    /// Timestamped .mov URL in `directory`. Recreates the folder if it
+    /// was removed after `resolveSaveDirectory`.
     static func makeOutputURL(in directory: URL, prefix: String = "Recaptr") throws -> URL {
         let fm = FileManager.default
         if !fm.fileExists(atPath: directory.path) {
             try fm.createDirectory(at: directory, withIntermediateDirectories: true)
         }
-        // Surface the resolved path in the console for debugging;
-        // "Show in Finder" still navigates there directly.
         print("Recaptr recordings dir: \(directory.path)")
 
         let stamp = Date().ISO8601Format().replacingOccurrences(of: ":", with: "-")

@@ -2,19 +2,13 @@
 //  PeakLimiter.swift
 //  Recaptr
 //
-//  Keeps mixed audio below full scale. Summing game audio and a
-//  commentary mic can peak over 0 dBFS (a 2026-09-26 take hit +1.1),
-//  which clips when the file is played. The limiter leaves anything
-//  under the ceiling untouched and turns peaks down smoothly: instant
-//  attack per block, release back to unity over ~150 ms, and a hard
-//  clamp underneath so no sample can exceed the ceiling.
-//
-//  Operates on interleaved Float32 blocks in place. One instance per
-//  output track, since the gain state is per stream.
-//
+//  Keeps mixed audio under full scale without touching quieter audio.
 
 import Foundation
 
+/// Instant attack per block, ~150 ms release back to unity, and a hard
+/// clamp at the ceiling. Works in place on interleaved Float32; one
+/// instance per stream since it holds gain state.
 nonisolated struct PeakLimiter {
     /// Output never exceeds this (linear). -1 dBFS leaves headroom for
     /// AAC encoding overshoot.
@@ -34,12 +28,9 @@ nonisolated struct PeakLimiter {
         processLinked(sum: samples, sources: [], sampleCount: sampleCount, channels: channels)
     }
 
-    /// Linked limiting: the gain is computed from `sum` (the sources
-    /// added together) and the same gain is applied to `sum` and to
-    /// every source. Used when a file carries one track per source and
-    /// players do the summing: the sum stays under the ceiling and the
-    /// balance between sources is unchanged. Each source is also
-    /// clamped on its own.
+    /// Linked limiting: gain comes from `sum` and is applied to `sum` and
+    /// every source, so per-source tracks that a player sums stay under the
+    /// ceiling with their balance unchanged. Each source is also clamped.
     mutating func processLinked(sum samples: UnsafeMutablePointer<Float>,
                                 sources: [UnsafeMutablePointer<Float>],
                                 sampleCount: Int, channels: Int) {

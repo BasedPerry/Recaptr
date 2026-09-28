@@ -2,15 +2,10 @@
 //  MonitorLagProbe.swift
 //  Recaptr
 //
-//  Debug-only measurement for UI tests. With monitoring on and the
-//  output playing through speakers, the commentary mic hears the
-//  monitored game audio. Cross-correlating the game track with the
-//  mic track gives the real monitor delay: capture, monitor path,
-//  output device, and the air gap to the mic.
-//
-//  Enabled with `-RecaptrUITesting YES -RecaptrUITestMeasureMonitorLag YES`.
-//  The recordings live in the app's container, which test tooling
-//  can't read, so the app measures and prints the result itself.
+//  Debug-only file checks for UI tests. Monitor lag is the game track
+//  cross-correlated with the mic, which hears the speakers.
+//  The app runs these itself because tests can't read its container.
+//  Enabled with `-RecaptrUITestMeasureMonitorLag YES`.
 //
 
 #if DEBUG
@@ -19,8 +14,7 @@ import Accelerate
 
 enum MonitorLagProbe {
 
-    /// Lag of track 2 (mic) behind track 1 (game) in ms, with the
-    /// normalised correlation, for several windows of the file.
+    /// Mic lag behind game in ms, with normalised correlation, per 5 s window.
     static func measure(_ url: URL) async -> String {
         let asset = AVURLAsset(url: url)
         guard let tracks = try? await asset.loadTracks(withMediaType: .audio), tracks.count >= 2,
@@ -37,8 +31,7 @@ enum MonitorLagProbe {
         return "monitor lag: " + parts.joined(separator: " ")
     }
 
-    /// Video frame spacing: frame count, gaps over 25 ms with their
-    /// times, and the longest gap.
+    /// Frame count, gaps over 25 ms and the longest gap.
     static func videoGaps(_ url: URL) async -> String {
         let asset = AVURLAsset(url: url)
         guard let track = try? await asset.loadTracks(withMediaType: .video).first,
@@ -63,8 +56,7 @@ enum MonitorLagProbe {
             + gaps.prefix(12).joined(separator: " ")
     }
 
-    /// Share of edge pixels (3 px border of a frame 5 s in) that are
-    /// strongly green, to prove the capture outline isn't recorded.
+    /// Share of green pixels in a 3 px border, to check the outline isn't recorded.
     static func greenEdge(_ url: URL) async -> String {
         let generator = AVAssetImageGenerator(asset: AVURLAsset(url: url))
         generator.requestedTimeToleranceBefore = .zero
@@ -87,8 +79,7 @@ enum MonitorLagProbe {
         return String(format: "green edge: %.1f%% of %d edge pixels", 100 * Double(green) / Double(max(edge, 1)), edge)
     }
 
-    /// Top-level atoms of a movie file, e.g. "ftyp wide mdat moov",
-    /// with repeats counted ("moof×12").
+    /// Top-level atoms, e.g. "ftyp wide mdat moov", with repeats counted.
     static func atoms(_ url: URL) -> String {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return "atoms: unreadable" }
         defer { try? handle.close() }

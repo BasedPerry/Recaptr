@@ -2,9 +2,7 @@
 //  Models.swift
 //  Recaptr
 //
-//  Shared value types: video / audio source descriptors used by the
-//  device catalog and capture services, per-format diagnostic structs
-//  consumed by the encoder config, and the top-level CaptureError.
+//  Source descriptors, device format info and CaptureError.
 //
 
 import Foundation
@@ -14,8 +12,7 @@ import CoreMedia
 
 // MARK: - Source descriptors
 
-/// A capturable video source. Either a screen / window from
-/// ScreenCaptureKit or an AVCaptureDevice camera.
+/// A screen or window from ScreenCaptureKit, or an AVCaptureDevice camera.
 struct VideoSource: Identifiable, Hashable {
     enum Kind: String { case screenDisplay, screenWindow, camera }
     let id: String
@@ -28,19 +25,11 @@ struct VideoSource: Identifiable, Hashable {
 
 // MARK: - Camera classification heuristics
 
-/// Heuristics used by startup auto-source selection to prefer a
-/// capture card over a built-in webcam or Continuity Camera.
-///
-/// AVFoundation does not expose a flag identifying capture cards —
-/// the underlying `AVCaptureDevice.deviceType` is `.external` for
-/// both capture cards and most USB webcams — so this matches on
-/// common manufacturer and product name fragments. False positives
-/// just mean a non-capture-card webcam might be auto-picked, which
-/// is still preferable to the alternative of no default source.
+/// Name matching used to prefer a capture card at startup. Capture cards and
+/// USB webcams are both `.external`, so the device type can't tell them apart.
 extension VideoSource {
 
-    /// True if the camera's name matches a known video-capture-card
-    /// manufacturer or product line.
+    /// The name matches a known capture card maker or product line.
     var isCameraCaptureCard: Bool {
         guard kind == .camera else { return false }
         let needles = [
@@ -58,8 +47,7 @@ extension VideoSource {
         return needles.contains { lower.contains($0) }
     }
 
-    /// True if the camera is a Continuity Camera (iPhone or iPad
-    /// acting as a macOS webcam). Detected via name match.
+    /// An iPhone or iPad used as a webcam, matched by name.
     var isContinuityCamera: Bool {
         guard kind == .camera else { return false }
         let lower = name.lowercased()
@@ -75,7 +63,7 @@ struct AudioSource: Identifiable, Hashable {
     let name: String
 }
 
-/// Top-level error type surfaced from the capture stack.
+/// Errors from the capture stack.
 enum CaptureError: Error, LocalizedError {
     case permissionDenied
     case configurationFailed(String)
@@ -94,9 +82,7 @@ enum CaptureError: Error, LocalizedError {
 
 // MARK: - Per-format diagnostics
 
-/// A capture device's full per-format catalog. Populated during
-/// device discovery and consumed by the encoder configuration to
-/// choose settings against the formats the device supports.
+/// A capture device and the formats it supports.
 struct CaptureDeviceInfo: Identifiable {
     var id: String { uniqueID }
     let name: String
@@ -104,8 +90,7 @@ struct CaptureDeviceInfo: Identifiable {
     let formats: [CaptureDeviceFormat]
 }
 
-/// One resolution × frame-rate range × pixel format combination
-/// exposed by an `AVCaptureDevice`.
+/// One resolution, frame-rate range and pixel format of an `AVCaptureDevice`.
 struct CaptureDeviceFormat {
     let resolution: CMVideoDimensions
     let minFrameRate: Double
