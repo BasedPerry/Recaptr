@@ -165,6 +165,21 @@ final class MainViewModel: ObservableObject {
         isPreviewing && activeDims.width > 0 ? activeDims : nil
     }
 
+    /// Recording time left on the save drive at the current preset. Uses
+    /// 1080p until a preview gives the real size. Nil when the drive
+    /// doesn't report free space.
+    func diskTimeLeft() -> DiskTime? {
+        guard let folder = try? recordingStorage.resolveSaveDirectory(),
+              let free = DiskTime.freeBytes(at: folder) else { return nil }
+        let size = activeCaptureSize ?? CMVideoDimensions(width: 1920, height: 1080)
+        // One audio track per live source.
+        let tracks = hasScreenAudio ? 1 : audioMixer.runningChannelLabels.count
+        return DiskTime.estimate(freeBytes: free,
+                                 bitsPerSecond: videoQuality.bitrate(width: size.width, height: size.height),
+                                 audioTracks: max(tracks, 1),
+                                 reserveBytes: Self.stopBelowBytes)
+    }
+
     /// Opt-in; changes the image, so off by default.
     @Published var lowLightNoiseReduction: Bool =
         UserDefaults.standard.bool(forKey: "RecaptrLowLightNoiseReduction") {
@@ -183,9 +198,30 @@ final class MainViewModel: ObservableObject {
     /// The Settings toggle only appears when it does.
     @Published var lowLightNoiseReductionSupported = false
 
-    // Live audio monitor (foldback to the system default output).
-    @Published var monitorEnabled: Bool = false
-    @Published var monitorVolume: Double = 1.0  // 0…1.5
+    // Live audio monitor (foldback to the system default output), one
+    // switch and volume per channel. Screen captures never monitor game
+    // audio: it already plays through the speakers.
+    @Published var gameMonitorEnabled: Bool = false
+    @Published var micMonitorEnabled: Bool = false
+    @Published var gameMonitorVolume: Double = 1.0  // 0…1.5
+    @Published var micMonitorVolume: Double = 1.0   // 0…1.5
+
+    /// The 1.0 single monitor: game audio for cameras, the mic for
+    /// screen and window captures (see `monitorChannelIndex`).
+    var monitorEnabled: Bool {
+        get { monitorChannelIndex == 1 ? micMonitorEnabled : gameMonitorEnabled }
+        set {
+            if monitorChannelIndex == 1 { micMonitorEnabled = newValue }
+            else { gameMonitorEnabled = newValue }
+        }
+    }
+    var monitorVolume: Double {
+        get { monitorChannelIndex == 1 ? micMonitorVolume : gameMonitorVolume }
+        set {
+            if monitorChannelIndex == 1 { micMonitorVolume = newValue }
+            else { gameMonitorVolume = newValue }
+        }
+    }
 
     @Published var isPreviewing = false
     @Published var isRecording = false
@@ -324,23 +360,23 @@ final class MainViewModel: ObservableObject {
             }
             .store(in: &cancellables)
 
-        // The monitor plays one channel: the camera's source audio, or the mic
-        // for screen and window captures (see `monitorChannelIndex`).
-        $monitorEnabled
+        $gameMonitorEnabled
             .sink { [weak self] enabled in
                 guard let self else { return }
-                let target = self.monitorChannelIndex
-                for index in 0...1 {
-                    self.audioMixer.channel(at: index)?.setMonitor(enabled: enabled && index == target)
-                }
+                let screen = self.selectedMainSource.map { $0.kind != .camera } ?? false
+                self.audioMixer.channel(at: 0)?.setMonitor(enabled: enabled && !screen)
             }
             .store(in: &cancellables)
-        $monitorVolume
-            .sink { [weak self] value in
-                for index in 0...1 {
-                    self?.audioMixer.channel(at: index)?.monitorVolume = Float(value)
-                }
+        $micMonitorEnabled
+            .sink { [weak self] enabled in
+                self?.audioMixer.channel(at: 1)?.setMonitor(enabled: enabled)
             }
+            .store(in: &cancellables)
+        $gameMonitorVolume
+            .sink { [weak self] value in self?.audioMixer.channel(at: 0)?.monitorVolume = Float(value) }
+            .store(in: &cancellables)
+        $micMonitorVolume
+            .sink { [weak self] value in self?.audioMixer.channel(at: 1)?.monitorVolume = Float(value) }
             .store(in: &cancellables)
 
         // Stop cleanly if a permission is revoked mid-session instead of
@@ -1717,18 +1753,16 @@ final class MainViewModel: ObservableObject {
         ch1?.deviceLabel = label(forAudioDeviceID: ch1DeviceID)
         ch1?.gain = Float(ch1Gain)
         ch1?.enabled = !screenSource && ch1Enabled && (ch1DeviceID != nil)
-        ch1?.monitorEnabled = monitorEnabled && !screenSource
-        ch1?.monitorVolume = Float(monitorVolume)
+        ch1?.monitorEnabled = gameMonitorEnabled && !screenSource
+        ch1?.monitorVolume = Float(gameMonitorVolume)
 
         let ch2 = audioMixer.channel(at: 1)
         ch2?.deviceUniqueID = ch2DeviceID
         ch2?.deviceLabel = label(forAudioDeviceID: ch2DeviceID)
         ch2?.gain = Float(ch2Gain)
         ch2?.enabled = micArmed
-        // Screen captures monitor only the mic: system audio already plays
-        // through the speakers.
-        ch2?.monitorEnabled = monitorEnabled && screenSource
-        ch2?.monitorVolume = Float(monitorVolume)
+        ch2?.monitorEnabled = micMonitorEnabled
+        ch2?.monitorVolume = Float(micMonitorVolume)
 
         // System audio is never monitored (it's already audible).
         let system = audioMixer.channel(at: 2)
