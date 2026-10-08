@@ -106,10 +106,14 @@ final class MainViewModel: ObservableObject {
 
     /// Test runs share the app's settings, so test hooks don't save naming.
     private static let isUITesting = UserDefaults.standard.bool(forKey: "RecaptrUITesting")
-    /// Name markers and blank episodes with Apple Intelligence.
-    @Published var aiNamingEnabled: Bool =
-        MainViewModel.bool("RecaptrAINaming", default: true) {
-        didSet { UserDefaults.standard.set(aiNamingEnabled, forKey: "RecaptrAINaming") }
+    /// How markers and blank episodes are named. Nil until the user picks.
+    @Published var markerNaming: MarkerNaming? = MarkerNaming.stored() {
+        didSet { UserDefaults.standard.set(markerNaming?.rawValue, forKey: MarkerNaming.storageKey) }
+    }
+    /// The 1.0 on/off view of `markerNaming`, for the existing toggles.
+    var aiNamingEnabled: Bool {
+        get { (markerNaming ?? .appleIntelligence) == .appleIntelligence }
+        set { markerNaming = newValue ? .appleIntelligence : .numbered }
     }
     /// What to show at launch: a camera or capture card, or the main display.
     enum StartSource: String, CaseIterable, Identifiable {
@@ -1336,7 +1340,7 @@ final class MainViewModel: ObservableObject {
     /// the Final Cut file with the marker names and the series as its
     /// event.
     private func finalizeRecording(_ url: URL, markerSeconds: [Double], series: String, typedEpisode: String) async {
-        let useAI = aiNamingEnabled && MarkerNamer.isAvailable
+        let useAI = MarkerNaming.usesAI(markerNaming, available: MarkerNamer.isAvailable)
         var labels: [String?] = markerSeconds.map { _ in nil }
         if useAI, !markerSeconds.isEmpty {
             status += "\nNaming \(markerSeconds.count) marker\(markerSeconds.count == 1 ? "" : "s")…"
