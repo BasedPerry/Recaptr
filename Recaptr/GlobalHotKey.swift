@@ -2,52 +2,78 @@
 //  GlobalHotKey.swift
 //  Recaptr
 //
-//  System-wide ⌃⌥⌘B for markers while another app is in front. Not ⌘B,
-//  which would steal Bold and Final Cut's Blade. Carbon's hot key API works
-//  in the sandbox and needs no Accessibility or Input Monitoring permission.
+//  System-wide keys for Recaptr's actions while another app is in front.
+//  Carbon's hot key API works in the sandbox and needs no Accessibility or
+//  Input Monitoring permission. Defaults avoid ⌘B and ⌘R, which would
+//  steal Bold, Final Cut's Blade and Record.
 //
 
 import Carbon.HIToolbox
 import Foundation
 
 @MainActor
-final class GlobalHotKey {
+final class GlobalHotKeys {
 
-    private var hotKeyRef: EventHotKeyRef?
+    /// Called on the main actor when a registered key is pressed.
+    var onPress: ((RecaptrAction) -> Void)?
+
     private var handlerRef: EventHandlerRef?
-    private let action: () -> Void
+    private var registered: [RecaptrAction: (ref: EventHotKeyRef, binding: HotKeyBinding)] = [:]
+    private static let signature = OSType(0x52435054)  // 'RCPT'
 
-    /// Takes Carbon key and modifier constants. Calls `action` on the main actor.
-    init?(keyCode: UInt32, modifiers: UInt32, action: @escaping () -> Void) {
-        self.action = action
+    init() {
         var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
         let context = Unmanaged.passUnretained(self).toOpaque()
-        let installed = InstallEventHandler(GetApplicationEventTarget(), { _, _, userData in
-            guard let userData else { return noErr }
-            let hotKey = Unmanaged<GlobalHotKey>.fromOpaque(userData).takeUnretainedValue()
-            MainActor.assumeIsolated { hotKey.action() }
+        InstallEventHandler(GetApplicationEventTarget(), { _, event, userData in
+            guard let event, let userData else { return noErr }
+            var id = EventHotKeyID()
+            let status = GetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID),
+                                           nil, MemoryLayout<EventHotKeyID>.size, nil, &id)
+            guard status == noErr, id.signature == GlobalHotKeys.signature else { return OSStatus(eventNotHandledErr) }
+            let keys = Unmanaged<GlobalHotKeys>.fromOpaque(userData).takeUnretainedValue()
+            MainActor.assumeIsolated { keys.pressed(id: id.id) }
             return noErr
         }, 1, &spec, context, &handlerRef)
-        guard installed == noErr else { return nil }
-
-        let id = EventHotKeyID(signature: OSType(0x52435054), id: 1)  // 'RCPT'
-        let registered = RegisterEventHotKey(keyCode, modifiers, id, GetApplicationEventTarget(), 0, &hotKeyRef)
-        guard registered == noErr else {
-            if let handlerRef { RemoveEventHandler(handlerRef) }
-            return nil
-        }
     }
 
-    static func marker(action: @escaping () -> Void) -> GlobalHotKey? {
-        GlobalHotKey(keyCode: UInt32(kVK_ANSI_B),
-                     modifiers: UInt32(controlKey | optionKey | cmdKey),
-                     action: action)
-    }
-
-    func unregister() {
-        if let hotKeyRef { UnregisterEventHotKey(hotKeyRef) }
+    isolated deinit {
+        for entry in registered.values { UnregisterEventHotKey(entry.ref) }
         if let handlerRef { RemoveEventHandler(handlerRef) }
-        hotKeyRef = nil
-        handlerRef = nil
+    }
+
+    /// Registers exactly `wanted`, leaving keys that didn't change alone.
+    /// Returns the actions whose combo another app already holds.
+    @discardableResult
+    func update(_ wanted: [RecaptrAction: HotKeyBinding]) -> Set<RecaptrAction> {
+        for (action, entry) in registered where wanted[action] != entry.binding {
+            UnregisterEventHotKey(entry.ref)
+            registered[action] = nil
+        }
+        var failed = Set<RecaptrAction>()
+        for (action, binding) in wanted where registered[action] == nil {
+            var ref: EventHotKeyRef?
+            let id = EventHotKeyID(signature: Self.signature, id: Self.number(for: action))
+            let status = RegisterEventHotKey(binding.keyCode, binding.modifiers, id, GetApplicationEventTarget(), 0, &ref)
+            if status == noErr, let ref {
+                registered[action] = (ref, binding)
+            } else {
+                failed.insert(action)
+            }
+        }
+        return failed
+    }
+
+    func unregisterAll() {
+        update([:])
+    }
+
+    private func pressed(id: UInt32) {
+        guard let action = RecaptrAction.allCases.first(where: { Self.number(for: $0) == id }) else { return }
+        onPress?(action)
+    }
+
+    /// Stable id per action (1-based position in the list).
+    private static func number(for action: RecaptrAction) -> UInt32 {
+        UInt32((RecaptrAction.allCases.firstIndex(of: action) ?? 0) + 1)
     }
 }

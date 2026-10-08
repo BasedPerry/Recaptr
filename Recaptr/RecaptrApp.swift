@@ -14,7 +14,11 @@ struct RecaptrApp: App {
         WindowGroup {
             RecaptrRootView()
                 .environmentObject(vm)
+                .onOpenURL { vm.handle(url: $0) }
+                // recaptr:// goes to this window instead of opening another.
+                .handlesExternalEvents(preferring: ["*"], allowing: ["*"])
         }
+        .handlesExternalEvents(matching: ["*"])
         // The preview runs under the traffic lights; keep that corner free of chrome.
         .windowStyle(.hiddenTitleBar)
         .commands {

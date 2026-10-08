@@ -15,7 +15,7 @@ struct MenuBarContent: View {
 
         Divider()
 
-        Button("Drop Marker (⌘B, or ⌃⌥⌘B from any app)") {
+        Button("Drop Marker (⌘B" + (vm.hotKeyLabel(for: .dropMarker).map { ", or \($0) from any app" } ?? "") + ")") {
             vm.dropMarker()
         }
 

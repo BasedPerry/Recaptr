@@ -105,7 +105,7 @@ final class MainViewModel: ObservableObject {
     }
 
     /// Test runs share the app's settings, so test hooks don't save naming.
-    private static let isUITesting = UserDefaults.standard.bool(forKey: "RecaptrUITesting")
+    static let isUITesting = UserDefaults.standard.bool(forKey: "RecaptrUITesting")
     /// How markers and blank episodes are named. Nil until the user picks.
     @Published var markerNaming: MarkerNaming? = MarkerNaming.stored() {
         didSet { UserDefaults.standard.set(markerNaming?.rawValue, forKey: MarkerNaming.storageKey) }
@@ -130,6 +130,16 @@ final class MainViewModel: ObservableObject {
     @Published private(set) var lastTake: Take?
     /// Recent recordings for File > Recent Recordings and the menu bar.
     let recentTakes = RecentTakes()
+    /// The take the after-take card shows. Set by Open Last Take and
+    /// Recent Recordings; the UI clears it on dismiss.
+    @Published var presentedTake: Take?
+
+    /// Other apps may run actions through recaptr:// URLs. Shortcuts
+    /// always work: the user set those up in Shortcuts.
+    @Published var allowsExternalControl: Bool =
+        MainViewModel.bool("RecaptrAllowsExternalControl", default: true) {
+        didSet { UserDefaults.standard.set(allowsExternalControl, forKey: "RecaptrAllowsExternalControl") }
+    }
 
     /// After-stop work (probe, naming, renaming, Final Cut file).
     private(set) var finalizeTask: Task<Void, Never>?
@@ -301,13 +311,19 @@ final class MainViewModel: ObservableObject {
     private var isStartingPreview = false
 
     private var recordingStartedAt: Date?
-    /// ⌃⌥⌘B drops a marker from any app, registered only while
-    /// recording so the combo is free the rest of the time.
-    private var markerHotKey: GlobalHotKey?
+    /// Global keys for actions, from any app.
+    let globalHotKeys = GlobalHotKeys()
+    /// The user's global keys (defaults: ⌃⌥⌘R record, ⌃⌥⌘B marker).
+    @Published var hotKeySettings = HotKeySettings.load()
+    /// Actions whose key another app already holds.
+    @Published var hotKeysTakenElsewhere: Set<RecaptrAction> = []
     /// Held while recording so idle sleep can't cut a capture short. Also
     /// keeps the display awake: capture cards stall briefly when it sleeps.
     private var recordingActivity: NSObjectProtocol?
     private var recorderStatsTimer: Timer?
+
+    /// The running app's model, for App Intents.
+    private(set) weak static var current: MainViewModel?
 
     init() {
         // Two-channel mixer: source audio + commentary mic.
@@ -482,6 +498,9 @@ final class MainViewModel: ObservableObject {
             }
         }
         Task { await self.requestAudioPermissionIfNeeded() }
+        globalHotKeys.onPress = { [weak self] action in self?.perform(action) }
+        Self.current = self
+        refreshGlobalHotKeys()
         #if DEBUG
         // -RecaptrUITestProbeLatest YES: probe the newest recording, print what's in it, and quit.
         if Self.isUITesting, UserDefaults.standard.bool(forKey: "RecaptrUITestProbeLatest") {
@@ -1290,7 +1309,7 @@ final class MainViewModel: ObservableObject {
             )
             isRecording = true
             recordingStartedAt = Date()
-            markerHotKey = GlobalHotKey.marker { [weak self] in self?.dropMarker() }
+            refreshGlobalHotKeys()
             captureOutline.setRecording(true)
             recordingURL = url
             recordingBytes = 0
@@ -1319,8 +1338,7 @@ final class MainViewModel: ObservableObject {
         // Only the recorder stops; the mixer and stats timer keep running.
         let url = await recorder.stop()
         isRecording = false
-        markerHotKey?.unregister()
-        markerHotKey = nil
+        refreshGlobalHotKeys()
         captureOutline.setRecording(false)
         if let activity = recordingActivity {
             ProcessInfo.processInfo.endActivity(activity)
