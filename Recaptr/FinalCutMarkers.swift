@@ -91,7 +91,7 @@ enum FinalCutMarkers {
     }
 
     /// FCPXML time ("1001/60000s", "12s", "0s") in seconds.
-    static func seconds(fromTime text: String) -> Double? {
+    nonisolated static func seconds(fromTime text: String) -> Double? {
         guard text.hasSuffix("s") else { return nil }
         let body = text.dropLast()
         let parts = body.split(separator: "/")
