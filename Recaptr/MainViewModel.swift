@@ -1220,11 +1220,14 @@ final class MainViewModel: ObservableObject {
                 self?.screenAudioLevels.feed(sb)
             }
         }
-        svc.onStreamStopped = { [weak self] error in
+        svc.onStreamStopped = { [weak self, weak svc] error in
             Task { @MainActor in
-                guard let self, let svc = self.screenService else { return }
+                guard let self else { return }
                 let reason = error?.localizedDescription ?? "unknown reason"
-                if self.isRecording, await self.restartScreenCapture(svc, after: reason) { return }
+                // The stream can also fail during startPreview, before it's the
+                // current service; that takes the stop path below, as before.
+                if self.isRecording, let svc, self.screenService === svc,
+                   await self.restartScreenCapture(svc, after: reason) { return }
                 self.status = "Screen capture stopped: \(reason)"
                 self.show(.screenStopped(wasRecording: self.isRecording))
                 self.stopPreview()
