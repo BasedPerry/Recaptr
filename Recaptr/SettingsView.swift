@@ -111,7 +111,7 @@ private struct RecordingSettingsTab: View {
 private struct RenameTakeSheet: View {
     @EnvironmentObject var vm: MainViewModel
     @Environment(\.dismiss) private var dismiss
-    let take: MainViewModel.LastTake
+    let take: Take
 
     @State private var episode = ""
     @State private var titles: [String] = []

@@ -303,13 +303,13 @@ struct LastTakeTests {
 
     @Test func episodeIsTheNameAfterTheSeries() {
         let url = URL(fileURLWithPath: "/tmp/Fire Emblem/Fire Emblem – Ep 1 – Black Screen.mov")
-        let take = MainViewModel.LastTake(url: url, series: "Fire Emblem", markers: [])
+        let take = Take(url: url, series: "Fire Emblem", markers: [])
         #expect(take.episode == "Ep 1 – Black Screen")
     }
 
     @Test func takesWithoutASeriesUseTheWholeName() {
         let url = URL(fileURLWithPath: "/tmp/Recaptr_2026-09-27T21-00-00Z.mov")
-        #expect(MainViewModel.LastTake(url: url, series: "", markers: []).episode == "Recaptr_2026-09-27T21-00-00Z")
+        #expect(Take(url: url, series: "", markers: []).episode == "Recaptr_2026-09-27T21-00-00Z")
     }
 }
 

@@ -68,6 +68,61 @@ enum FinalCutMarkers {
         return abs(nearest - rate) < 0.5 ? nearest : rate
     }
 
+    /// What a Recaptr `.fcpxml` holds: the event name and the markers, in order.
+    struct Contents: Equatable {
+        var eventName: String?
+        var markers: [Marker]
+
+        struct Marker: Equatable {
+            var title: String
+            var seconds: Double
+        }
+    }
+
+    /// Reads the event and markers back from `.fcpxml` text. Nil when it
+    /// isn't an FCPXML document.
+    static func read(_ xml: Data) -> Contents? {
+        let reader = Reader()
+        let parser = XMLParser(data: xml)
+        parser.delegate = reader
+        guard parser.parse(), reader.sawRoot else { return nil }
+        return Contents(eventName: reader.eventName,
+                        markers: reader.markers.sorted { $0.seconds < $1.seconds })
+    }
+
+    /// FCPXML time ("1001/60000s", "12s", "0s") in seconds.
+    static func seconds(fromTime text: String) -> Double? {
+        guard text.hasSuffix("s") else { return nil }
+        let body = text.dropLast()
+        let parts = body.split(separator: "/")
+        switch parts.count {
+        case 1: return Double(parts[0])
+        case 2:
+            guard let num = Double(parts[0]), let den = Double(parts[1]), den != 0 else { return nil }
+            return num / den
+        default: return nil
+        }
+    }
+
+    private final class Reader: NSObject, XMLParserDelegate {
+        var sawRoot = false
+        var eventName: String?
+        var markers: [Contents.Marker] = []
+
+        func parser(_ parser: XMLParser, didStartElement name: String, namespaceURI: String?,
+                    qualifiedName: String?, attributes: [String: String] = [:]) {
+            switch name {
+            case "fcpxml": sawRoot = true
+            case "event": eventName = eventName ?? attributes["name"]
+            case "marker":
+                if let start = attributes["start"].flatMap(FinalCutMarkers.seconds(fromTime:)) {
+                    markers.append(.init(title: attributes["value"] ?? "", seconds: start))
+                }
+            default: break
+            }
+        }
+    }
+
     static func document(movURL: URL, markers: [(title: String, seconds: Double)],
                          width: Int, height: Int, fps: Double, duration: Double,
                          audioTracks: Int, eventName: String = "Recaptr") -> String {

@@ -126,22 +126,10 @@ final class MainViewModel: ObservableObject {
         didSet { UserDefaults.standard.set(startSource.rawValue, forKey: "RecaptrStartSource") }
     }
 
-    /// The most recent take's naming, so it can be renamed after the
-    /// fact (Settings > Last recording > Rename).
-    struct LastTake {
-        var url: URL
-        var series: String
-        var markers: [(title: String, seconds: Double)]
-
-        /// The episode part of the file name ("Ep 1 – Title"), or the
-        /// whole name for takes without a series.
-        var episode: String {
-            let name = url.deletingPathExtension().lastPathComponent
-            let prefix = series + SessionNaming.separator
-            return !series.isEmpty && name.hasPrefix(prefix) ? String(name.dropFirst(prefix.count)) : name
-        }
-    }
-    @Published private(set) var lastTake: LastTake?
+    /// The most recent take, so it can be renamed after the fact.
+    @Published private(set) var lastTake: Take?
+    /// Recent recordings for File > Recent Recordings and the menu bar.
+    let recentTakes = RecentTakes()
 
     /// After-stop work (probe, naming, renaming, Final Cut file).
     private(set) var finalizeTask: Task<Void, Never>?
@@ -1375,36 +1363,30 @@ final class MainViewModel: ObservableObject {
             (title: labels[index] ?? "Marker \(index + 1)", seconds: seconds)
         }
         await writeFinalCutMarkers(for: finalURL, markers: markers, eventName: series.isEmpty ? nil : series)
-        lastTake = LastTake(url: finalURL, series: series, markers: markers)
+        lastTake = Take(url: finalURL, series: series, markers: markers.map { .init(title: $0.title, seconds: $0.seconds) })
+        if let lastTake { recentTakes.add(lastTake.url) }
     }
 
-    /// Rename the last take's episode and markers: moves the .mov (and
-    /// replaces its .fcpxml) to the new name in the same folder, never
-    /// over an existing file, and rewrites the markers.
+    /// Rename the last take's episode and markers.
     func renameLastTake(episode: String, markerTitles: [String]) async throws {
-        guard var take = lastTake else { return }
-        let folder = take.url.deletingLastPathComponent()
-        let cleanEpisode = SessionNaming.sanitize(episode)
-        let base = take.series.isEmpty ? cleanEpisode : SessionNaming.baseName(series: take.series, episode: cleanEpisode)
-        guard !cleanEpisode.isEmpty else { return }
+        guard let take = lastTake else { return }
+        try await renameTake(take, episode: episode, markerTitles: markerTitles)
+    }
 
-        var target = take.url
-        if base != take.url.deletingPathExtension().lastPathComponent {
-            target = SessionNaming.uniqueURL(in: folder, base: base, ext: "mov")
-            try FileManager.default.moveItem(at: take.url, to: target)
-            // The old .fcpxml points at the old name; it's rewritten below.
-            try? FileManager.default.removeItem(at: take.url.deletingPathExtension().appendingPathExtension("fcpxml"))
+    /// Rename any take's episode and markers: moves the .mov (and replaces
+    /// its .fcpxml) to the new name in the same folder, never over an
+    /// existing file. Pass a take from `Take.load` for older recordings.
+    @discardableResult
+    func renameTake(_ take: Take, episode: String, markerTitles: [String]) async throws -> Take {
+        guard let wanted = take.renamed(episode: episode, markerTitles: markerTitles) else { return take }
+        let saved = try await Take.apply(from: take, to: wanted)
+        if lastTake?.url == take.url {
+            lastTake = saved
+            lastRecordedFile = saved.url
         }
-        for index in take.markers.indices where index < markerTitles.count {
-            let title = markerTitles[index].trimmingCharacters(in: .whitespacesAndNewlines)
-            if !title.isEmpty { take.markers[index].title = title }
-        }
-        take.url = target
-        lastRecordedFile = target
-        lastTake = take
-        await writeFinalCutMarkers(for: target, markers: take.markers,
-                                   eventName: take.series.isEmpty ? nil : take.series)
-        status = "Renamed to \(target.lastPathComponent)"
+        recentTakes.replace(take.url, with: saved.url)
+        status = "Renamed to \(saved.url.lastPathComponent)"
+        return saved
     }
 
     /// Counters from the final stats snapshots, so the cause of a silent
