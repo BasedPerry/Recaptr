@@ -134,6 +134,10 @@ final class MainViewModel: ObservableObject {
     /// Recent Recordings; the UI clears it on dismiss.
     @Published var presentedTake: Take?
 
+    /// A plain-language message for the banner when a take ends early or
+    /// can't start. The UI clears it on dismiss.
+    @Published var notice: Notice?
+
     /// Other apps may run actions through recaptr:// URLs. Shortcuts
     /// always work: the user set those up in Shortcuts.
     @Published var allowsExternalControl: Bool =
@@ -904,6 +908,7 @@ final class MainViewModel: ObservableObject {
         status = wasRecording
             ? "Device disconnected: \(deviceName) — recording saved."
             : "Device disconnected: \(deviceName)"
+        show(.deviceUnplugged(deviceName, wasRecording: wasRecording))
 
         await catalog.refresh()
 
@@ -973,6 +978,7 @@ final class MainViewModel: ObservableObject {
             label: "Microphone",
             settingsHint: "System Settings → Privacy & Security → Microphone"
         )
+        show(.permissionRevoked(.openMicrophoneSettings, wasRecording: wasRecording))
     }
 
     /// Stops a screen or window capture when Screen Recording is revoked.
@@ -996,6 +1002,7 @@ final class MainViewModel: ObservableObject {
             label: "Screen recording",
             settingsHint: "System Settings → Privacy & Security → Screen Recording"
         )
+        show(.permissionRevoked(.openScreenRecordingSettings, wasRecording: wasRecording))
     }
 
     /// Status line for a revoked permission.
@@ -1048,6 +1055,7 @@ final class MainViewModel: ObservableObject {
             recheckScreenCapturePermission(reason: "startPreview")
             guard screenCapturePermissionGranted else {
                 status = "Screen recording permission denied — open System Settings → Privacy & Security → Screen Recording to enable, then quit and relaunch Recaptr."
+                show(.screenPermissionMissing)
                 return
             }
         }
@@ -1172,6 +1180,7 @@ final class MainViewModel: ObservableObject {
             status = "Previewing — \(src.name) (\(dims.width)×\(dims.height))\(audioLabel)"
         } catch {
             status = "Capture error: \(error.localizedDescription)"
+            if src.kind == .camera { show(.sourceBusy) }
         }
     }
 
@@ -1205,6 +1214,7 @@ final class MainViewModel: ObservableObject {
                 guard let self else { return }
                 let reason = error?.localizedDescription ?? "unknown reason"
                 self.status = "Screen capture stopped: \(reason)"
+                self.show(.screenStopped(wasRecording: self.isRecording))
                 self.stopPreview()
             }
         }
@@ -1270,6 +1280,7 @@ final class MainViewModel: ObservableObject {
             saveDir = try recordingStorage.resolveSaveDirectory()
         } catch {
             status = "Save directory error: \(error.localizedDescription)"
+            show(.saveFolderUnavailable)
             return
         }
 
@@ -1286,6 +1297,7 @@ final class MainViewModel: ObservableObject {
                     format: "Low disk space: %.1f GB free on save volume. Free up space before recording (need at least 2 GB).",
                     freeGB
                 )
+                show(.notEnoughSpace(gigabytesFree: freeGB))
                 return
             }
         } catch {
@@ -1309,6 +1321,7 @@ final class MainViewModel: ObservableObject {
             )
             isRecording = true
             recordingStartedAt = Date()
+            notice = nil
             refreshGlobalHotKeys()
             captureOutline.setRecording(true)
             recordingURL = url
@@ -1330,6 +1343,7 @@ final class MainViewModel: ObservableObject {
             // The stats timer is already running from preview.
         } catch {
             status = "Recorder error: \(error.localizedDescription)"
+            show(.recorderFailed)
         }
     }
 
@@ -1837,6 +1851,7 @@ final class MainViewModel: ObservableObject {
             if free < Self.stopBelowBytes {
                 stopReason = String(format: "Stopped: only %.1f GB left on the save drive. The recording is saved.",
                                     Double(free) / 1e9)
+                show(.diskFull(gigabytesLeft: Double(free) / 1e9))
                 Task { await self.stopRecording() }
                 return
             }
@@ -1888,6 +1903,7 @@ final class MainViewModel: ObservableObject {
         if snapshot.writerStatus == .failed {
             let msg = snapshot.writerErrorDescription ?? "writer failed"
             stopReason = "Writer failed mid-recording: \(msg)"
+            show(.writerFailed())
             Task { await self.stopRecording() }
         }
     }

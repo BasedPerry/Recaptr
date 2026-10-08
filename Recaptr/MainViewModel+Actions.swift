@@ -133,3 +133,28 @@ extension MainViewModel {
         hotKeySettings.binding(for: action)?.display
     }
 }
+
+// MARK: - Notices
+
+extension MainViewModel {
+
+    /// Shows a notice in the window, and as a notification when a take
+    /// ended early while Recaptr was in the background.
+    func show(_ notice: Notice) {
+        self.notice = notice
+        if !NSApp.isActive { NoticeNotifier.post(notice) }
+    }
+
+    /// Runs a notice's fix button. Picking a source is up to the window.
+    func perform(_ fix: Notice.Fix) {
+        switch fix {
+        case .openScreenRecordingSettings: openScreenCapturePrivacyPane()
+        case .openMicrophoneSettings:      openMicrophonePrivacyPane()
+        case .openCameraSettings:
+            NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Camera")!)
+        case .pickSaveFolder:              recordingStorage.pickFolder()
+        case .pickSource:                  break
+        }
+        notice = nil
+    }
+}
