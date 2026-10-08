@@ -292,9 +292,23 @@ final class MainViewModel: ObservableObject {
     /// frame from the previous source can't be saved.
     let frameCache = PreviewFrameCache()
 
+    /// A quiet sound when a marker lands. Played by Recaptr itself, which
+    /// screen capture excludes, so it's never in the recording.
+    @Published var markerSoundEnabled: Bool =
+        MainViewModel.bool("RecaptrMarkerSound", default: true) {
+        didSet { UserDefaults.standard.set(markerSoundEnabled, forKey: "RecaptrMarkerSound") }
+    }
+    /// Bumped on every marker, so the UI can flash the menu bar item.
+    @Published private(set) var markerPulse = 0
+
     /// Marker times in seconds. Cleared when a recording starts.
     @Published var markers: [TimeInterval] = []
     static let markerDebounce: TimeInterval = 1
+    private static let markerSound: NSSound? = {
+        let sound = NSSound(named: "Tink")
+        sound?.volume = 0.4
+        return sound
+    }()
 
     private var cameraService: CameraCaptureService?
     private var screenService: ScreenCaptureService?
@@ -836,6 +850,8 @@ final class MainViewModel: ObservableObject {
         markers.append(t)
         // Precise capture-clock time, for the .fcpxml.
         recorder.addMarker()
+        markerPulse += 1
+        if markerSoundEnabled { Self.markerSound?.play() }
         status = String(format: "Marker dropped at %02d:%02d", Int(t) / 60, Int(t) % 60)
     }
 
