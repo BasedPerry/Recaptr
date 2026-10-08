@@ -1100,48 +1100,16 @@ final class MainViewModel: ObservableObject {
                 lowLightNoiseReductionSupported = svc.lowLightNoiseReductionSupported
                 cameraService = svc
 
-            case .screenDisplay:
-                guard let targetID = src.displayID else {
-                    status = "Display source missing displayID"
+            case .screenDisplay, .screenWindow:
+                guard let target = try await screenFilter(for: src) else {
+                    status = src.kind == .screenDisplay
+                        ? "Display \(src.displayID.map(String.init) ?? "?") no longer available — hit Refresh and reselect."
+                        : "Window \(src.windowID.map(String.init) ?? "?") no longer available — hit Refresh and reselect."
                     return
-                }
-                // VideoSource only carries IDs, so fetch fresh SCDisplay objects.
-                let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-                guard let display = content.displays.first(where: { $0.displayID == targetID }) else {
-                    status = "Display \(targetID) no longer available — hit Refresh and reselect."
-                    return
-                }
-                // Exclude Recaptr to avoid an infinite mirror. Excluding the app, not
-                // its current windows, also covers windows opened later (the outline).
-                let myBundleID = Bundle.main.bundleIdentifier
-                let filter: SCContentFilter
-                if let me = content.applications.first(where: { $0.bundleIdentifier == myBundleID }) {
-                    filter = SCContentFilter(display: display, excludingApplications: [me], exceptingWindows: [])
-                } else {
-                    let myWindows = content.windows.filter { $0.owningApplication?.bundleIdentifier == myBundleID }
-                    filter = SCContentFilter(display: display, excludingWindows: myWindows)
                 }
                 let svc = makeScreenService(audioViaMixer: micArmed)
-                let size = screenResolution.fit(ScreenResolution.pixelSize(of: display))
-                dims = try await svc.start(filter: filter, previewSink: previewSinkLayer, size: size,
-                                           frameRate: screenFrameRate, showsCursor: screenShowsCursor)
-                screenService = svc
-
-            case .screenWindow:
-                guard let targetID = src.windowID else {
-                    status = "Window source missing windowID"
-                    return
-                }
-                let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-                guard let window = content.windows.first(where: { $0.windowID == targetID }) else {
-                    status = "Window \(targetID) no longer available — hit Refresh and reselect."
-                    return
-                }
-                // A single-window filter captures only that window; nothing to exclude.
-                let filter = SCContentFilter(desktopIndependentWindow: window)
-                let svc = makeScreenService(audioViaMixer: micArmed)
-                let size = screenResolution.fit(ScreenResolution.pixelSize(of: window))
-                dims = try await svc.start(filter: filter, previewSink: previewSinkLayer, size: size,
+                let size = screenResolution.fit(target.pixelSize)
+                dims = try await svc.start(filter: target.filter, previewSink: previewSinkLayer, size: size,
                                            frameRate: screenFrameRate, showsCursor: screenShowsCursor)
                 screenService = svc
             }
@@ -1200,9 +1168,36 @@ final class MainViewModel: ObservableObject {
         }
     }
 
+    /// The capture filter for a display or window source, fetched fresh
+    /// (VideoSource only carries IDs). Nil when it's gone.
+    private func screenFilter(for src: VideoSource) async throws -> (filter: SCContentFilter, pixelSize: CGSize)? {
+        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        switch src.kind {
+        case .screenDisplay:
+            guard let id = src.displayID, let display = content.displays.first(where: { $0.displayID == id }) else { return nil }
+            // Exclude Recaptr to avoid an infinite mirror. Excluding the app, not
+            // its current windows, also covers windows opened later (the outline).
+            let myBundleID = Bundle.main.bundleIdentifier
+            let filter: SCContentFilter
+            if let me = content.applications.first(where: { $0.bundleIdentifier == myBundleID }) {
+                filter = SCContentFilter(display: display, excludingApplications: [me], exceptingWindows: [])
+            } else {
+                let myWindows = content.windows.filter { $0.owningApplication?.bundleIdentifier == myBundleID }
+                filter = SCContentFilter(display: display, excludingWindows: myWindows)
+            }
+            return (filter, ScreenResolution.pixelSize(of: display))
+        case .screenWindow:
+            guard let id = src.windowID, let window = content.windows.first(where: { $0.windowID == id }) else { return nil }
+            // A single-window filter captures only that window; nothing to exclude.
+            return (SCContentFilter(desktopIndependentWindow: window), ScreenResolution.pixelSize(of: window))
+        case .camera:
+            return nil
+        }
+    }
+
     /// Builds a screen service with the callbacks shared by display and
-    /// window capture. Preview stops if the stream dies (display unplugged,
-    /// window closed, permission revoked).
+    /// window capture. If the stream dies mid-take, it's restarted into
+    /// the same file; otherwise (or if that fails) preview stops.
     private func makeScreenService(audioViaMixer: Bool) -> ScreenCaptureService {
         let svc = ScreenCaptureService()
         svc.instantReplay = instantReplay
@@ -1227,14 +1222,47 @@ final class MainViewModel: ObservableObject {
         }
         svc.onStreamStopped = { [weak self] error in
             Task { @MainActor in
-                guard let self else { return }
+                guard let self, let svc = self.screenService else { return }
                 let reason = error?.localizedDescription ?? "unknown reason"
+                if self.isRecording, await self.restartScreenCapture(svc, after: reason) { return }
                 self.status = "Screen capture stopped: \(reason)"
                 self.show(.screenStopped(wasRecording: self.isRecording))
                 self.stopPreview()
             }
         }
         return svc
+    }
+
+    /// Restarts a screen stream that died mid-take: once right away, then
+    /// with backoff, up to `screenRestartLimit` times per take. Each restart
+    /// is noted in Diagnostics. False when it couldn't be restarted.
+    private func restartScreenCapture(_ svc: ScreenCaptureService, after reason: String) async -> Bool {
+        // A second failure report during a restart is the same failure.
+        guard !restartingScreen else { return true }
+        restartingScreen = true
+        defer { restartingScreen = false }
+        let delays: [Duration] = [.zero, .milliseconds(500), .seconds(1), .seconds(2)]
+        while screenRestarts < Self.screenRestartLimit {
+            let attempt = screenRestarts
+            screenRestarts += 1
+            try? await Task.sleep(for: delays[min(attempt, delays.count - 1)])
+            // Stopped or switched source while waiting.
+            guard isRecording, screenService === svc, let src = selectedMainSource else { return false }
+            do {
+                guard let target = try await screenFilter(for: src) else { break }
+                try await svc.restart(filter: target.filter)
+                let at = recordingStartedAt.map { Date().timeIntervalSince($0) } ?? recordingElapsed
+                let note = String(format: "Screen capture restarted at %02d:%02d (%@)", Int(at) / 60, Int(at) % 60, reason)
+                captureEvents.append(note)
+                print("Recaptr: \(note)")
+                status = note
+                return true
+            } catch {
+                print("Recaptr: screen restart \(attempt + 1) failed: \(error.localizedDescription)")
+            }
+        }
+        captureEvents.append("Screen capture stopped and couldn't restart (\(reason))")
+        return false
     }
 
     func stopPreview() {
@@ -1338,6 +1366,8 @@ final class MainViewModel: ObservableObject {
             isRecording = true
             recordingStartedAt = Date()
             notice = nil
+            captureEvents = []
+            screenRestarts = 0
             refreshGlobalHotKeys()
             captureOutline.setRecording(true)
             recordingURL = url
@@ -1388,6 +1418,9 @@ final class MainViewModel: ObservableObject {
         if let reason = stopReason {
             summary = reason + "\n" + summary
             stopReason = nil
+        }
+        if !captureEvents.isEmpty {
+            summary = captureEvents.joined(separator: "\n") + "\n" + summary
         }
         lastRecordingSummary = summary
         status = url.map { "Saved → \($0.lastPathComponent)  ·  \(summary)" } ?? "Recording stopped (no file)  ·  \(summary)"
@@ -1663,6 +1696,15 @@ final class MainViewModel: ObservableObject {
                 monitorEnabled = true
             }
             #if DEBUG
+            // -RecaptrUITestFailStreamAfter <s>: fake a screen stream failure mid-take.
+            let failAfter = d.double(forKey: "RecaptrUITestFailStreamAfter")
+            if failAfter > 0, let svc = screenService {
+                Task { @MainActor in
+                    try? await Task.sleep(for: .seconds(failAfter))
+                    print("RecaptrUITest: simulating stream failure")
+                    await svc.simulateStreamFailure()
+                }
+            }
             // -RecaptrUITestMeasureMonitorLag YES: log monitor buffer fill every 10 s, then measure lag.
             if d.bool(forKey: "RecaptrUITestMeasureMonitorLag") {
                 Task { @MainActor [weak self] in
@@ -1856,6 +1898,11 @@ final class MainViewModel: ObservableObject {
     private var warnedHot = false
     /// Set when Recaptr stops a take itself; shown above the summary.
     private var stopReason: String?
+    /// Things that happened to the capture mid-take (restarts), for Diagnostics.
+    private var captureEvents: [String] = []
+    private var screenRestarts = 0
+    private var restartingScreen = false
+    static let screenRestartLimit = 4
 
     /// Runs once a second while recording; disk is checked every 10 s.
     private func checkRecordingHealth() {

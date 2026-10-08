@@ -69,6 +69,8 @@ final class ScreenCaptureService: NSObject, @unchecked Sendable, SCStreamOutput,
     private let audioQueue = DispatchQueue(label: "recaptr.screen.audio", qos: .userInitiated)
 
     private var stream: SCStream?
+    /// The running stream's settings, reused by `restart`.
+    private var configuration: SCStreamConfiguration?
     /// Instant-replay buffer, attached only when `instantReplay` is on.
     private var clipBuffer: SCClipBufferingOutput?
 
@@ -118,6 +120,18 @@ final class ScreenCaptureService: NSObject, @unchecked Sendable, SCStreamOutput,
         // Keeps the live monitor from feeding back into the recording.
         config.excludesCurrentProcessAudio = true
 
+        let s = try await startStream(filter: filter, configuration: config)
+        self.stream = s
+        self.configuration = config
+        resetFrameGrid(frameRate: frameRate)
+        seedFirstFrameIfNeeded(filter: filter, configuration: config)
+        self.activeDimensions = CMVideoDimensions(width: Int32(config.width),
+                                                  height: Int32(config.height))
+        print("ScreenCaptureService: started — \(config.width)×\(config.height) @ \(config.minimumFrameInterval.timescale)fps 420v/709 + audio \(config.sampleRate)Hz×\(config.channelCount)ch")
+        return activeDimensions
+    }
+
+    private func startStream(filter: SCContentFilter, configuration config: SCStreamConfiguration) async throws -> SCStream {
         let s = SCStream(filter: filter, configuration: config, delegate: self)
         try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: videoQueue)
         try s.addStreamOutput(self, type: .audio,  sampleHandlerQueue: audioQueue)
@@ -126,6 +140,7 @@ final class ScreenCaptureService: NSObject, @unchecked Sendable, SCStreamOutput,
 
         // The clip buffer can only be added to a running stream. If it
         // fails, capture carries on without replay.
+        clipBuffer = nil
         if instantReplay {
             let clip = SCClipBufferingOutput(delegate: nil)
             do {
@@ -136,15 +151,30 @@ final class ScreenCaptureService: NSObject, @unchecked Sendable, SCStreamOutput,
                 print("ScreenCaptureService: instant replay unavailable: \(error.localizedDescription)")
             }
         }
-
-        self.stream = s
-        resetFrameGrid(frameRate: frameRate)
-        seedFirstFrameIfNeeded(filter: filter, configuration: config)
-        self.activeDimensions = CMVideoDimensions(width: Int32(config.width),
-                                                  height: Int32(config.height))
-        print("ScreenCaptureService: started — \(config.width)×\(config.height) @ \(config.minimumFrameInterval.timescale)fps 420v/709 + audio \(config.sampleRate)Hz×\(config.channelCount)ch")
-        return activeDimensions
+        return s
     }
+
+    /// Starts a new stream after the old one died, with the same settings.
+    /// The frame grid keeps repeating the last frame meanwhile, so the
+    /// recording shows a short freeze instead of a gap.
+    func restart(filter: SCContentFilter) async throws {
+        guard let configuration else { throw CaptureError.configurationFailed("Screen capture never started") }
+        if let old = stream {
+            stream = nil
+            try? await old.stopCapture()
+        }
+        stream = try await startStream(filter: filter, configuration: configuration)
+        print("ScreenCaptureService: restarted — \(configuration.width)×\(configuration.height)")
+    }
+
+    #if DEBUG
+    /// UI test hook: stops the stream as if SCStream had failed.
+    func simulateStreamFailure() async {
+        guard let s = stream else { return }
+        try? await s.stopCapture()
+        onStreamStopped?(CaptureError.configurationFailed("Simulated stream failure"))
+    }
+    #endif
 
     func stop() async {
         guard let s = stream else { return }
@@ -155,6 +185,7 @@ final class ScreenCaptureService: NSObject, @unchecked Sendable, SCStreamOutput,
             print("ScreenCaptureService: stopCapture threw (likely already stopped): \(error)")
         }
         stream = nil
+        configuration = nil
         stopFrameGrid()
         clipBuffer = nil
         activeDimensions = .init(width: 0, height: 0)
