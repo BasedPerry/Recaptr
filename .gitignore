@@ -82,3 +82,7 @@ fastlane/test_output
 .env
 .env.local
 secrets.plist
+
+# ─── Agent notes (local only, never public) ─────────────────────────
+CLAUDE.md
+.claude/
