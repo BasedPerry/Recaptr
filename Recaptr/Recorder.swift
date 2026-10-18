@@ -264,8 +264,9 @@ final class Recorder: @unchecked Sendable {
     // MARK: - Markers
 
     /// Adds a clip marker now. Uses the host clock, the same time base
-    /// as capture PTS.
-    func addMarker() {
+    /// as capture PTS. `onAdded` gets the marker's offset into the take,
+    /// on the writer queue.
+    func addMarker(onAdded: (@Sendable (Double) -> Void)? = nil) {
         let now = CMClockGetTime(CMClockGetHostTimeClock())
         writerQueue.async { [weak self] in
             guard let self, self.isWriting, self.sessionStartTime.isValid,
@@ -274,6 +275,7 @@ final class Recorder: @unchecked Sendable {
             if let last = self.markerTimes.last,
                CMTimeGetSeconds(CMTimeSubtract(now, last)) < 1.0 / 60 { return }
             self.markerTimes.append(now)
+            onAdded?(CMTimeGetSeconds(CMTimeSubtract(now, self.sessionStartTime)))
         }
     }
 

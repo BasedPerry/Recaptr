@@ -9,11 +9,13 @@ import SwiftUI
 struct RecaptrApp: App {
 
     @StateObject private var vm = MainViewModel()
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     var body: some Scene {
         WindowGroup {
             RecaptrRootView()
                 .environmentObject(vm)
+                .onAppear { appDelegate.viewModel = vm }
                 .onOpenURL { vm.handle(url: $0) }
                 // recaptr:// goes to this window instead of opening another.
                 .handlesExternalEvents(preferring: ["*"], allowing: ["*"])
@@ -63,5 +65,14 @@ struct RecaptrApp: App {
             MenuBarLabel(clock: vm.clock)
         }
         .menuBarExtraStyle(.menu)
+    }
+}
+
+/// Lets the view model stop and save a take before the app quits.
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    weak var viewModel: MainViewModel?
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        viewModel?.replyToQuit() ?? .terminateNow
     }
 }

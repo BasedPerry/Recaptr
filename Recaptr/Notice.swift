@@ -78,6 +78,13 @@ nonisolated struct Notice: Equatable, Identifiable, Sendable {
                       fix: kind, endedTake: wasRecording)
     }
 
+    static func finishedLeftoverTakes(_ count: Int) -> Notice {
+        Notice(message: count == 1
+                   ? "Recaptr finished a take that was interrupted when it last quit."
+                   : "Recaptr finished \(count) takes that were interrupted when it last quit.",
+               next: "It's named and filed with its markers, like any other take.")
+    }
+
     // MARK: - Couldn't start
 
     static let screenPermissionMissing = Notice(

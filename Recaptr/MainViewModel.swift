@@ -148,6 +148,10 @@ final class MainViewModel: ObservableObject {
     /// After-stop work (probe, naming, renaming, Final Cut file).
     private(set) var finalizeTask: Task<Void, Never>?
 
+    /// The take being recorded, as saved beside it so a quit or crash can
+    /// be finished on the next launch.
+    private var journal: TakeJournal?
+
     /// Outline the display or window being captured (never recorded).
     @Published var showCaptureOutline: Bool =
         MainViewModel.bool("RecaptrShowCaptureOutline", default: true) {
@@ -478,6 +482,10 @@ final class MainViewModel: ObservableObject {
             Task { @MainActor in
                 await strongSelf.handleDeviceConnect(note)
             }
+        }
+
+        if !Self.isUITesting {
+            Task { await self.finishLeftoverTakes() }
         }
 
         // Load the catalog before picking a startup source.
@@ -848,8 +856,13 @@ final class MainViewModel: ObservableObject {
         // One marker per second: extra presses from a mashed or held key are ignored.
         if let last = markers.last, t - last < Self.markerDebounce { return }
         markers.append(t)
-        // Precise capture-clock time, for the .fcpxml.
-        recorder.addMarker()
+        // Precise capture-clock time, for the .fcpxml. Saved to the journal
+        // right away so a crash doesn't lose it.
+        let take = recordingURL
+        recorder.addMarker { [weak self] seconds in
+            guard let self else { return }
+            Task { @MainActor in self.journalMarker(seconds, take: take) }
+        }
         markerPulse += 1
         if markerSoundEnabled { Self.markerSound?.play() }
         status = String(format: "Marker dropped at %02d:%02d", Int(t) / 60, Int(t) % 60)
@@ -1374,6 +1387,8 @@ final class MainViewModel: ObservableObject {
             refreshGlobalHotKeys()
             captureOutline.setRecording(true)
             recordingURL = url
+            journal = TakeJournal(series: SessionNaming.sanitize(seriesName), episode: episodeName, markerSeconds: [])
+            try? journal?.save(for: url)
             recordingBytes = 0
             warnedLowDisk = false
             warnedHot = false
@@ -1409,6 +1424,7 @@ final class MainViewModel: ObservableObject {
         }
         recordingStartedAt = nil
         recordingURL = nil
+        journal = nil
         lastRecordedFile = url
 
         // Snapshot after stop() so the summary has the final numbers.
@@ -1485,6 +1501,55 @@ final class MainViewModel: ObservableObject {
         await writeFinalCutMarkers(for: finalURL, markers: markers, eventName: series.isEmpty ? nil : series)
         lastTake = Take(url: finalURL, series: series, markers: markers.map { .init(title: $0.title, seconds: $0.seconds) })
         if let lastTake { recentTakes.add(lastTake.url) }
+        TakeJournal.remove(for: url)
+    }
+
+    private func journalMarker(_ seconds: Double, take: URL?) {
+        guard let take, take == recordingURL, journal != nil else { return }
+        journal?.markerSeconds.append(seconds)
+        try? journal?.save(for: take)
+    }
+
+    /// Finishes takes a quit or crash left behind: names them, files them
+    /// and writes their Final Cut file from the saved markers.
+    func finishLeftoverTakes() async {
+        guard let folder = try? recordingStorage.resolveSaveDirectory() else { return }
+        let leftovers = TakeJournal.leftovers(in: folder, excluding: recordingURL)
+        guard !leftovers.isEmpty else { return }
+        for leftover in leftovers {
+            await finalizeRecording(leftover.movURL, markerSeconds: leftover.journal.markerSeconds,
+                                    series: leftover.journal.series, typedEpisode: leftover.journal.episode)
+        }
+        notice = .finishedLeftoverTakes(leftovers.count)
+    }
+
+    /// Quitting mid-take asks first, then stops and saves the take the
+    /// normal way. Quitting while a take is still being named waits for it.
+    func replyToQuit() -> NSApplication.TerminateReply {
+        if isRecording {
+            if !Self.isUITesting {
+                let alert = NSAlert()
+                alert.messageText = "Recaptr is still recording."
+                alert.informativeText = "Stop and save the take, then quit?"
+                alert.addButton(withTitle: "Stop and Quit")
+                alert.addButton(withTitle: "Keep Recording")
+                guard alert.runModal() == .alertFirstButtonReturn else { return .terminateCancel }
+            }
+            Task {
+                await stopRecording()
+                await finalizeTask?.value
+                NSApp.reply(toApplicationShouldTerminate: true)
+            }
+            return .terminateLater
+        }
+        if let finalizeTask {
+            Task {
+                await finalizeTask.value
+                NSApp.reply(toApplicationShouldTerminate: true)
+            }
+            return .terminateLater
+        }
+        return .terminateNow
     }
 
     /// Rename the last take's episode and markers.
