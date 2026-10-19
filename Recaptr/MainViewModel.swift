@@ -54,19 +54,27 @@ final class MainViewModel: ObservableObject {
     // Channel 1: source audio (capture card HDMI audio or the camera's mic),
     // auto-selected to match the video source.
     @Published var ch1DeviceID: String?
-    @Published var ch1Gain: Double = 1.0
+    /// Recorded level, remembered between launches. Monitoring hears it after this gain.
+    @Published var ch1Gain: Double = MainViewModel.storedGain("RecaptrGameLevel") {
+        didSet { if !Self.isUITesting { UserDefaults.standard.set(ch1Gain, forKey: "RecaptrGameLevel") } }
+    }
     @Published var ch1Enabled: Bool = true
 
-    // Channel 2: commentary mic. Never auto-selected and never monitored
-    // (hearing your own voice with latency is distracting).
-    // Remembered between launches; picking None turns it off for next time too.
+    // Channel 2: commentary mic. Never auto-selected. Remembered between
+    // launches; picking None turns it off for next time too.
     @Published var ch2DeviceID: String? {
         didSet {
             guard !Self.isUITesting, !keepsSavedMic else { return }
             UserDefaults.standard.set(ch2DeviceID, forKey: Self.savedMicKey)
         }
     }
-    @Published var ch2Gain: Double = 1.0
+    @Published var ch2Gain: Double = MainViewModel.storedGain("RecaptrMicLevel") {
+        didSet { if !Self.isUITesting { UserDefaults.standard.set(ch2Gain, forKey: "RecaptrMicLevel") } }
+    }
+    private static func storedGain(_ key: String) -> Double {
+        guard !isUITesting, let v = UserDefaults.standard.object(forKey: key) as? Double else { return 1.0 }
+        return v
+    }
     @Published var ch2Enabled: Bool = true
 
     // Video settings, remembered between launches.
@@ -227,11 +235,26 @@ final class MainViewModel: ObservableObject {
     // audio: it already plays through the speakers.
     @Published var gameMonitorEnabled: Bool = false
     @Published var micMonitorEnabled: Bool = false
-    @Published var gameMonitorVolume: Double = 1.0  // 0…1.5
-    @Published var micMonitorVolume: Double = 1.0   // 0…1.5
+    @Published var gameMonitorVolume: Double = MainViewModel.storedHeadphoneVolume  // 0…1.5
+    @Published var micMonitorVolume: Double = MainViewModel.storedHeadphoneVolume   // 0…1.5
+
+    /// How loud monitoring is in your ears, for every channel. Never
+    /// changes the recording: each channel's gain sets what's recorded,
+    /// and monitoring hears it after that gain.
+    @Published var headphoneVolume: Double = MainViewModel.storedHeadphoneVolume {
+        didSet {
+            gameMonitorVolume = headphoneVolume
+            micMonitorVolume = headphoneVolume
+            if !Self.isUITesting { UserDefaults.standard.set(headphoneVolume, forKey: "RecaptrHeadphoneVolume") }
+        }
+    }
+    private static var storedHeadphoneVolume: Double {
+        guard !isUITesting, let v = UserDefaults.standard.object(forKey: "RecaptrHeadphoneVolume") as? Double else { return 1.0 }
+        return v
+    }
 
     /// The 1.0 single monitor: game audio for cameras, the mic for
-    /// screen and window captures (see `monitorChannelIndex`).
+    /// screen and window captures (see `monitorChannelIndex`). ⌘K.
     var monitorEnabled: Bool {
         get { monitorChannelIndex == 1 ? micMonitorEnabled : gameMonitorEnabled }
         set {
@@ -240,11 +263,8 @@ final class MainViewModel: ObservableObject {
         }
     }
     var monitorVolume: Double {
-        get { monitorChannelIndex == 1 ? micMonitorVolume : gameMonitorVolume }
-        set {
-            if monitorChannelIndex == 1 { micMonitorVolume = newValue }
-            else { gameMonitorVolume = newValue }
-        }
+        get { headphoneVolume }
+        set { headphoneVolume = newValue }
     }
 
     @Published var isPreviewing = false

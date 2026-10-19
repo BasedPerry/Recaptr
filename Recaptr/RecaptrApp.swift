@@ -10,6 +10,10 @@ struct RecaptrApp: App {
 
     @StateObject private var vm = MainViewModel()
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+    #if DEBUG
+    @AppStorage(GlassTest.key) private var glassTest = GlassTest.standard
+    @AppStorage(GlassTest.keepChromeKey) private var keepChromeVisible = false
+    #endif
 
     var body: some Scene {
         WindowGroup {
@@ -45,6 +49,11 @@ struct RecaptrApp: App {
                     }
                 }
                 .keyboardShortcut("p", modifiers: [.control, .option, .command])
+                Divider()
+                Toggle("Keep Controls Visible", isOn: $keepChromeVisible)
+                Picker("Glass Test", selection: $glassTest) {
+                    ForEach(GlassTest.allCases) { Text($0.title).tag($0) }
+                }
             }
             #endif
         }

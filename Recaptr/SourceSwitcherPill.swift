@@ -58,7 +58,7 @@ struct SourceModeSegments: View {
                 segment(for: mode)
             }
         }
-        .animation(reduceMotion ? nil : .snappy(duration: 0.22), value: activeMode)
+        .animation(Motion.pick(Motion.snappy, reduceMotion: reduceMotion), value: activeMode)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Capture mode")
         .accessibilityIdentifier("modePicker")
@@ -149,6 +149,7 @@ struct SourceSwitcherPill: View {
         } label: {
             HStack(spacing: 8) {
                 Image(systemName: activeMode.systemImage)
+                    .contentTransition(.symbolEffect(.replace))
                     .imageScale(.medium)
                     .foregroundStyle(activeMode.tint)
                 Text(currentSourceName)

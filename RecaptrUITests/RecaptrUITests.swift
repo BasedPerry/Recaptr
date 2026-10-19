@@ -16,18 +16,20 @@ final class RecaptrUITests: XCTestCase {
     func testChromeControlsAreReachable() throws {
         let app = launchApp()
         for id in ["recordButton", "screenshotButton", "markerButton",
-                   "settingsButton", "monitorToggle", "monitorVolume",
+                   "settingsButton", "monitorToggle", "gameChannel", "micChannel",
                    "mode-window", "mode-screen", "mode-camera"] {
             XCTAssertTrue(element(id, in: app).waitForExistence(timeout: 5),
                           "Missing accessibility identifier \(id)")
         }
     }
 
-    /// Monitor volume is a slider with a value. XCUITest's `adjust` can't drive
-    /// a represented slider, so adjusting is checked by hand with VoiceOver.
+    /// Headphone volume lives in a channel's popover in the bottom bar.
     @MainActor
     func testMonitorVolumeIsAdjustable() throws {
         let app = launchApp()
+        let channel = element("gameChannel", in: app)
+        XCTAssertTrue(channel.waitForExistence(timeout: 5))
+        channel.click()
         let volume = app.sliders["monitorVolume"]
         XCTAssertTrue(volume.waitForExistence(timeout: 5))
         XCTAssertTrue(volume.isEnabled)

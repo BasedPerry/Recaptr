@@ -2,7 +2,8 @@
 //  ContentViewNext.swift
 //  Recaptr
 //
-//  Main window: full-bleed preview with floating chrome that fades on idle.
+//  Main window: full-bleed preview with floating chrome that hides on idle.
+//  Mid-take, the bottom bar morphs into a small recording pill.
 //
 
 import SwiftUI
@@ -18,7 +19,8 @@ struct ContentViewNext: View {
     @State private var activeMode: SourceMode = .camera
     @Environment(\.openSettings) private var openSettings
 
-    @State private var chromeOpacity: Double = 1.0
+    @State private var chromeShown = true
+    @Namespace private var glassSpace
     @State private var fadeTask: Task<Void, Never>? = nil
     private let fadeDelay: TimeInterval = 3.0
 
@@ -27,6 +29,11 @@ struct ContentViewNext: View {
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
+    #if DEBUG
+    @AppStorage(GlassTest.key) private var glassTest = GlassTest.standard
+    @AppStorage(GlassTest.keepChromeKey) private var debugKeepChromeOn = false
+    #endif
+
     var body: some View {
         ZStack {
             Color.recaptrBackground.ignoresSafeArea()
@@ -34,13 +41,19 @@ struct ContentViewNext: View {
             // Aspect ratio first, then clip, so the rounded corners land
             // on the picture and not the letterbox. Preview only; the
             // recording is not affected.
-            SampleBufferPreviewRepresentable(vm: vm)
-                .aspectRatio(previewAspect, contentMode: .fit)
-                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                .padding(10)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(Color.black)
-                .ignoresSafeArea()
+            if debugShowsGradient {
+                LinearGradient(colors: [.orange, .pink, .purple, .blue],
+                               startPoint: .topLeading, endPoint: .bottomTrailing)
+                    .ignoresSafeArea()
+            } else {
+                SampleBufferPreviewRepresentable(vm: vm)
+                    .aspectRatio(previewAspect, contentMode: .fit)
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .padding(10)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Color.black)
+                    .ignoresSafeArea()
+            }
 
             if vm.selectedMainSource == nil {
                 noSourceHint
@@ -49,26 +62,15 @@ struct ContentViewNext: View {
             // One container so the system renders all floating glass as
             // one layer. Don't add inactive-window dimming: glass already
             // dims itself, and doubling it makes the controls unreadable.
-            GlassEffectContainer {
-                chromeLayer
+            Group {
+                if debugSkipsContainer {
+                    chromeLayer
+                } else {
+                    GlassEffectContainer { chromeLayer }
+                }
             }
-                // Live meters pause while the chrome is faded out.
-                .environment(\.chromeVisible, chromeOpacity > 0.05)
-                .opacity(chromeOpacity)
-                .allowsHitTesting(chromeOpacity > 0.05)
-                .animation(reduceMotion ? .linear(duration: 0.1) : .easeInOut(duration: 0.35),
-                           value: chromeOpacity)
-
-            // Outside the fading chrome so elapsed time stays visible.
-            if vm.isRecording {
-                telemetryFloating
-                    .padding(.bottom, 28)
-                    .padding(.leading, 20)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
-                    .transition(reduceMotion
-                                ? .opacity
-                                : .opacity.combined(with: .move(edge: .bottom)))
-            }
+                // Live meters pause while the chrome is hidden.
+                .environment(\.chromeVisible, chromeShown)
 
             screenshotFlashOverlay
                 .allowsHitTesting(false)
@@ -79,7 +81,7 @@ struct ContentViewNext: View {
                     .allowsHitTesting(false)
             }
         }
-        .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: vm.isRecording)
+        .animation(Motion.pick(Motion.fade, reduceMotion: reduceMotion), value: vm.isRecording)
         .onChange(of: vm.markers.count) { old, new in
             if new > old { triggerMarkerFlash() }
         }
@@ -94,6 +96,9 @@ struct ContentViewNext: View {
         }
         .background(shortcutCarrier)
         .overlay(alignment: .bottomTrailing) { uiTestProbe }
+        .onChange(of: debugKeepsChrome) { _, keep in
+            if keep { fadeTask?.cancel(); setChrome(shown: true) } else { scheduleFade() }
+        }
         .onAppear {
             syncActiveModeFromVM()
             resetFadeIfNeeded()
@@ -111,50 +116,80 @@ struct ContentViewNext: View {
         }
     }
 
+    // MARK: - Debug → Glass Test
+
+    #if DEBUG
+    private var debugShowsGradient: Bool { glassTest == .noVideo }
+    private var debugSkipsContainer: Bool { glassTest == .noContainer }
+    private var debugKeepsChrome: Bool { debugKeepChromeOn || glassTest != .standard }
+    #else
+    private let debugShowsGradient = false
+    private let debugSkipsContainer = false
+    private let debugKeepsChrome = false
+    #endif
+
     // MARK: - Floating chrome layer
 
     /// Floating controls, anchored by overlay alignment on a clear base.
     private var chromeLayer: some View {
         Color.clear
+            // Hidden controls leave the container, so their glass dissolves
+            // rather than fading.
             .overlay(alignment: .top) {
                 HStack(spacing: 10) {
-                    sidebarButton
-                    if !sidebarVisible {
+                    if chromeShown {
+                        sidebarButton
+                    }
+                    if chromeShown, !sidebarVisible {
                         SourceSwitcherPill(
                             activeMode: activeModeBinding,
                             sourcesForActiveMode: pickableSources(for: activeMode),
                             selectedSourceID: selectedSourceIDBinding
                         )
-                        .transition(reduceMotion
-                                    ? .opacity
-                                    : .move(edge: .leading).combined(with: .opacity))
                     }
                 }
                 .padding(.top, 14)
                 .frame(maxWidth: .infinity, alignment: sidebarVisible ? .leading : .center)
                 .padding(.leading, sidebarVisible ? 16 : 0)
-                .animation(reduceMotion ? nil : .smooth(duration: 0.35), value: sidebarVisible)
+                .animation(Motion.pick(Motion.liquid, reduceMotion: reduceMotion), value: sidebarVisible)
             }
             .overlay(alignment: .topTrailing) {
-                settingsButton
-                    .padding(.top, 14)
-                    .padding(.trailing, 16)
-            }
-            .overlay(alignment: .trailing) {
-                AudioModule()
-                    .environmentObject(vm)
-                    .padding(.trailing, 16)
+                if chromeShown {
+                    settingsButton
+                        .padding(.top, 14)
+                        .padding(.trailing, 16)
+                }
             }
             .overlay(alignment: .bottom) {
-                RecordingControlsPill(
-                    isRecording: vm.isRecording,
-                    canRecord: vm.isPreviewing || vm.selectedMainSource != nil,
-                    onScreenshot: handleScreenshot,
-                    onToggleRecord: handleToggleRecord,
-                    onMark: handleMark
-                )
-                .padding(.bottom, 28)
+                bottomGlass
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 16)
             }
+    }
+
+    /// The bar while the chrome shows. Mid-take, once it hides, the same
+    /// glass flows into the recording pill.
+    @ViewBuilder
+    private var bottomGlass: some View {
+        if chromeShown {
+            BottomBar(onScreenshot: handleScreenshot,
+                      onToggleRecord: handleToggleRecord,
+                      onMark: handleMark,
+                      glassNamespace: glassSpace)
+                .environmentObject(vm)
+        } else if vm.isRecording {
+            RecordingPill(clock: vm.clock, markerCount: vm.markers.count, glassNamespace: glassSpace)
+                .allowsHitTesting(false)
+        }
+    }
+
+    private var chromeAnimation: Animation {
+        Motion.pick(Motion.liquid, reduceMotion: reduceMotion)
+    }
+
+    private func setChrome(shown: Bool) {
+        guard chromeShown != shown else { return }
+        withAnimation(chromeAnimation) { chromeShown = shown }
     }
 
     /// Width ÷ height of what's being captured (16:9 until known).
@@ -199,12 +234,6 @@ struct ContentViewNext: View {
         .accessibilityIdentifier("settingsButton")
     }
 
-    // MARK: - Recording status
-
-    private var telemetryFloating: some View {
-        RecordingPill(clock: vm.clock, markerCount: vm.markers.count)
-    }
-
     // MARK: - No-source hint
 
     private var noSourceHint: some View {
@@ -229,21 +258,19 @@ struct ContentViewNext: View {
 
     private func wakeChrome() {
         fadeTask?.cancel()
-        if chromeOpacity < 0.99 {
-            chromeOpacity = 1.0
-        }
+        setChrome(shown: true)
         scheduleFade()
     }
 
     private func scheduleFade() {
         guard vm.selectedMainSource != nil else { return }
         // `-RecaptrKeepChromeVisible YES` disables the fade for UI tests and screenshots.
-        guard !UserDefaults.standard.bool(forKey: "RecaptrKeepChromeVisible") else { return }
+        guard !UserDefaults.standard.bool(forKey: "RecaptrKeepChromeVisible"), !debugKeepsChrome else { return }
         fadeTask?.cancel()
         fadeTask = Task { @MainActor in
             try? await Task.sleep(for: .seconds(fadeDelay))
             guard !Task.isCancelled else { return }
-            chromeOpacity = 0.0
+            setChrome(shown: false)
         }
     }
 
@@ -251,7 +278,7 @@ struct ContentViewNext: View {
     private func resetFadeIfNeeded() {
         if vm.selectedMainSource == nil {
             fadeTask?.cancel()
-            chromeOpacity = 1.0
+            setChrome(shown: true)
         } else {
             scheduleFade()
         }
@@ -542,6 +569,7 @@ extension EnvironmentValues {
 private struct RecordingPill: View {
     @ObservedObject var clock: RecordingClock
     let markerCount: Int
+    var glassNamespace: Namespace.ID? = nil
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -555,6 +583,8 @@ private struct RecordingPill: View {
                 .font(BrandFont.mono(weight: .medium, size: 13).swiftUI)
                 .foregroundStyle(.primary)
                 .monospacedDigit()
+                .contentTransition(.numericText(countsDown: false))
+                .animation(reduceMotion ? nil : Motion.snappy, value: clock.formattedElapsed)
             if clock.bytes > 0 {
                 Text(ByteCountFormatter.string(fromByteCount: clock.bytes, countStyle: .file))
                     .font(BrandFont.mono(weight: .regular, size: 11).swiftUI)
@@ -572,10 +602,11 @@ private struct RecordingPill: View {
                 .transition(reduceMotion ? .opacity : .opacity.combined(with: .scale))
             }
         }
-        .animation(reduceMotion ? nil : .spring(duration: 0.28, bounce: 0.35), value: markerCount)
+        .animation(Motion.pick(Motion.pop, reduceMotion: reduceMotion), value: markerCount)
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .recaptrGlass()
+        .recaptrGlassID(BottomBar.glassID, in: glassNamespace)
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("telemetryPill")
     }

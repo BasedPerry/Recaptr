@@ -14,11 +14,25 @@ struct RecordingControlsPill: View {
     var onScreenshot: () -> Void
     var onToggleRecord: () -> Void
     var onMark: () -> Void
+    /// False inside the bottom bar, which brings its own glass.
+    var standalone = true
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        HStack(spacing: 28) {
+        if standalone {
+            buttons
+                .padding(.horizontal, 22)
+                .padding(.vertical, 12)
+                .recaptrGlass(tint: isRecording ? Color.red.opacity(0.12) : nil)
+                .animation(Motion.pick(Motion.fade, reduceMotion: reduceMotion), value: isRecording)
+        } else {
+            buttons
+        }
+    }
+
+    private var buttons: some View {
+        HStack(spacing: standalone ? 28 : 18) {
             sideButton(
                 icon: "camera.viewfinder",
                 label: "Screenshot",
@@ -36,10 +50,6 @@ struct RecordingControlsPill: View {
                 action: onMark
             )
         }
-        .padding(.horizontal, 22)
-        .padding(.vertical, 12)
-        .recaptrGlass(tint: isRecording ? Color.red.opacity(0.12) : nil)
-        .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: isRecording)
     }
 
     // MARK: Side button
@@ -91,7 +101,7 @@ struct RecordingControlsPill: View {
                     }
                 }
                 .frame(width: 60, height: 60)
-                .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: isRecording)
+                .animation(Motion.pick(Motion.fade, reduceMotion: reduceMotion), value: isRecording)
 
                 Group {
                     if isRecording {
@@ -104,7 +114,7 @@ struct RecordingControlsPill: View {
                             .frame(width: 44, height: 44)
                     }
                 }
-                .animation(reduceMotion ? nil : .spring(duration: 0.28, bounce: 0.35),
+                .animation(Motion.pick(Motion.pop, reduceMotion: reduceMotion),
                            value: isRecording)
             }
             .contentShape(Circle())
