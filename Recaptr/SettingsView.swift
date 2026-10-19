@@ -7,6 +7,7 @@
 
 import SwiftUI
 import AVFoundation
+import AppKit
 
 struct SettingsView: View {
     @EnvironmentObject var vm: MainViewModel
@@ -15,6 +16,9 @@ struct SettingsView: View {
         TabView {
             Tab("Recording", systemImage: "record.circle") {
                 RecordingSettingsTab()
+            }
+            Tab("Shortcuts", systemImage: "keyboard") {
+                ShortcutsSettingsTab()
             }
             Tab("Permissions", systemImage: "lock.shield") {
                 PermissionsSettingsTab()
@@ -57,13 +61,20 @@ private struct RecordingSettingsTab: View {
             }
 
             Section {
-                Toggle("Name markers and episodes with Apple Intelligence", isOn: $vm.aiNamingEnabled)
-                    .disabled(!MarkerNamer.isAvailable)
+                Picker("Name markers", selection: namingBinding) {
+                    ForEach(MarkerNaming.allCases) { mode in
+                        Text(mode.label).tag(mode)
+                            .disabled(mode == .appleIntelligence && !MarkerNamer.isAvailable)
+                    }
+                }
+                .pickerStyle(.radioGroup)
+                .accessibilityIdentifier("markerNamingPicker")
+                Toggle("Play a sound when a marker lands", isOn: $vm.markerSoundEnabled)
+                    .accessibilityIdentifier("markerSoundToggle")
             } header: {
-                Text("Naming")
+                Text("Markers")
             } footer: {
-                Text(MarkerNamer.unavailableReason
-                     ?? "After you stop, each marker gets a short name from its frame and what you said around it, and a blank episode gets a title. Runs on your Mac; nothing is uploaded.")
+                Text(namingFooter)
             }
 
             Section("Last recording") {
@@ -181,6 +192,22 @@ private struct RenameTakeSheet: View {
 }
 
 extension RecordingSettingsTab {
+    /// Until someone picks, shows what 1.0 did: Apple Intelligence when the Mac has it.
+    var namingBinding: Binding<MarkerNaming> {
+        Binding(
+            get: { vm.markerNaming ?? (MarkerNamer.isAvailable ? .appleIntelligence : .numbered) },
+            set: { vm.markerNaming = $0 }
+        )
+    }
+
+    var namingFooter: String {
+        let mode = namingBinding.wrappedValue
+        var text = mode.detail
+        if mode == .appleIntelligence { text += " Nothing is uploaded." }
+        if let reason = MarkerNamer.unavailableReason { text += " Apple Intelligence: \(reason)" }
+        return text + " The sound plays only in your headphones or speakers, never in the recording."
+    }
+
     /// Bitrate and size per hour at the current capture size.
     var encodingFooter: String {
         var text = "HEVC keeps more detail than H.264 at the same size and works in Final Cut. Use Compatible only for tools that can't open HEVC."
@@ -248,7 +275,7 @@ private struct PermissionsSettingsTab: View {
                     onOpen: { vm.openScreenCapturePrivacyPane() }
                 )
             } footer: {
-                Text("Recaptr asks for each permission the first time a feature needs it.")
+                Text("Recaptr asks for each permission the first time a feature needs it. Notifications are asked for the first time a take ends early while Recaptr is in the background, so you hear about it right away.")
             }
         }
         .formStyle(.grouped)
@@ -285,5 +312,109 @@ private struct PermissionRow: View {
             Text(title)
             Text(detail)
         }
+    }
+}
+
+// MARK: - Shortcuts
+
+/// Every action, each with a global key you can set, plus whether other
+/// apps can trigger actions through recaptr:// links.
+private struct ShortcutsSettingsTab: View {
+    @EnvironmentObject var vm: MainViewModel
+
+    var body: some View {
+        Form {
+            Section {
+                ForEach(RecaptrAction.allCases) { action in
+                    LabeledContent(action.label) {
+                        ShortcutRecorder(action: action)
+                    }
+                }
+                Button("Restore Defaults") { vm.restoreDefaultHotKeys() }
+                    .accessibilityIdentifier("restoreDefaultHotKeys")
+            } header: {
+                Text("Keys that work from any app")
+            } footer: {
+                Text("Record and Drop Marker come set to ⌃⌥⌘R and ⌃⌥⌘B. Drop Marker's key only works while recording. Inside Recaptr, the Recording menu has ⌘R and ⌘B too.")
+            }
+
+            Section {
+                Toggle("Let other apps control Recaptr", isOn: $vm.allowsExternalControl)
+                    .accessibilityIdentifier("externalControlToggle")
+            } header: {
+                Text("Links and Shortcuts")
+            } footer: {
+                Text("Lets Shortcuts, Stream Deck, mouse software and scripts run the actions above with links like recaptr://record/toggle and recaptr://marker. Links can only run these actions; they can't change settings or touch files.")
+            }
+        }
+        .formStyle(.grouped)
+        .frame(height: 560)
+    }
+}
+
+/// Click, then type a key combo. Esc cancels, Delete clears.
+private struct ShortcutRecorder: View {
+    @EnvironmentObject var vm: MainViewModel
+    let action: RecaptrAction
+
+    @State private var isRecording = false
+    @State private var problem: String?
+    @State private var monitor: Any?
+
+    var body: some View {
+        HStack(spacing: 6) {
+            if let problem {
+                Text(problem)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .lineLimit(2)
+            }
+            Button {
+                isRecording ? stop() : start()
+            } label: {
+                Text(isRecording ? "Type a shortcut…" : (vm.hotKeyLabel(for: action) ?? "Not set"))
+                    .monospacedDigit()
+                    .frame(minWidth: 110)
+            }
+            .help(isRecording ? "Esc to cancel, Delete to clear" : "Click to set a key")
+            .accessibilityIdentifier("hotKey-\(action.rawValue)")
+            if vm.hotKeyLabel(for: action) != nil, !isRecording {
+                Button {
+                    problem = vm.setHotKey(nil, for: action)?.message
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Clear")
+                .accessibilityLabel("Clear \(action.label) shortcut")
+            }
+        }
+        .onDisappear(perform: stop)
+    }
+
+    private func start() {
+        problem = nil
+        isRecording = true
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            switch Int(event.keyCode) {
+            case 53: // Esc
+                stop()
+            case 51, 117: // Delete, Forward Delete
+                problem = vm.setHotKey(nil, for: action)?.message
+                stop()
+            default:
+                guard let binding = HotKeyBinding(event: event) else { return event }
+                problem = vm.setHotKey(binding, for: action)?.message
+                stop()
+            }
+            return nil
+        }
+    }
+
+    private func stop() {
+        isRecording = false
+        if let monitor { NSEvent.removeMonitor(monitor) }
+        monitor = nil
     }
 }

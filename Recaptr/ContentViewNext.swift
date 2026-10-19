@@ -172,6 +172,18 @@ struct ContentViewNext: View {
                     .padding(.horizontal, 16)
                     .padding(.bottom, 16)
             }
+            // Notices stay visible when the rest of the chrome hides.
+            .overlay(alignment: .top) {
+                if let notice = vm.notice {
+                    NoticeBanner(notice: notice, onFix: handleFix) {
+                        withAnimation(chromeAnimation) { vm.notice = nil }
+                    }
+                    .padding(.top, 70)
+                    .padding(.horizontal, 16)
+                    .transition(reduceMotion ? .opacity : .move(edge: .top).combined(with: .opacity))
+                }
+            }
+            .animation(chromeAnimation, value: vm.notice)
     }
 
     /// The bar while the chrome shows. Mid-take, once it hides, the same
@@ -467,6 +479,16 @@ struct ContentViewNext: View {
         }
     }
 
+    /// "Pick another source" opens the sidebar; the rest the view model runs.
+    private func handleFix(_ fix: Notice.Fix) {
+        if fix == .pickSource {
+            sidebarVisible = true
+            vm.notice = nil
+        } else {
+            vm.perform(fix)
+        }
+    }
+
     private func handleMark() {
         vm.dropMarker()
     }
@@ -493,38 +515,20 @@ struct ContentViewNext: View {
 
     // MARK: - Keyboard shortcuts
 
-    /// Hidden buttons that carry the window's shortcuts. Each needs its
-    /// own Button; a ForEach doesn't attach the shortcuts reliably.
+    /// Hidden buttons for the window-only shortcuts. Record, marker and
+    /// sources live in the Recording menu. Each needs its own Button; a
+    /// ForEach doesn't attach the shortcuts reliably.
     private var shortcutCarrier: some View {
         Group {
-            Button("") { handleToggleRecord() }
-                .keyboardShortcut("r", modifiers: [.command])
             Button("") { vm.monitorEnabled.toggle() }
                 .keyboardShortcut("k", modifiers: [.command])
-            Button("") { handleMark() }
-                .keyboardShortcut("b", modifiers: [.command])
             Button("") { Task { await vm.saveReplay() } }
                 .keyboardShortcut("r", modifiers: [.command, .shift])
-            Button("") { selectMode(.window) }
-                .keyboardShortcut("1", modifiers: [.command])
-            Button("") { selectMode(.screen) }
-                .keyboardShortcut("2", modifiers: [.command])
-            Button("") { selectMode(.camera) }
-                .keyboardShortcut("3", modifiers: [.command])
             Button("") { sidebarVisible.toggle() }
                 .keyboardShortcut("s", modifiers: [.command, .control])
         }
         .hidden()
         .accessibilityHidden(true)
-    }
-
-    /// Same as tapping a switcher segment: also picks the first source
-    /// so ⌘1/2/3 don't leave the preview empty.
-    private func selectMode(_ mode: SourceMode) {
-        activeMode = mode
-        if mode != .camera { vm.screenModeSelected() }
-        let candidates = vm.catalog.videoSources.filter { matchesMode(mode, kind: $0.kind) }
-        vm.selectedMainSource = candidates.first
     }
 }
 

@@ -28,6 +28,9 @@ struct RecaptrApp: App {
         // The preview runs under the traffic lights; keep that corner free of chrome.
         .windowStyle(.hiddenTitleBar)
         .commands {
+            CommandMenu("Recording") {
+                RecordingCommands(vm: vm)
+            }
             // No help book, so the welcome sheet takes Help's place.
             CommandGroup(replacing: .help) {
                 Button("Welcome to Recaptr") {
