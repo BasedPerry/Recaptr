@@ -144,8 +144,8 @@ final class MainViewModel: ObservableObject {
     @Published private(set) var lastTake: Take?
     /// Recent recordings for File > Recent Recordings and the menu bar.
     let recentTakes = RecentTakes()
-    /// The take the after-take card shows. Set by Open Last Take and
-    /// Recent Recordings; the UI clears it on dismiss.
+    /// The take the after-take card shows. Set when a take is saved and by
+    /// Open Last Take and Recent Recordings; cleared on close or record.
     @Published var presentedTake: Take?
 
     /// A plain-language message for the banner when a take ends early or
@@ -1432,6 +1432,7 @@ final class MainViewModel: ObservableObject {
             refreshGlobalHotKeys()
             captureOutline.setRecording(true)
             recordingURL = url
+            presentedTake = nil
             journal = TakeJournal(series: SessionNaming.sanitize(seriesName), episode: episodeName, markerSeconds: [])
             try? journal?.save(for: url)
             recordingBytes = 0
@@ -1547,6 +1548,8 @@ final class MainViewModel: ObservableObject {
         await writeFinalCutMarkers(for: finalURL, markers: markers, eventName: series.isEmpty ? nil : series)
         lastTake = Take(url: finalURL, series: series, markers: markers.map { .init(title: $0.title, seconds: $0.seconds) })
         if let lastTake { recentTakes.add(lastTake.url) }
+        // The after-take card, unless the next take already started.
+        if !isRecording { presentedTake = lastTake }
         TakeJournal.remove(for: url)
     }
 

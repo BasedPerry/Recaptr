@@ -78,6 +78,27 @@ final class RecaptrRecordingSmokeTests: XCTestCase {
                       "Rename didn't happen: \(text(of: status))")
     }
 
+    /// Saving a take brings up the after-take card with its markers;
+    /// Edit Names shows a field per marker, and Esc closes the card.
+    @MainActor
+    func testAfterTakeCardAppears() throws {
+        _ = try record(modeKey: "3", seconds: 5, markers: 2,
+                       extraArgs: ["-RecaptrUITestSeries", "UITest Series"],
+                       waitForFiling: true)
+        let app = XCUIApplication()
+        let card = app.descendants(matching: .any)["afterTakeCard"].firstMatch
+        XCTAssertTrue(card.waitForExistence(timeout: 10), "No after-take card after the take was saved")
+        for id in ["afterTakeOpenFinalCut", "afterTakeShowInFinder", "afterTakeEdit", "afterTakeClose"] {
+            XCTAssertTrue(app.buttons[id].exists, "Missing \(id)")
+        }
+        XCTAssertTrue(app.buttons["afterTakeOpenFinalCut"].isEnabled, "A take with markers should open in Final Cut")
+        app.buttons["afterTakeEdit"].click()
+        XCTAssertTrue(app.textFields["afterTakeMarker1"].waitForExistence(timeout: 3), "No field for the second marker")
+        app.buttons["afterTakeCancel"].click()
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(waitUntil(timeout: 5, { !card.exists }), "Esc didn't close the card")
+    }
+
     /// A take with a series and episode is filed in the series folder.
     @MainActor
     func testSeriesRecordingIsFiled() throws {

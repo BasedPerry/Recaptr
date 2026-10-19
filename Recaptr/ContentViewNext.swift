@@ -96,6 +96,9 @@ struct ContentViewNext: View {
         }
         .background(shortcutCarrier)
         .overlay(alignment: .bottomTrailing) { uiTestProbe }
+        .onChange(of: vm.presentedTake?.url) { _, url in
+            if url != nil { fadeTask?.cancel(); setChrome(shown: true) } else { scheduleFade() }
+        }
         .onChange(of: debugKeepsChrome) { _, keep in
             if keep { fadeTask?.cancel(); setChrome(shown: true) } else { scheduleFade() }
         }
@@ -173,8 +176,23 @@ struct ContentViewNext: View {
 
     /// The bar while the chrome shows. Mid-take, once it hides, the same
     /// glass flows into the recording pill.
-    @ViewBuilder
     private var bottomGlass: some View {
+        VStack(spacing: 12) {
+            if chromeShown, let take = vm.presentedTake {
+                AfterTakeCard(take: take, glassNamespace: glassSpace) {
+                    withAnimation(chromeAnimation) { vm.presentedTake = nil }
+                }
+                .environmentObject(vm)
+                .transition(reduceMotion ? .opacity
+                                         : .move(edge: .bottom).combined(with: .opacity))
+            }
+            barOrPill
+        }
+        .animation(chromeAnimation, value: vm.presentedTake?.url)
+    }
+
+    @ViewBuilder
+    private var barOrPill: some View {
         if chromeShown {
             BottomBar(onScreenshot: handleScreenshot,
                       onToggleRecord: handleToggleRecord,
@@ -268,7 +286,8 @@ struct ContentViewNext: View {
 
     private func scheduleFade() {
         guard vm.selectedMainSource != nil else { return }
-        guard !debugKeepsChrome else { return }
+        // The after-take card keeps the controls up until it's closed.
+        guard !debugKeepsChrome, vm.presentedTake == nil else { return }
         fadeTask?.cancel()
         fadeTask = Task { @MainActor in
             try? await Task.sleep(for: .seconds(fadeDelay))
