@@ -37,7 +37,7 @@ final class RecordingStorage: ObservableObject {
         let defaults = UserDefaults.standard
         return defaults.data(forKey: bookmarkKey) == nil
             && !defaults.bool(forKey: usesDefaultKey)
-            && !defaults.bool(forKey: "RecaptrUITesting")
+            && !TestHooks.isOn
     }
 
     /// Shows a folder picker and saves a bookmark. Runs modally, so
@@ -75,7 +75,7 @@ final class RecordingStorage: ObservableObject {
     /// The chosen folder if it's writable, otherwise the sandbox folder.
     func resolveSaveDirectory() throws -> URL {
         // UI tests always record into the sandbox container.
-        if UserDefaults.standard.bool(forKey: "RecaptrUITesting") {
+        if TestHooks.isOn {
             return try Self.sandboxDefault()
         }
         if let url = securityScopedURL,

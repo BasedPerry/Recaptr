@@ -154,7 +154,7 @@ nonisolated final class AudioInputChannel: @unchecked Sendable {
     }
     /// `-RecaptrUITestNoDriftCorrection YES` measures but doesn't correct.
     static let driftCorrectionDisabledForTesting =
-        UserDefaults.standard.bool(forKey: "RecaptrUITesting")
+        TestHooks.isOn
         && UserDefaults.standard.bool(forKey: "RecaptrUITestNoDriftCorrection")
     #endif
 
@@ -496,7 +496,7 @@ nonisolated final class AudioInputChannel: @unchecked Sendable {
     private func attachMonitorSink(format: AVAudioFormat) {
         // UI tests: `-RecaptrUITestMonitorTapPath YES` forces the tap path.
         let d = UserDefaults.standard
-        if d.bool(forKey: "RecaptrUITesting"), d.bool(forKey: "RecaptrUITestMonitorTapPath") { return }
+        if TestHooks.isOn, d.bool(forKey: "RecaptrUITestMonitorTapPath") { return }
         guard format.commonFormat == .pcmFormatFloat32, !format.isInterleaved,
               format.sampleRate == monitorFormat.sampleRate,
               (1...2).contains(format.channelCount) else {
@@ -1097,7 +1097,7 @@ final class AudioMixer: @unchecked Sendable {
         // UI tests: `-RecaptrUITestStallMixer <seconds>` blocks the
         // emission queue 6 s after start, like a heavily loaded system
         // delaying the mixer's timer.
-        if UserDefaults.standard.bool(forKey: "RecaptrUITesting") {
+        if TestHooks.isOn {
             let stall = UserDefaults.standard.double(forKey: "RecaptrUITestStallMixer")
             if stall > 0 {
                 emissionQueue.asyncAfter(deadline: .now() + 6) {
@@ -1110,7 +1110,7 @@ final class AudioMixer: @unchecked Sendable {
         // UI tests: `-RecaptrUITestSimulateAudioReset notify|silent`
         // stops the device engines 6 s after start, as macOS does on
         // an audio hardware change, with or without the notification.
-        if UserDefaults.standard.bool(forKey: "RecaptrUITesting"),
+        if TestHooks.isOn,
            let mode = UserDefaults.standard.string(forKey: "RecaptrUITestSimulateAudioReset") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 6) { [weak self] in
                 guard let self, self.running else { return }

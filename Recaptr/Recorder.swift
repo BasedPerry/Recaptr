@@ -165,7 +165,7 @@ final class Recorder: @unchecked Sendable {
         writer.movieFragmentInterval = Self.fragmentInterval
         #if DEBUG
         // UI test hook: record without fragments.
-        if UserDefaults.standard.bool(forKey: "RecaptrUITesting"),
+        if TestHooks.isOn,
            UserDefaults.standard.bool(forKey: "RecaptrUITestNoFragments") {
             writer.movieFragmentInterval = .invalid
         }

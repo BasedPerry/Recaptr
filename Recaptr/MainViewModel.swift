@@ -119,7 +119,7 @@ final class MainViewModel: ObservableObject {
     }
 
     /// Test runs share the app's settings, so test hooks don't save naming.
-    static let isUITesting = UserDefaults.standard.bool(forKey: "RecaptrUITesting")
+    static var isUITesting: Bool { TestHooks.isOn }
     /// How markers and blank episodes are named. Nil until the user picks.
     @Published var markerNaming: MarkerNaming? = MarkerNaming.stored() {
         didSet { UserDefaults.standard.set(markerNaming?.rawValue, forKey: MarkerNaming.storageKey) }
@@ -541,7 +541,7 @@ final class MainViewModel: ObservableObject {
                     if let episode = UserDefaults.standard.string(forKey: "RecaptrUITestEpisode") { self.episodeName = episode }
                 }
                 // -RecaptrUITestMicInput <name>: bind the mic to the first input whose name contains <name>.
-                if UserDefaults.standard.bool(forKey: "RecaptrUITesting"),
+                if TestHooks.isOn,
                    let want = UserDefaults.standard.string(forKey: "RecaptrUITestMicInput"),
                    let match = self.availableAudioSources.first(where: {
                        $0.name.localizedCaseInsensitiveContains(want)
@@ -904,7 +904,7 @@ final class MainViewModel: ObservableObject {
         guard selectedMainSource == nil else { return }
         // -RecaptrUITestSource display|window:<name>: start on the first display, or the first window whose title contains <name>.
         let d = UserDefaults.standard
-        if d.bool(forKey: "RecaptrUITesting"), let want = d.string(forKey: "RecaptrUITestSource") {
+        if TestHooks.isOn, let want = d.string(forKey: "RecaptrUITestSource") {
             let pick: VideoSource? = want == "display"
                 ? catalog.videoSources.first { $0.kind == .screenDisplay }
                 : catalog.videoSources.first {
@@ -918,7 +918,7 @@ final class MainViewModel: ObservableObject {
         }
         // Start on the main display when chosen and already allowed. Never
         // prompts for Screen Recording at launch.
-        if startSource == .screen, !d.bool(forKey: "RecaptrUITesting"), CGPreflightScreenCaptureAccess(),
+        if startSource == .screen, !TestHooks.isOn, CGPreflightScreenCaptureAccess(),
            let display = catalog.videoSources.first(where: { $0.kind == .screenDisplay }) {
             selectedMainSource = display
             status = "Source: \(display.name)"
@@ -1173,7 +1173,9 @@ final class MainViewModel: ObservableObject {
             activeDims = dims
             isPreviewing = true
             showOutline(for: src)
+            #if DEBUG
             scheduleUITestAutoRecordIfRequested()
+            #endif
             replayAvailable = screenService?.isReplayBuffering ?? false
 
             // Cameras use the mixer. Screen sources send system audio straight to
@@ -1676,11 +1678,13 @@ final class MainViewModel: ObservableObject {
                                       eventName: String?) async {
         do {
             if let xml = try await FinalCutMarkers.writeIfNeeded(for: url, markers: markers, eventName: eventName) {
+                #if DEBUG
                 // UI tests print the .fcpxml.
-                if UserDefaults.standard.bool(forKey: "RecaptrUITesting"),
+                if TestHooks.isOn,
                    let text = try? String(contentsOf: xml, encoding: .utf8) {
                     print("RecaptrUITest: fcpxml BEGIN\n\(text)RecaptrUITest: fcpxml END")
                 }
+                #endif
                 status += "\nFinal Cut markers → \(xml.lastPathComponent) (double-click to import)"
                 lastFileProbeSummary = (lastFileProbeSummary ?? "") + " · fcpxml=\(xml.lastPathComponent)"
             }
@@ -1768,6 +1772,7 @@ final class MainViewModel: ObservableObject {
         }
     }
 
+    #if DEBUG
     // MARK: - UI test hook: record without keystrokes
 
     /// `-RecaptrUITestAutoRecord <seconds>`: record once, 3 s after preview
@@ -1775,7 +1780,7 @@ final class MainViewModel: ObservableObject {
     private var uiTestAutoRecordDone = false
     private func scheduleUITestAutoRecordIfRequested() {
         let d = UserDefaults.standard
-        guard d.bool(forKey: "RecaptrUITesting"), !uiTestAutoRecordDone else { return }
+        guard TestHooks.isOn, !uiTestAutoRecordDone else { return }
         let seconds = d.double(forKey: "RecaptrUITestAutoRecord")
         guard seconds > 0 else { return }
         uiTestAutoRecordDone = true
@@ -1869,6 +1874,7 @@ final class MainViewModel: ObservableObject {
             NSApp.terminate(nil)
         }
     }
+    #endif
 
     // MARK: - Live audio device changes
 
@@ -2009,8 +2015,11 @@ final class MainViewModel: ObservableObject {
     /// letting the writer fail on a full disk.
     static var stopBelowBytes: Int64 {
         // -RecaptrUITestStopBelowGB <n>: raise the threshold so tests can trigger the stop.
+        #if DEBUG
         let override = UserDefaults.standard.double(forKey: "RecaptrUITestStopBelowGB")
-        return isUITesting && override > 0 ? Int64(override * 1e9) : 1_000_000_000
+        if isUITesting, override > 0 { return Int64(override * 1e9) }
+        #endif
+        return 1_000_000_000
     }
     static let warnBelowBytes: Int64 = 5_000_000_000
     private var lastDiskCheck = Date.distantPast
@@ -2054,8 +2063,11 @@ final class MainViewModel: ObservableObject {
     /// Seconds between free-space checks. `-RecaptrUITestDiskCheckSeconds <n>`
     /// overrides it in tests.
     private static var diskCheckInterval: TimeInterval {
+        #if DEBUG
         let override = UserDefaults.standard.double(forKey: "RecaptrUITestDiskCheckSeconds")
-        return isUITesting && override > 0 ? override : 10
+        if isUITesting, override > 0 { return override }
+        #endif
+        return 10
     }
 
     private func stopStatsTimer() {

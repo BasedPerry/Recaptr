@@ -23,7 +23,7 @@ final class RecentTakes: ObservableObject {
     private let persists: Bool
     private var accessing: Set<URL> = []
 
-    init(defaults: UserDefaults = .standard, persists: Bool = !UserDefaults.standard.bool(forKey: "RecaptrUITesting")) {
+    init(defaults: UserDefaults = .standard, persists: Bool = !TestHooks.isOn) {
         self.defaults = defaults
         self.persists = persists
         if persists { load() }

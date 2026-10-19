@@ -121,7 +121,11 @@ struct ContentViewNext: View {
     #if DEBUG
     private var debugShowsGradient: Bool { glassTest == .noVideo }
     private var debugSkipsContainer: Bool { glassTest == .noContainer }
-    private var debugKeepsChrome: Bool { debugKeepChromeOn || glassTest != .standard }
+    /// Also `-RecaptrKeepChromeVisible YES`, for UI tests and screenshots.
+    private var debugKeepsChrome: Bool {
+        debugKeepChromeOn || glassTest != .standard
+            || UserDefaults.standard.bool(forKey: "RecaptrKeepChromeVisible")
+    }
     #else
     private let debugShowsGradient = false
     private let debugSkipsContainer = false
@@ -264,8 +268,7 @@ struct ContentViewNext: View {
 
     private func scheduleFade() {
         guard vm.selectedMainSource != nil else { return }
-        // `-RecaptrKeepChromeVisible YES` disables the fade for UI tests and screenshots.
-        guard !UserDefaults.standard.bool(forKey: "RecaptrKeepChromeVisible"), !debugKeepsChrome else { return }
+        guard !debugKeepsChrome else { return }
         fadeTask?.cancel()
         fadeTask = Task { @MainActor in
             try? await Task.sleep(for: .seconds(fadeDelay))
@@ -412,7 +415,7 @@ struct ContentViewNext: View {
         Task { @MainActor in
             // `-RecaptrUITestHoldMarkerFlash YES` holds the glow 4 s for screenshots.
             let d = UserDefaults.standard
-            if d.bool(forKey: "RecaptrUITesting"), d.bool(forKey: "RecaptrUITestHoldMarkerFlash") {
+            if TestHooks.isOn, d.bool(forKey: "RecaptrUITestHoldMarkerFlash") {
                 markerFlashOpacity = 1
                 try? await Task.sleep(for: .seconds(4))
                 markerFlashOpacity = 0
@@ -455,7 +458,7 @@ struct ContentViewNext: View {
     /// status line to accessibility for UI tests. Absent otherwise.
     @ViewBuilder
     private var uiTestProbe: some View {
-        if UserDefaults.standard.bool(forKey: "RecaptrUITesting") {
+        if TestHooks.isOn {
             VStack(spacing: 0) {
                 Text(vm.lastFileProbeSummary ?? "")
                     .accessibilityIdentifier("lastProbe")
@@ -543,7 +546,7 @@ struct RecaptrRootView: View {
         }
         .navigationSplitViewStyle(.prominentDetail)
         .sheet(isPresented: Binding(
-            get: { !welcomeSeen && !UserDefaults.standard.bool(forKey: "RecaptrUITesting") },
+            get: { !welcomeSeen && !TestHooks.isOn },
             set: { if !$0 { welcomeSeen = true } }
         )) {
             WelcomeSheet()
@@ -552,7 +555,7 @@ struct RecaptrRootView: View {
         .onAppear {
             // UI tests start with the sidebar closed. Not a launch
             // argument: that would pin the value and break toggling.
-            if UserDefaults.standard.bool(forKey: "RecaptrUITesting") {
+            if TestHooks.isOn {
                 sidebarVisible = false
             }
         }

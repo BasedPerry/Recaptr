@@ -266,7 +266,7 @@ final class ScreenCaptureService: NSObject, @unchecked Sendable, SCStreamOutput,
     private let ignoreFramesUntil: Date? = {
         let d = UserDefaults.standard
         let seconds = d.double(forKey: "RecaptrUITestIgnoreFramesFor")
-        return d.bool(forKey: "RecaptrUITesting") && seconds > 0 ? Date().addingTimeInterval(seconds) : nil
+        return TestHooks.isOn && seconds > 0 ? Date().addingTimeInterval(seconds) : nil
     }()
     #endif
     private var gridNext: CMTime = .invalid

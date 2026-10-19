@@ -9,6 +9,7 @@
 //
 
 #if DEBUG
+#if DEBUG
 import AVFoundation
 import Accelerate
 
@@ -161,4 +162,5 @@ enum MonitorLagProbe {
         return (bestLag, best / max(1e-12, (eg * em).squareRoot()))
     }
 }
+#endif
 #endif
