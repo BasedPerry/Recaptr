@@ -40,6 +40,7 @@ struct RecaptrApp: App {
             #if DEBUG
             CommandMenu("Debug") {
                 Button("Size Window for Store Screenshots") { StoreScreenshot.sizeWindow() }
+                Button("Size Window for Video (1920×1080)") { StoreScreenshot.sizeWindowForVideo() }
                 Button("Capture Store Screenshot") {
                     Task {
                         do {

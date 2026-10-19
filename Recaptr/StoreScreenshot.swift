@@ -3,7 +3,8 @@
 //  Recaptr
 //
 //  Debug-only App Store screenshots: the main window at 1440×900 points,
-//  captured at 2880×1800 pixels.
+//  captured at 2880×1800 pixels. Also sizes the window to 1920×1080 points
+//  for video, which records at 3840×2160 on a Retina display.
 //
 
 #if DEBUG
@@ -25,6 +26,15 @@ enum StoreScreenshot {
     static func sizeWindow() {
         guard let window = mainWindow else { return }
         window.setContentSize(size)
+        window.center()
+    }
+
+    /// 16:9 for app preview and social video.
+    static let videoSize = CGSize(width: 1920, height: 1080)
+
+    static func sizeWindowForVideo() {
+        guard let window = mainWindow else { return }
+        window.setContentSize(videoSize)
         window.center()
     }
 
