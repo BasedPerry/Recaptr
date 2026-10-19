@@ -205,6 +205,13 @@ struct SessionNamingTests {
         #expect(SessionNaming.nextEpisodeNumber(existing: [], series: "Fire Emblem") == 1)
     }
 
+    @Test func seriesCapitalizationDoesntMatter() {
+        let files = ["PS5 stuff – Ep 4.mov", "PS5 Stuff – Ep 2 – Transformation Complete.mov"]
+        #expect(SessionNaming.nextEpisodeNumber(existing: files, series: "PS5 Stuff") == 5)
+        #expect(SessionNaming.existingSpelling(of: "PS5 Stuff", folders: ["Dual-PC", "PS5 stuff"]) == "PS5 stuff")
+        #expect(SessionNaming.existingSpelling(of: "New Game", folders: ["PS5 stuff"]) == "New Game")
+    }
+
     @Test func typedEpisodeWinsOverGenerated() {
         #expect(SessionNaming.episode(typed: "Chapter 5", number: 4, generatedTitle: "Fortuna Falls") == "Chapter 5")
         #expect(SessionNaming.episode(typed: " ", number: 4, generatedTitle: "Fortuna Falls") == "Ep 4 – Fortuna Falls")

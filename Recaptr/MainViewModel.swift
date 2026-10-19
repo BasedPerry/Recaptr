@@ -59,7 +59,13 @@ final class MainViewModel: ObservableObject {
 
     // Channel 2: commentary mic. Never auto-selected and never monitored
     // (hearing your own voice with latency is distracting).
-    @Published var ch2DeviceID: String?
+    // Remembered between launches; picking None turns it off for next time too.
+    @Published var ch2DeviceID: String? {
+        didSet {
+            guard !Self.isUITesting, !keepsSavedMic else { return }
+            UserDefaults.standard.set(ch2DeviceID, forKey: Self.savedMicKey)
+        }
+    }
     @Published var ch2Gain: Double = 1.0
     @Published var ch2Enabled: Bool = true
 
@@ -508,6 +514,7 @@ final class MainViewModel: ObservableObject {
             }
             await MainActor.run {
                 self.autoSelectStartupSource()
+                self.restoreSavedMic()
                 // -RecaptrUITestSeries / -RecaptrUITestEpisode <name>: preset the naming fields (not saved).
                 if Self.isUITesting {
                     if let series = UserDefaults.standard.string(forKey: "RecaptrUITestSeries") { self.seriesName = series }
@@ -947,11 +954,26 @@ final class MainViewModel: ObservableObject {
            !availableAudioSources.contains(where: { $0.id == currentCh1 }) {
             ch1DeviceID = availableAudioSources.first?.id
         }
-        // The mic is never substituted: if it's gone, it's off.
+        // The mic is never substituted: if it's gone, it's off. It stays
+        // saved so it comes back when plugged in again.
         if let currentCh2 = ch2DeviceID,
            !availableAudioSources.contains(where: { $0.id == currentCh2 }) {
+            keepsSavedMic = true
             ch2DeviceID = nil
+            keepsSavedMic = false
         }
+    }
+
+    static let savedMicKey = "RecaptrMicDeviceID"
+    /// Set while clearing an unplugged mic, so its choice stays saved.
+    private var keepsSavedMic = false
+
+    /// Turns the saved mic back on when it's connected and none is chosen.
+    private func restoreSavedMic() {
+        guard !Self.isUITesting, ch2DeviceID == nil,
+              let saved = UserDefaults.standard.string(forKey: Self.savedMicKey),
+              availableAudioSources.contains(where: { $0.id == saved }) else { return }
+        ch2DeviceID = saved
     }
 
     /// Refreshes the catalog when a device is plugged in. Switches to it
@@ -961,6 +983,7 @@ final class MainViewModel: ObservableObject {
         guard let device = note.object as? AVCaptureDevice else { return }
 
         await catalog.refresh()
+        restoreSavedMic()
 
         // Catalog ids are "camera:<uniqueID>". If the refresh hasn't seen the
         // device yet, a later refresh will.
@@ -1463,7 +1486,8 @@ final class MainViewModel: ObservableObject {
     /// the file into its series folder as "Series – Episode", and write
     /// the Final Cut file with the marker names and the series as its
     /// event.
-    private func finalizeRecording(_ url: URL, markerSeconds: [Double], series: String, typedEpisode: String) async {
+    private func finalizeRecording(_ url: URL, markerSeconds: [Double], series typedSeries: String, typedEpisode: String) async {
+        let series = typedSeries.isEmpty ? typedSeries : Self.existingSeriesSpelling(typedSeries, in: url.deletingLastPathComponent())
         let useAI = MarkerNaming.usesAI(markerNaming, available: MarkerNamer.isAvailable)
         var labels: [String?] = markerSeconds.map { _ in nil }
         if useAI, !markerSeconds.isEmpty {
@@ -1502,6 +1526,14 @@ final class MainViewModel: ObservableObject {
         lastTake = Take(url: finalURL, series: series, markers: markers.map { .init(title: $0.title, seconds: $0.seconds) })
         if let lastTake { recentTakes.add(lastTake.url) }
         TakeJournal.remove(for: url)
+    }
+
+    private static func existingSeriesSpelling(_ series: String, in root: URL) -> String {
+        let folders = (try? FileManager.default.contentsOfDirectory(
+            at: root, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]))?
+            .filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
+            .map(\.lastPathComponent) ?? []
+        return SessionNaming.existingSpelling(of: series, folders: folders)
     }
 
     private func journalMarker(_ seconds: Double, take: URL?) {

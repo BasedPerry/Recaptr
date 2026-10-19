@@ -31,13 +31,22 @@ nonisolated enum SessionNaming {
     }
 
     /// One more than the highest "Ep N" already in the series folder.
+    /// Capitalization of the series doesn't matter.
     static func nextEpisodeNumber(existing fileNames: [String], series: String) -> Int {
         let prefix = sanitize(series) + separator + "Ep "
         let numbers = fileNames.compactMap { name -> Int? in
-            guard name.hasPrefix(prefix) else { return nil }
-            return Int(name.dropFirst(prefix.count).prefix { $0.isNumber })
+            guard let match = name.range(of: prefix, options: [.anchored, .caseInsensitive]) else { return nil }
+            return Int(name[match.upperBound...].prefix { $0.isNumber })
         }
         return (numbers.max() ?? 0) + 1
+    }
+
+    /// The existing series folder's spelling when `series` matches it
+    /// ignoring case, so "PS5 Stuff" files into "PS5 stuff". Otherwise
+    /// `series` as typed.
+    static func existingSpelling(of series: String, folders: [String]) -> String {
+        let clean = sanitize(series)
+        return folders.first { $0.caseInsensitiveCompare(clean) == .orderedSame } ?? clean
     }
 
     /// The typed episode, or "Ep N" plus a generated title when there is one.
