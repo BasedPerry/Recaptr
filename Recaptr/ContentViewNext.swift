@@ -96,6 +96,9 @@ struct ContentViewNext: View {
         }
         .background(shortcutCarrier)
         .overlay(alignment: .bottomTrailing) { uiTestProbe }
+        .onChange(of: vm.requestedMode) { _, request in
+            if let request { activeMode = request.mode }
+        }
         .onChange(of: vm.presentedTake?.url) { _, url in
             if url != nil { fadeTask?.cancel(); setChrome(shown: true) } else { scheduleFade() }
         }

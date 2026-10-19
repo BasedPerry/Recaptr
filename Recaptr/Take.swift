@@ -65,19 +65,27 @@ struct Take: Equatable {
     }
 
     /// Applies a rename on disk: moves the `.mov` to the new name (never
-    /// over another file) and rewrites the sidecar. Returns the take as saved.
+    /// over another file) and writes its sidecar. The old sidecar goes only
+    /// once the new one is written; if that fails, the `.mov` moves back so
+    /// it still matches its old sidecar. Returns the take as saved.
     static func apply(from old: Take, to new: Take) async throws -> Take {
         var saved = new
-        if new.url != old.url {
+        let moves = new.url != old.url
+        if moves {
             let folder = old.url.deletingLastPathComponent()
             saved.url = SessionNaming.uniqueURL(in: folder, base: new.url.deletingPathExtension().lastPathComponent, ext: "mov")
             try FileManager.default.moveItem(at: old.url, to: saved.url)
-            // The old sidecar points at the old name; it's rewritten below.
-            try? FileManager.default.removeItem(at: old.sidecarURL)
         }
-        try await FinalCutMarkers.writeIfNeeded(for: saved.url,
-                                                markers: saved.markers.map { ($0.title, $0.seconds) },
-                                                eventName: saved.series.isEmpty ? nil : saved.series)
+        do {
+            try await FinalCutMarkers.writeIfNeeded(for: saved.url,
+                                                    markers: saved.markers.map { ($0.title, $0.seconds) },
+                                                    eventName: saved.series.isEmpty ? nil : saved.series)
+        } catch {
+            if moves { try? FileManager.default.moveItem(at: saved.url, to: old.url) }
+            throw error
+        }
+        // The old sidecar points at the old name.
+        if moves { try? FileManager.default.removeItem(at: old.sidecarURL) }
         return saved
     }
 }

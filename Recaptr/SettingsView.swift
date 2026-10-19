@@ -205,7 +205,7 @@ extension RecordingSettingsTab {
         var text = mode.detail
         if mode == .appleIntelligence { text += " Nothing is uploaded." }
         if let reason = MarkerNamer.unavailableReason { text += " Apple Intelligence: \(reason)" }
-        return text + " The sound plays only in your headphones or speakers, never in the recording."
+        return text + " The marker sound is left out of screen and system audio, but a mic can pick it up from speakers; use headphones if that matters."
     }
 
     /// Bitrate and size per hour at the current capture size.
@@ -344,7 +344,7 @@ private struct ShortcutsSettingsTab: View {
             } header: {
                 Text("Links and Shortcuts")
             } footer: {
-                Text("Lets Shortcuts, Stream Deck, mouse software and scripts run the actions above with links like recaptr://record/toggle and recaptr://marker. Links can only run these actions; they can't change settings or touch files.")
+                Text("Off by default. When on, Stream Deck, mouse software, scripts and web links can run the actions above with links like recaptr://record/toggle and recaptr://marker, including starting a recording. Links can only run these actions; they can't change settings or touch files. The Shortcuts app works either way.")
             }
         }
         .formStyle(.grouped)
@@ -396,6 +396,9 @@ private struct ShortcutRecorder: View {
     private func start() {
         problem = nil
         isRecording = true
+        // Global keys would grab a combo that's already set (⌃⌥⌘R would
+        // start recording) before this field sees it.
+        vm.globalHotKeys.unregisterAll()
         monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
             switch Int(event.keyCode) {
             case 53: // Esc
@@ -413,8 +416,10 @@ private struct ShortcutRecorder: View {
     }
 
     private func stop() {
+        let wasListening = monitor != nil
         isRecording = false
         if let monitor { NSEvent.removeMonitor(monitor) }
         monitor = nil
+        if wasListening { vm.refreshGlobalHotKeys() }
     }
 }

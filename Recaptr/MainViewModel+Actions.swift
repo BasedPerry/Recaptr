@@ -60,9 +60,10 @@ extension MainViewModel {
     func selectSource(_ mode: SourceMode) {
         guard !isRecording else { return }
         if mode != .camera { screenModeSelected() }
-        if let first = catalog.videoSources.first(where: { $0.kind == mode.sourceKind }) {
-            selectedMainSource = first
-        }
+        // The switcher moves even when the mode has nothing to pick yet, so
+        // it shows "No … available" instead of seeming to ignore the key.
+        requestedMode = ModeRequest(mode: mode, serial: (requestedMode?.serial ?? 0) + 1)
+        selectedMainSource = catalog.videoSources.first(where: { $0.kind == mode.sourceKind })
     }
 
     func toggleWindow() {

@@ -5,6 +5,7 @@
 
 import Testing
 import Foundation
+import ScreenCaptureKit
 @testable import Recaptr
 
 struct FinalCutReadBackTests {
@@ -106,6 +107,41 @@ struct TakeTests {
         #expect(saved.url.lastPathComponent == "B (2).mov")
         #expect(try Data(contentsOf: b) == Data("b".utf8))
         #expect(!FileManager.default.fileExists(atPath: a.path))
+    }
+
+    /// When the new Final Cut file can't be written, the take moves back
+    /// and keeps its old one, so no marker names are lost.
+    @Test func failedSidecarPutsTheTakeBack() async throws {
+        let dir = try folder()
+        let a = dir.appendingPathComponent("FE – Ep 1.mov")
+        // Not a movie, so writing its .fcpxml fails.
+        try Data("not a movie".utf8).write(to: a)
+        try writeSidecar(for: a, event: "FE", markers: [("Boss", 12)])
+        let take = Take(url: a, series: "FE", markers: [.init(title: "Boss", seconds: 12)])
+        let wanted = try #require(take.renamed(episode: "Ep 1 – Finale", markerTitles: ["Boss"]))
+        await #expect(throws: (any Error).self) { _ = try await Take.apply(from: take, to: wanted) }
+        #expect(FileManager.default.fileExists(atPath: a.path))
+        #expect(FileManager.default.fileExists(atPath: take.sidecarURL.path))
+        #expect(!FileManager.default.fileExists(atPath: wanted.url.path))
+    }
+}
+
+struct ScreenRestartTests {
+
+    private func scError(_ code: SCStreamError.Code) -> NSError {
+        NSError(domain: SCStreamErrorDomain, code: code.rawValue)
+    }
+
+    @Test func userStopsAndPermissionLossNeverRestart() {
+        #expect(!MainViewModel.shouldRestartScreen(after: scError(.userStopped), permitted: true))
+        #expect(!MainViewModel.shouldRestartScreen(after: scError(.userDeclined), permitted: true))
+        #expect(!MainViewModel.shouldRestartScreen(after: scError(.failedApplicationConnectionInterrupted), permitted: false))
+    }
+
+    @Test func realFailuresRestart() {
+        #expect(MainViewModel.shouldRestartScreen(after: scError(.failedApplicationConnectionInterrupted), permitted: true))
+        #expect(MainViewModel.shouldRestartScreen(after: scError(.systemStoppedStream), permitted: true))
+        #expect(MainViewModel.shouldRestartScreen(after: nil, permitted: true))
     }
 }
 

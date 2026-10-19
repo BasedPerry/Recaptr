@@ -144,6 +144,11 @@ final class MainViewModel: ObservableObject {
     @Published private(set) var lastTake: Take?
     /// Recent recordings for File > Recent Recordings and the menu bar.
     let recentTakes = RecentTakes()
+    /// The mode a menu item, key or link asked for, so the window's
+    /// switcher follows even when that mode has no sources.
+    struct ModeRequest: Equatable { let mode: SourceMode; let serial: Int }
+    @Published var requestedMode: ModeRequest?
+
     /// The take the after-take card shows. Set when a take is saved and by
     /// Open Last Take and Recent Recordings; cleared on close or record.
     @Published var presentedTake: Take?
@@ -152,10 +157,11 @@ final class MainViewModel: ObservableObject {
     /// can't start. The UI clears it on dismiss.
     @Published var notice: Notice?
 
-    /// Other apps may run actions through recaptr:// URLs. Shortcuts
-    /// always work: the user set those up in Shortcuts.
+    /// Other apps may run actions through recaptr:// URLs. Off until the
+    /// user turns it on: a link could otherwise start a recording.
+    /// Shortcuts always work; the user set those up in Shortcuts.
     @Published var allowsExternalControl: Bool =
-        MainViewModel.bool("RecaptrAllowsExternalControl", default: true) {
+        MainViewModel.bool("RecaptrAllowsExternalControl", default: false) {
         didSet { UserDefaults.standard.set(allowsExternalControl, forKey: "RecaptrAllowsExternalControl") }
     }
 
@@ -322,10 +328,10 @@ final class MainViewModel: ObservableObject {
     /// frame from the previous source can't be saved.
     let frameCache = PreviewFrameCache()
 
-    /// A quiet sound when a marker lands. Played by Recaptr itself, which
-    /// screen capture excludes, so it's never in the recording.
+    /// A quiet sound when a marker lands. Off by default: screen capture
+    /// leaves Recaptr's own audio out, but a mic can hear it from speakers.
     @Published var markerSoundEnabled: Bool =
-        MainViewModel.bool("RecaptrMarkerSound", default: true) {
+        MainViewModel.bool("RecaptrMarkerSound", default: false) {
         didSet { UserDefaults.standard.set(markerSoundEnabled, forKey: "RecaptrMarkerSound") }
     }
     /// Bumped on every marker, so the UI can flash the menu bar item.
@@ -511,7 +517,8 @@ final class MainViewModel: ObservableObject {
         }
 
         if !Self.isUITesting {
-            Task { await self.finishLeftoverTakes() }
+            // Queued like any after-take work, so quitting waits for it.
+            queueFinalize { await self.finishLeftoverTakes() }
         }
 
         // Load the catalog before picking a startup source.
@@ -1284,8 +1291,14 @@ final class MainViewModel: ObservableObject {
                 let reason = error?.localizedDescription ?? "unknown reason"
                 // The stream can also fail during startPreview, before it's the
                 // current service; that takes the stop path below, as before.
+                // Never restart what the user stopped or a revoked permission.
                 if self.isRecording, let svc, self.screenService === svc,
-                   await self.restartScreenCapture(svc, after: reason) { return }
+                   Self.shouldRestartScreen(after: error, permitted: CGPreflightScreenCaptureAccess()) {
+                    switch await self.restartScreenCapture(svc, after: reason) {
+                    case .restarted, .alreadyRestarting, .abandoned: return
+                    case .failed: break
+                    }
+                }
                 self.status = "Screen capture stopped: \(reason)"
                 self.show(.screenStopped(wasRecording: self.isRecording))
                 self.stopPreview()
@@ -1294,21 +1307,44 @@ final class MainViewModel: ObservableObject {
         return svc
     }
 
+    enum ScreenRestart {
+        case restarted
+        /// This stream is already being restarted; the report is a repeat.
+        case alreadyRestarting
+        /// The user switched source while waiting: the failure no longer
+        /// concerns what's on screen, so it must not stop anything.
+        case abandoned
+        case failed
+    }
+
+    /// False for stops that weren't failures: the user pressed Stop in the
+    /// system's screen-sharing control, or Screen Recording was turned off.
+    nonisolated static func shouldRestartScreen(after error: Error?, permitted: Bool) -> Bool {
+        guard permitted else { return false }
+        guard let error = error as NSError?, error.domain == SCStreamErrorDomain else { return true }
+        switch SCStreamError.Code(rawValue: error.code) {
+        case .userStopped, .userDeclined, .missingEntitlements: return false
+        default: return true
+        }
+    }
+
     /// Restarts a screen stream that died mid-take: once right away, then
     /// with backoff, up to `screenRestartLimit` times per take. Each restart
-    /// is noted in Diagnostics. False when it couldn't be restarted.
-    private func restartScreenCapture(_ svc: ScreenCaptureService, after reason: String) async -> Bool {
-        // A second failure report during a restart is the same failure.
-        guard !restartingScreen else { return true }
-        restartingScreen = true
-        defer { restartingScreen = false }
+    /// is noted in Diagnostics.
+    private func restartScreenCapture(_ svc: ScreenCaptureService, after reason: String) async -> ScreenRestart {
+        // A second failure report from the same stream is the same failure.
+        guard restartingScreen !== svc else { return .alreadyRestarting }
+        restartingScreen = svc
+        defer { if restartingScreen === svc { restartingScreen = nil } }
         let delays: [Duration] = [.zero, .milliseconds(500), .seconds(1), .seconds(2)]
         while screenRestarts < Self.screenRestartLimit {
             let attempt = screenRestarts
             screenRestarts += 1
             try? await Task.sleep(for: delays[min(attempt, delays.count - 1)])
-            // Stopped or switched source while waiting.
-            guard isRecording, screenService === svc, let src = selectedMainSource else { return false }
+            // Switched source while waiting: leave the new one alone.
+            guard screenService === svc else { return .abandoned }
+            // Stopped recording while waiting: the stream is still dead, so stop the preview.
+            guard isRecording, let src = selectedMainSource else { return .failed }
             do {
                 guard let target = try await screenFilter(for: src) else { break }
                 try await svc.restart(filter: target.filter)
@@ -1317,13 +1353,13 @@ final class MainViewModel: ObservableObject {
                 captureEvents.append(note)
                 print("Recaptr: \(note)")
                 status = note
-                return true
+                return .restarted
             } catch {
                 print("Recaptr: screen restart \(attempt + 1) failed: \(error.localizedDescription)")
             }
         }
         captureEvents.append("Screen capture stopped and couldn't restart (\(reason))")
-        return false
+        return .failed
     }
 
     func stopPreview() {
@@ -1469,9 +1505,13 @@ final class MainViewModel: ObservableObject {
             recordingActivity = nil
         }
         recordingStartedAt = nil
+        // A failed writer returns no URL; the partial file and its journal
+        // are still on disk and get finished below.
+        let takeURL = recordingURL
+        let takeJournal = journal
         recordingURL = nil
         journal = nil
-        lastRecordedFile = url
+        lastRecordedFile = url ?? takeURL
 
         // Snapshot after stop() so the summary has the final numbers.
         liveStats = recorder.stats()
@@ -1498,10 +1538,33 @@ final class MainViewModel: ObservableObject {
             let series = SessionNaming.sanitize(seriesName)
             let episode = episodeName
             episodeName = ""
-            finalizeTask = Task {
+            queueFinalize {
                 await self.probeRecordedFile(url)
                 await self.finalizeRecording(url, markerSeconds: markerSeconds, series: series, typedEpisode: episode)
             }
+        } else if let takeURL, let takeJournal {
+            // The writer failed mid-take. What was written is readable (the
+            // movie is fragmented), so finish it now from the journal rather
+            // than leave it for the next launch to mistake for a crash.
+            episodeName = ""
+            if FileManager.default.fileExists(atPath: takeURL.path) {
+                queueFinalize {
+                    await self.finalizeRecording(takeURL, markerSeconds: takeJournal.markerSeconds,
+                                                 series: takeJournal.series, typedEpisode: takeJournal.episode)
+                }
+            } else {
+                TakeJournal.remove(for: takeURL)
+            }
+        }
+    }
+
+    /// Runs after-take work after whatever is already queued, so takes are
+    /// filed one at a time and quitting waits for all of it.
+    private func queueFinalize(_ work: @escaping @MainActor () async -> Void) {
+        let previous = finalizeTask
+        finalizeTask = Task {
+            await previous?.value
+            await work()
         }
     }
 
@@ -1626,6 +1689,8 @@ final class MainViewModel: ObservableObject {
             lastTake = saved
             lastRecordedFile = saved.url
         }
+        // The after-take card follows a rename made anywhere, e.g. Settings.
+        if presentedTake?.url == take.url { presentedTake = saved }
         recentTakes.replace(take.url, with: saved.url)
         status = "Renamed to \(saved.url.lastPathComponent)"
         return saved
@@ -2033,7 +2098,8 @@ final class MainViewModel: ObservableObject {
     /// Things that happened to the capture mid-take (restarts), for Diagnostics.
     private var captureEvents: [String] = []
     private var screenRestarts = 0
-    private var restartingScreen = false
+    /// The stream being restarted, so reports from it aren't handled twice.
+    private weak var restartingScreen: ScreenCaptureService?
     static let screenRestartLimit = 4
 
     /// Runs once a second while recording; disk is checked every 10 s.
