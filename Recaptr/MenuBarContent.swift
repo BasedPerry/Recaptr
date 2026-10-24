@@ -5,36 +5,46 @@
 
 import SwiftUI
 
-/// Menu for the menu bar recording indicator, shown only while recording.
+/// Menu for the menu bar item: recording controls mid-take, otherwise
+/// Start Recording, Recent Recordings and Show Recaptr.
 struct MenuBarContent: View {
     @EnvironmentObject var vm: MainViewModel
 
+    /// Settings → Recording → "Show in menu bar always".
+    static let alwaysKey = "RecaptrMenuBarAlways"
+
     var body: some View {
-        MenuElapsed(clock: vm.clock)
-            .font(.system(size: 13, weight: .medium))
+        if vm.isRecording {
+            MenuElapsed(clock: vm.clock)
+                .font(.system(size: 13, weight: .medium))
 
-        Divider()
+            Divider()
 
-        Button("Drop Marker (⌘B" + (vm.hotKeyLabel(for: .dropMarker).map { ", or \($0) from any app" } ?? "") + ")") {
-            vm.dropMarker()
-        }
+            Button(RecordingControlsPill.shortcutHelp("Drop Marker", key: "⌘B",
+                                                      global: vm.hotKeyLabel(for: .dropMarker))) {
+                vm.dropMarker()
+            }
 
-        Button("Show Recaptr") {
-            bringRecaptrForward()
-        }
+            Button("Show Recaptr") { vm.bringForward() }
 
-        Divider()
+            Divider()
 
-        Button("Stop Recording (⌘R)") {
-            Task { await vm.stopRecording() }
-        }
-    }
+            Button(RecordingControlsPill.shortcutHelp("Stop Recording", key: "⌘R",
+                                                      global: vm.hotKeyLabel(for: .toggleRecording))) {
+                Task { await vm.stopRecording() }
+            }
+        } else {
+            Button(RecordingControlsPill.shortcutHelp("Start Recording", key: "⌘R",
+                                                      global: vm.hotKeyLabel(for: .toggleRecording))) {
+                vm.perform(.toggleRecording)
+            }
+            .disabled(vm.selectedMainSource == nil)
 
-    private func bringRecaptrForward() {
-        NSApp.activate(ignoringOtherApps: true)
-        for window in NSApp.windows where window.canBecomeKey {
-            window.makeKeyAndOrderFront(nil)
-            break
+            RecentRecordingsMenu(vm: vm, recent: vm.recentTakes)
+
+            Divider()
+
+            Button("Show Recaptr") { vm.bringForward() }
         }
     }
 }
@@ -49,17 +59,25 @@ private struct MenuElapsed: View {
     }
 }
 
-/// Red dot and elapsed time. Observes only the clock so the app's
-/// scenes don't rebuild every second.
+/// Red dot and elapsed time while recording, a plain record icon
+/// otherwise. Observes only the clock so the app's scenes don't rebuild
+/// every second. Nothing blinks.
 struct MenuBarLabel: View {
     @ObservedObject var clock: RecordingClock
+    let isRecording: Bool
 
     var body: some View {
-        HStack(spacing: 4) {
-            Image(systemName: "circle.fill")
-                .foregroundStyle(.red)
-            Text(clock.formattedElapsed)
-                .font(.system(size: 12, weight: .medium, design: .monospaced))
+        if isRecording {
+            HStack(spacing: 4) {
+                Image(systemName: "circle.fill")
+                    .foregroundStyle(.red)
+                Text(clock.formattedElapsed)
+                    .font(.system(size: 12, weight: .medium, design: .monospaced))
+            }
+            .accessibilityLabel("Recaptr, recording, \(clock.formattedElapsed)")
+        } else {
+            Image(systemName: "record.circle")
+                .accessibilityLabel("Recaptr")
         }
     }
 }

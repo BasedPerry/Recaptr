@@ -84,6 +84,14 @@ extension MainViewModel {
         bringForward()
     }
 
+    /// Any recent take in the after-take card, read back from its .fcpxml.
+    func openTake(_ url: URL) {
+        recentTakes.prune()
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        presentedTake = lastTake?.url == url ? lastTake : Take.load(url)
+        bringForward()
+    }
+
     func bringForward() {
         NSApp.unhide(nil)
         NSApp.activate()

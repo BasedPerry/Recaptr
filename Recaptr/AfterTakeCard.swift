@@ -23,6 +23,7 @@ struct AfterTakeCard: View {
     @State private var thumbnails: [Int: CGImage] = [:]
 
     @State private var isEditing = false
+    @State private var series = ""
     @State private var episode = ""
     @State private var titles: [String] = []
     @State private var error: String?
@@ -73,12 +74,22 @@ struct AfterTakeCard: View {
         HStack(alignment: .firstTextBaseline, spacing: 12) {
             VStack(alignment: .leading, spacing: 4) {
                 if isEditing {
-                    TextField(take.series.isEmpty ? "Name" : "Episode", text: $episode)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.headline)
-                        .frame(maxWidth: 420)
-                        .onSubmit(save)
-                        .accessibilityIdentifier("afterTakeEpisodeField")
+                    HStack(spacing: 8) {
+                        // A new series moves the take into that series' folder.
+                        TextField("Series", text: $series, prompt: Text("No series"))
+                            .textFieldStyle(.roundedBorder)
+                            .font(.headline)
+                            .frame(width: 180)
+                            .onSubmit(save)
+                            .help("Changing the series moves the take and its Final Cut file into that series' folder")
+                            .accessibilityIdentifier("afterTakeSeriesField")
+                        TextField(series.isEmpty ? "Name" : "Episode", text: $episode)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.headline)
+                            .frame(maxWidth: 420)
+                            .onSubmit(save)
+                            .accessibilityIdentifier("afterTakeEpisodeField")
+                    }
                 } else {
                     Text(take.url.deletingPathExtension().lastPathComponent)
                         .font(.headline)
@@ -243,6 +254,7 @@ struct AfterTakeCard: View {
     }
 
     private func resetFields() {
+        series = take.series
         episode = take.episode
         titles = take.markers.map(\.title)
     }
@@ -251,7 +263,7 @@ struct AfterTakeCard: View {
         guard isEditing else { return }
         Task {
             do {
-                let saved = try await vm.renameTake(take, episode: episode, markerTitles: titles)
+                let saved = try await vm.renameTake(take, series: series, episode: episode, markerTitles: titles)
                 vm.presentedTake = saved
                 isEditing = false
                 error = nil

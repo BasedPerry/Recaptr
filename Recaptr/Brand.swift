@@ -122,6 +122,8 @@ enum Spacing {
     static let md:   CGFloat = 16
     static let lg:   CGFloat = 24
     static let xl:   CGFloat = 32
+    /// Height of everything in the top row: the round buttons and the switcher.
+    static let topRow: CGFloat = 44
 }
 
 // MARK: - Corner radii

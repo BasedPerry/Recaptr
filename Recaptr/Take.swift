@@ -42,9 +42,19 @@ struct Take: Equatable {
         return Take(url: movURL, series: inSeries ? SessionNaming.sanitize(event) : "", markers: contents.markers)
     }
 
-    /// The take with a new episode name and marker titles. Blank titles
-    /// keep the old one. Doesn't touch the disk.
-    func renamed(episode: String, markerTitles: [String]) -> Take? {
+    /// The save folder the take was filed in: its folder, or the one
+    /// above when it sits in its series folder.
+    var saveRoot: URL {
+        let folder = url.deletingLastPathComponent()
+        let inSeriesFolder = !series.isEmpty
+            && folder.lastPathComponent.caseInsensitiveCompare(series) == .orderedSame
+        return inSeriesFolder ? folder.deletingLastPathComponent() : folder
+    }
+
+    /// The take with a new episode name, marker titles and, when `series`
+    /// is given, a new series (and so a new folder). Blank titles keep the
+    /// old one. Doesn't touch the disk.
+    func renamed(series newSeries: String? = nil, episode: String, markerTitles: [String]) -> Take? {
         let cleanEpisode = SessionNaming.sanitize(episode)
         guard !cleanEpisode.isEmpty else { return nil }
         var take = self
@@ -52,14 +62,19 @@ struct Take: Equatable {
             let title = markerTitles[index].trimmingCharacters(in: .whitespacesAndNewlines)
             if !title.isEmpty { take.markers[index].title = title }
         }
-        let base = series.isEmpty ? cleanEpisode : SessionNaming.baseName(series: series, episode: cleanEpisode)
+        let cleanSeries = newSeries.map(SessionNaming.sanitize) ?? series
+        let folder = cleanSeries == series
+            ? url.deletingLastPathComponent()
+            : cleanSeries.isEmpty ? saveRoot : SessionNaming.seriesFolder(root: saveRoot, series: cleanSeries)
+        take.series = cleanSeries
+        let base = cleanSeries.isEmpty ? cleanEpisode : SessionNaming.baseName(series: cleanSeries, episode: cleanEpisode)
         // "Name (2)" already carries this base; keep it rather than move to "Name (3)".
         let current = url.deletingPathExtension().lastPathComponent
-        let keepsName = current == base
+        let keepsName = folder == url.deletingLastPathComponent() && (current == base
             || (current.hasPrefix(base + " (") && current.hasSuffix(")")
-                && Int(current.dropFirst(base.count + 2).dropLast()) != nil)
+                && Int(current.dropFirst(base.count + 2).dropLast()) != nil))
         if !keepsName {
-            take.url = url.deletingLastPathComponent().appendingPathComponent(base).appendingPathExtension("mov")
+            take.url = folder.appendingPathComponent(base).appendingPathExtension("mov")
         }
         return take
     }
@@ -67,12 +82,15 @@ struct Take: Equatable {
     /// Applies a rename on disk: moves the `.mov` to the new name (never
     /// over another file) and writes its sidecar. The old sidecar goes only
     /// once the new one is written; if that fails, the `.mov` moves back so
-    /// it still matches its old sidecar. Returns the take as saved.
+    /// it still matches its old sidecar. A new series folder is made if
+    /// needed. Returns the take as saved.
     static func apply(from old: Take, to new: Take) async throws -> Take {
         var saved = new
         let moves = new.url != old.url
+        let folder = new.url.deletingLastPathComponent()
+        let madeFolder = moves && !FileManager.default.fileExists(atPath: folder.path)
         if moves {
-            let folder = old.url.deletingLastPathComponent()
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
             saved.url = SessionNaming.uniqueURL(in: folder, base: new.url.deletingPathExtension().lastPathComponent, ext: "mov")
             try FileManager.default.moveItem(at: old.url, to: saved.url)
         }
@@ -82,6 +100,10 @@ struct Take: Equatable {
                                                     eventName: saved.series.isEmpty ? nil : saved.series)
         } catch {
             if moves { try? FileManager.default.moveItem(at: saved.url, to: old.url) }
+            // Don't leave behind an empty series folder made for this move.
+            if madeFolder, (try? FileManager.default.contentsOfDirectory(atPath: folder.path))?.isEmpty == true {
+                try? FileManager.default.removeItem(at: folder)
+            }
             throw error
         }
         // The old sidecar points at the old name.

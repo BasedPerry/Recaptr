@@ -44,7 +44,7 @@ Each source gets its own AAC track (no mix track). A linked limiter at -1 dBFS k
 - **Crash-safe files.** `movieFragmentInterval` is 5 s, so an interrupted take opens up to the last fragment.
 - **Markers.** Kept in memory and written to the .fcpxml (FCPXML 1.11) at stop, never into the .mov: a metadata track made the writer fail. The fcpxml frame rate is measured from the first 10 s of frame spacing, since dropouts pull the nominal rate down to 59.94.
 - **Health.** Won't start under 2 GB free. While recording: a warning under 5 GB, auto-stop under 1 GB, a one-time thermal warning, and idle system and display sleep are blocked (capture cards stall when the display sleeps).
-- **After stop.** The file is probed for its tracks, markers and a blank episode are named, the file moves to `<Series>/Series – Ep N – Title.mov`, and the .fcpxml is written beside it. `renameLastTake` can redo this.
+- **After stop.** The file is probed for its tracks, markers and a blank episode are named, the file moves to `<Series>/Series – Ep N – Title.mov`, and the .fcpxml is written beside it. Edit Names on the after-take card can redo this for any recent take, including moving it to another series.
 - **Save folder.** Stored as a security-scoped bookmark. Recaptr asks for a folder before the first recording.
 - **First launch.** A welcome sheet (`WelcomeSheet`) sets the save folder, the start source (capture card or main display), and naming. It shows once; Help → Welcome to Recaptr reopens it. Screen Recording is only requested when Screen is picked.
 

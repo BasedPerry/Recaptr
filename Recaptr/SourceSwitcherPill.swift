@@ -115,8 +115,9 @@ struct SourceSwitcherPill: View {
             modePicker
             sourceMenu
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 11)
+        .padding(.horizontal, 8)
+        .padding(.trailing, 6)
+        .frame(height: Spacing.topRow)
         .recaptrGlass()
     }
 

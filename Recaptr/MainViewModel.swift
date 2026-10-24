@@ -1672,18 +1672,14 @@ final class MainViewModel: ObservableObject {
         return .terminateNow
     }
 
-    /// Rename the last take's episode and markers.
-    func renameLastTake(episode: String, markerTitles: [String]) async throws {
-        guard let take = lastTake else { return }
-        try await renameTake(take, episode: episode, markerTitles: markerTitles)
-    }
-
-    /// Rename any take's episode and markers: moves the .mov (and replaces
-    /// its .fcpxml) to the new name in the same folder, never over an
-    /// existing file. Pass a take from `Take.load` for older recordings.
+    /// Rename any take's series, episode and markers: moves the .mov (and
+    /// replaces its .fcpxml) to the new name, in its series folder when the
+    /// series changes, never over an existing file. Pass a take from `Take.load` for older recordings.
     @discardableResult
-    func renameTake(_ take: Take, episode: String, markerTitles: [String]) async throws -> Take {
-        guard let wanted = take.renamed(episode: episode, markerTitles: markerTitles) else { return take }
+    func renameTake(_ take: Take, series: String? = nil, episode: String, markerTitles: [String]) async throws -> Take {
+        // A new series files into an existing folder spelled differently.
+        let series = series.map { $0.isEmpty ? $0 : Self.existingSeriesSpelling($0, in: take.saveRoot) }
+        guard let wanted = take.renamed(series: series, episode: episode, markerTitles: markerTitles) else { return take }
         let saved = try await Take.apply(from: take, to: wanted)
         if lastTake?.url == take.url {
             lastTake = saved

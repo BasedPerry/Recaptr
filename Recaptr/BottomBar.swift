@@ -37,16 +37,18 @@ struct BottomBar: View {
                 onScreenshot: onScreenshot,
                 onToggleRecord: onToggleRecord,
                 onMark: onMark,
-                standalone: false
+                standalone: false,
+                recordKey: vm.hotKeyLabel(for: .toggleRecording),
+                markerKey: vm.hotKeyLabel(for: .dropMarker)
             )
 
             BarStatus(clock: vm.clock, markerCount: vm.markers.count, isRecording: vm.isRecording)
                 .frame(maxWidth: .infinity, alignment: .trailing)
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 6)
+        // Same inset all round so the chips' capsules sit concentric in the bar's.
+        .padding(6)
         .frame(maxWidth: 860)
-        .recaptrGlass(in: RoundedRectangle(cornerRadius: 26, style: .continuous),
+        .recaptrGlass(in: Capsule(),
                       tint: vm.isRecording ? Color.red.opacity(0.12) : nil)
         .animation(Motion.pick(Motion.fade, reduceMotion: reduceMotion), value: vm.isRecording)
         .recaptrGlassID(BottomBar.glassID, in: glassNamespace)
@@ -108,7 +110,7 @@ private struct ChannelChip: View {
         .padding(.leading, 8)
         .padding(.trailing, 4)
         .background(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
+            Capsule()
                 .fill(isHovering || showsPopover ? Color.primary.opacity(0.08) : .clear)
         )
         .onHover { isHovering = $0 }
@@ -166,10 +168,22 @@ private struct ChannelChip: View {
         switch channel {
         case .game:
             if isScreen { return "System audio already plays through your speakers." }
-            return monitorOn ? "Stop listening to game audio" : "Listen to game audio"
+            return withKeys(monitorOn ? "Stop listening to game audio" : "Listen to game audio")
         case .mic:
             if !vm.hasMic { return "Choose a mic to listen to it" }
-            return monitorOn ? "Stop listening to your mic" : "Listen to your mic"
+            return withKeys(monitorOn ? "Stop listening to your mic" : "Listen to your mic")
+        }
+    }
+
+    /// ⌘K for the channel it controls, plus any global key.
+    private func withKeys(_ text: String) -> String {
+        let global = vm.hotKeyLabel(for: channel == .game ? .toggleGameMonitor : .toggleMicMonitor)
+        let local = channel.index == (vm.monitorChannelIndex ?? 0) ? "⌘K" : nil
+        switch (local, global) {
+        case let (l?, g?): return "\(text) (\(l), or \(g) from any app)"
+        case let (l?, nil): return "\(text) (\(l))"
+        case let (nil, g?): return "\(text) (\(g) from any app)"
+        default: return text
         }
     }
 }
@@ -270,7 +284,7 @@ private struct BarStatus: View {
             } else if let diskTime {
                 Text(diskTime.label)
                     .font(BrandFont.body(weight: .medium, size: 13).swiftUI)
-                    .foregroundStyle(diskColor(diskTime.level))
+                    .foregroundStyle(diskTime.level.color)
                     .help("Recording time left on the save drive at the current preset")
             }
             if markerCount > 0, isRecording {
@@ -297,13 +311,5 @@ private struct BarStatus: View {
         }
         .onChange(of: vm.videoQuality) { _, _ in diskTime = vm.diskTimeLeft() }
         .onChange(of: vm.activeCaptureSize?.width) { _, _ in diskTime = vm.diskTimeLeft() }
-    }
-
-    private func diskColor(_ level: DiskTime.Level) -> Color {
-        switch level {
-        case .fine: return .secondary
-        case .low: return .orange
-        case .critical: return .red
-        }
     }
 }

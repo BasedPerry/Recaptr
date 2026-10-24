@@ -24,12 +24,12 @@ struct ContentViewNext: View {
     @State private var fadeTask: Task<Void, Never>? = nil
     private let fadeDelay: TimeInterval = 3.0
 
-    @AppStorage(PillTuck.key) private var tuck = PillTuck.center
-    @AppStorage(PillTuck.yKey) private var tuckY = 0.5
+    @AppStorage(PillTuck.key, store: TestHooks.preferences) private var tuck = PillTuck.center
+    @AppStorage(PillTuck.yKey, store: TestHooks.preferences) private var tuckY = 0.5
     @State private var pillDrag: CGSize = .zero
     @State private var tabDragY: CGFloat? = nil
     @State private var windowSize: CGSize = .zero
-    private static let windowSpace = "recaptrWindow"
+    @State private var windowDisplay: CGDirectDisplayID?
 
     @State private var screenshotFlashOpacity: Double = 0
     @State private var markerFlashOpacity: Double = 0
@@ -96,7 +96,6 @@ struct ContentViewNext: View {
             if new > old { triggerMarkerFlash() }
         }
         .frame(minWidth: 980, minHeight: 620)
-        .coordinateSpace(.named(Self.windowSpace))
         .onGeometryChange(for: CGSize.self) { $0.size } action: { windowSize = $0 }
         .onContinuousHover { phase in
             switch phase {
@@ -112,6 +111,12 @@ struct ContentViewNext: View {
         }
         .background(shortcutCarrier)
         .overlay(alignment: .bottomTrailing) { uiTestProbe }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didChangeScreenNotification)) { _ in
+            windowDisplay = SelfCapture.windowDisplay
+        }
+        .onChange(of: vm.isRecording) { _, recording in
+            SelfCapture.follow(isRecording: recording, source: vm.selectedMainSource)
+        }
         .onChange(of: vm.requestedMode) { _, request in
             if let request { activeMode = request.mode }
         }
@@ -122,6 +127,7 @@ struct ContentViewNext: View {
             if keep { fadeTask?.cancel(); setChrome(shown: true) } else { scheduleFade() }
         }
         .onAppear {
+            windowDisplay = SelfCapture.windowDisplay
             syncActiveModeFromVM()
             resetFadeIfNeeded()
             vm.autoSelectAudioForCurrentSource()
@@ -161,23 +167,24 @@ struct ContentViewNext: View {
         Color.clear
             // Hidden controls leave the container, so their glass dissolves
             // rather than fading.
+            // The switcher centers on the picture; the round buttons sit
+            // in the corners so they don't push it off center.
             .overlay(alignment: .top) {
-                HStack(spacing: 10) {
-                    if chromeShown {
-                        sidebarButton
-                    }
-                    if chromeShown, !sidebarVisible {
-                        SourceSwitcherPill(
-                            activeMode: activeModeBinding,
-                            sourcesForActiveMode: pickableSources(for: activeMode),
-                            selectedSourceID: selectedSourceIDBinding
-                        )
-                    }
+                if chromeShown, !sidebarVisible {
+                    SourceSwitcherPill(
+                        activeMode: activeModeBinding,
+                        sourcesForActiveMode: pickableSources(for: activeMode),
+                        selectedSourceID: selectedSourceIDBinding
+                    )
+                    .padding(.top, 14)
                 }
-                .padding(.top, 14)
-                .frame(maxWidth: .infinity, alignment: sidebarVisible ? .leading : .center)
-                .padding(.leading, sidebarVisible ? 16 : 0)
-                .animation(Motion.pick(Motion.liquid, reduceMotion: reduceMotion), value: sidebarVisible)
+            }
+            .overlay(alignment: .topLeading) {
+                if chromeShown {
+                    sidebarButton
+                        .padding(.top, 14)
+                        .padding(.leading, 16)
+                }
             }
             .overlay(alignment: .topTrailing) {
                 if chromeShown {
@@ -212,6 +219,10 @@ struct ContentViewNext: View {
     /// glass flows into the recording pill.
     private var bottomGlass: some View {
         VStack(spacing: 12) {
+            if chromeShown, !vm.isRecording, vm.presentedTake == nil, capturesOwnScreen {
+                SelfCaptureHint()
+                    .transition(.opacity)
+            }
             if chromeShown, let take = vm.presentedTake {
                 AfterTakeCard(take: take, glassNamespace: glassSpace) {
                     withAnimation(chromeAnimation) { vm.presentedTake = nil }
@@ -236,7 +247,6 @@ struct ContentViewNext: View {
         } else if vm.isRecording, tuck == .center {
             RecordingPill(clock: vm.clock, markerCount: vm.markers.count, glassNamespace: glassSpace)
                 .offset(pillDrag)
-                .onTapGesture { wakeChrome() }
                 .gesture(pillDragGesture)
                 .accessibilityAddTraits(.isButton)
                 .accessibilityAction { wakeChrome() }
@@ -256,7 +266,6 @@ struct ContentViewNext: View {
                 // Centered on `y`, flush with the edge.
                 .alignmentGuide(.top) { $0[VerticalAlignment.center] }
                 .offset(y: y)
-                .onTapGesture { setTuck(.center) }
                 .gesture(tabDragGesture)
                 .accessibilityAddTraits(.isButton)
                 .accessibilityLabel("Recording. Show the recording pill")
@@ -266,16 +275,23 @@ struct ContentViewNext: View {
         }
     }
 
+    // Gestures work from the drag distance: the pill always starts at the
+    // bottom center and the tab at its stored height.
+    /// One gesture for click and drag: a press that barely moves is a click.
     private var pillDragGesture: some Gesture {
-        DragGesture(minimumDistance: 4, coordinateSpace: .named(Self.windowSpace))
-            .onChanged { pillDrag = $0.translation }
+        DragGesture(minimumDistance: 0)
+            .onChanged { value in
+                if Self.isDrag(value.translation) { pillDrag = value.translation }
+            }
             .onEnded { value in
+                guard Self.isDrag(value.translation) else { wakeChrome(); return }
                 // A flick toward an edge counts where it was headed.
-                let fling = value.predictedEndTranslation.width - value.translation.width
-                let side = PillTuck.landing(x: value.location.x + fling, width: windowSize.width)
+                let x = windowSize.width / 2 + value.predictedEndTranslation.width
+                let y = windowSize.height - Self.pillCenterFromBottom + value.translation.height
+                let side = PillTuck.landing(x: x, width: windowSize.width)
                 withAnimation(chromeAnimation) {
                     if side != .center {
-                        tuckY = PillTuck.fraction(y: value.location.y, height: windowSize.height)
+                        tuckY = PillTuck.fraction(y: y, height: windowSize.height)
                         tuck = side
                     }
                     pillDrag = .zero
@@ -283,19 +299,28 @@ struct ContentViewNext: View {
             }
     }
 
+    private static func isDrag(_ t: CGSize) -> Bool { abs(t.width) > 4 || abs(t.height) > 4 }
+
+    /// Bottom padding plus half the pill's height.
+    private static let pillCenterFromBottom: CGFloat = 34
+
     private var tabDragGesture: some Gesture {
-        DragGesture(minimumDistance: 4, coordinateSpace: .named(Self.windowSpace))
+        DragGesture(minimumDistance: 0)
             .onChanged { value in
-                tabDragY = PillTuck.tabY(fraction: Double(value.location.y / max(windowSize.height, 1)),
+                guard Self.isDrag(value.translation) else { return }
+                let start = PillTuck.tabY(fraction: tuckY, height: windowSize.height)
+                tabDragY = PillTuck.tabY(fraction: Double((start + value.translation.height) / max(windowSize.height, 1)),
                                          height: windowSize.height)
             }
             .onEnded { value in
+                guard Self.isDrag(value.translation) else { setTuck(.center); return }
+                let start = PillTuck.tabY(fraction: tuckY, height: windowSize.height)
                 let inward = tuck == .left ? value.translation.width : -value.translation.width
                 withAnimation(chromeAnimation) {
                     if inward > PillTuck.pullOut {
                         tuck = .center
                     } else {
-                        tuckY = PillTuck.fraction(y: value.location.y, height: windowSize.height)
+                        tuckY = PillTuck.fraction(y: start + value.translation.height, height: windowSize.height)
                     }
                     tabDragY = nil
                 }
@@ -304,6 +329,12 @@ struct ContentViewNext: View {
 
     private func setTuck(_ side: PillTuck) {
         withAnimation(chromeAnimation) { tuck = side }
+    }
+
+    /// Capturing the display this window is on.
+    private var capturesOwnScreen: Bool {
+        guard let src = vm.selectedMainSource, src.kind == .screenDisplay else { return false }
+        return src.displayID != nil && src.displayID == windowDisplay
     }
 
     private var chromeAnimation: Animation {
@@ -329,11 +360,11 @@ struct ContentViewNext: View {
         } label: {
             Image(systemName: "sidebar.left")
                 .font(.system(size: 15, weight: .medium))
-                .frame(width: 28, height: 28)
+                .frame(width: Spacing.topRow, height: Spacing.topRow)
+                .contentShape(Circle())
         }
-        .buttonStyle(.glass)
-        .buttonBorderShape(.circle)
-        .controlSize(.large)
+        .buttonStyle(.plain)
+        .recaptrGlass(in: Circle(), interactive: true)
         .help(sidebarVisible ? "Hide sources (⌃⌘S)" : "Show sources and tuning (⌃⌘S)")
         .accessibilityLabel(sidebarVisible ? "Hide sidebar" : "Show sidebar")
         .accessibilityIdentifier("sidebarToggle")
@@ -347,11 +378,11 @@ struct ContentViewNext: View {
         } label: {
             Image(systemName: "gearshape")
                 .font(.system(size: 15, weight: .medium))
-                .frame(width: 28, height: 28)
+                .frame(width: Spacing.topRow, height: Spacing.topRow)
+                .contentShape(Circle())
         }
-        .buttonStyle(.glass)
-        .buttonBorderShape(.circle)
-        .controlSize(.large)
+        .buttonStyle(.plain)
+        .recaptrGlass(in: Circle(), interactive: true)
         .help("Settings (⌘,)")
         .accessibilityLabel("Settings")
         .accessibilityIdentifier("settingsButton")

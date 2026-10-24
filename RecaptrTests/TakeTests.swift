@@ -94,6 +94,43 @@ struct TakeTests {
         #expect(take.renamed(episode: "Ep 1", markerTitles: [])?.url == take.url)
     }
 
+    /// A new series moves the take next door, into that series' folder.
+    @Test func newSeriesMovesToItsFolder() {
+        let take = Take(url: URL(fileURLWithPath: "/r/FE/FE – Ep 1.mov"), series: "FE", markers: [])
+        #expect(take.saveRoot.path == "/r")
+        let moved = take.renamed(series: "Zelda", episode: "Ep 1", markerTitles: [])
+        #expect(moved?.url.path == "/r/Zelda/Zelda – Ep 1.mov")
+        #expect(moved?.series == "Zelda")
+        // No series: back in the save folder under the episode name.
+        let loose = take.renamed(series: "", episode: "Ep 1", markerTitles: [])
+        #expect(loose?.url.path == "/r/Ep 1.mov")
+        #expect(loose?.series == "")
+        // A loose take gets a series folder in the folder it's in.
+        let plain = Take(url: URL(fileURLWithPath: "/r/Clip.mov"), series: "", markers: [])
+        #expect(plain.renamed(series: "FE", episode: "Clip", markerTitles: [])?.url.path == "/r/FE/FE – Clip.mov")
+    }
+
+    /// The same series, or none given, keeps the folder and a numbered name.
+    @Test func sameSeriesKeepsTheFolder() {
+        let take = Take(url: URL(fileURLWithPath: "/r/FE/FE – Ep 1 (2).mov"), series: "FE", markers: [])
+        #expect(take.renamed(series: "FE", episode: "Ep 1", markerTitles: [])?.url == take.url)
+        #expect(take.renamed(series: nil, episode: "Ep 2", markerTitles: [])?.url.path == "/r/FE/FE – Ep 2.mov")
+    }
+
+    /// A failed move to a new series leaves no empty folder behind.
+    @Test func failedSeriesMoveCleansUp() async throws {
+        let dir = try folder()
+        let series = dir.appendingPathComponent("FE")
+        try FileManager.default.createDirectory(at: series, withIntermediateDirectories: true)
+        let a = series.appendingPathComponent("FE – Ep 1.mov")
+        try Data("not a movie".utf8).write(to: a)
+        let take = Take(url: a, series: "FE", markers: [])
+        let wanted = try #require(take.renamed(series: "Zelda", episode: "Ep 1", markerTitles: []))
+        await #expect(throws: (any Error).self) { _ = try await Take.apply(from: take, to: wanted) }
+        #expect(FileManager.default.fileExists(atPath: a.path))
+        #expect(!FileManager.default.fileExists(atPath: dir.appendingPathComponent("Zelda").path))
+    }
+
     /// Renaming on disk never overwrites another take.
     @Test func applyNeverOverwrites() async throws {
         let dir = try folder()

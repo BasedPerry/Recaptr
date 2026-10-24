@@ -41,6 +41,7 @@ struct SourceSidebar: View {
                     sourceRows
                 }
                 NamingSection()
+                OutputSection(storage: vm.recordingStorage)
                 TuningSections()
             }
             .formStyle(.grouped)
@@ -207,6 +208,72 @@ private struct NamingSection: View {
         let typed = SessionNaming.sanitize(vm.episodeName)
         let episode = !typed.isEmpty ? typed : aiNaming ? "Ep N – Title" : "Ep N"
         return "Saves as \(series)/\(SessionNaming.baseName(series: series, episode: episode)).mov"
+    }
+}
+
+// MARK: - Output
+
+/// Encoding and where takes go, with how long the drive lasts.
+private struct OutputSection: View {
+    @EnvironmentObject var vm: MainViewModel
+    /// Observed so a new folder refreshes the time left.
+    @ObservedObject var storage: RecordingStorage
+    @State private var diskTime: DiskTime?
+
+    var body: some View {
+        Section {
+            Picker("Encoding", selection: $vm.videoQuality) {
+                ForEach(VideoQuality.allCases) { q in
+                    Text(q.label).tag(q)
+                }
+            }
+            .accessibilityIdentifier("encodingPicker")
+            SaveFolderRow(storage: storage, locked: vm.isRecording)
+            if let diskTime {
+                LabeledContent("Time left") {
+                    Text("\(diskTime.label) at \(vm.videoQuality.label)")
+                        .foregroundStyle(diskTime.level.color)
+                }
+                .help("Recording time left on the save drive at this encoding")
+                .accessibilityIdentifier("sidebarDiskTime")
+            }
+        } header: {
+            Text("Output")
+        } footer: {
+            Text(encodingFooter)
+        }
+        .disabled(vm.isRecording)
+        .task {
+            // Free space changes slowly; every 30 s is plenty.
+            while !Task.isCancelled {
+                diskTime = vm.diskTimeLeft()
+                try? await Task.sleep(for: .seconds(30))
+            }
+        }
+        .onChange(of: vm.videoQuality) { _, _ in diskTime = vm.diskTimeLeft() }
+        .onChange(of: vm.activeCaptureSize?.width) { _, _ in diskTime = vm.diskTimeLeft() }
+        .onChange(of: storage.displayPath) { _, _ in diskTime = vm.diskTimeLeft() }
+    }
+
+    /// Bitrate and size per hour at the current capture size.
+    var encodingFooter: String {
+        var text = "HEVC keeps more detail than H.264 at the same size and works in Final Cut. Use Compatible only for tools that can't open HEVC."
+        if let size = vm.activeCaptureSize {
+            let mbps = vm.videoQuality.bitrate(width: size.width, height: size.height) / 1_000_000
+            let gb = Int(vm.videoQuality.gigabytesPerHour(width: size.width, height: size.height).rounded())
+            text = "At \(size.width)×\(size.height): \(mbps) Mbps, about \(gb) GB per hour. " + text
+        }
+        return text
+    }
+}
+
+extension DiskTime.Level {
+    var color: Color {
+        switch self {
+        case .fine: return .secondary
+        case .low: return .orange
+        case .critical: return .red
+        }
     }
 }
 

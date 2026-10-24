@@ -57,3 +57,24 @@ struct RecordingCommands: View {
         }
     }
 }
+
+/// File → Recent Recordings: the last 10 takes, newest first. Each opens
+/// in the after-take card.
+struct RecentRecordingsMenu: View {
+    @ObservedObject var vm: MainViewModel
+    @ObservedObject var recent: RecentTakes
+
+    var body: some View {
+        Menu("Recent Recordings") {
+            let takes = recent.urls.filter { FileManager.default.fileExists(atPath: $0.path) }
+            if takes.isEmpty {
+                Text("No Recent Recordings")
+            } else {
+                ForEach(takes, id: \.self) { url in
+                    Button(url.deletingPathExtension().lastPathComponent) { vm.openTake(url) }
+                }
+            }
+        }
+        .disabled(vm.isRecording)
+    }
+}

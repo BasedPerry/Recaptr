@@ -19,4 +19,17 @@ nonisolated enum TestHooks {
         false
         #endif
     }
+
+    /// Where window preferences (pill tuck, menu bar, hide while
+    /// recording) are kept. Test copies get a store of their own, emptied
+    /// at launch, so they never change the user's.
+    static let preferences: UserDefaults = {
+        #if DEBUG
+        if isOn, let store = UserDefaults(suiteName: "RecaptrUITestPreferences") {
+            store.removePersistentDomain(forName: "RecaptrUITestPreferences")
+            return store
+        }
+        #endif
+        return .standard
+    }()
 }

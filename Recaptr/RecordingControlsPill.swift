@@ -16,6 +16,9 @@ struct RecordingControlsPill: View {
     var onMark: () -> Void
     /// False inside the bottom bar, which brings its own glass.
     var standalone = true
+    /// Current global keys, shown in the tooltips.
+    var recordKey: String? = nil
+    var markerKey: String? = nil
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -43,7 +46,8 @@ struct RecordingControlsPill: View {
             recordButton
             sideButton(
                 icon: "bookmark.fill",
-                label: "Clip Marker (⌘B, or ⌃⌥⌘B from any app)",
+                label: "Clip Marker",
+                help: Self.shortcutHelp("Clip Marker", key: "⌘B", global: markerKey),
                 enabled: isRecording,
                 disabledHelp: "Clip markers are available while recording",
                 id: "markerButton",
@@ -52,12 +56,18 @@ struct RecordingControlsPill: View {
         }
     }
 
+    /// "Clip Marker (⌘B, or ⌃⌥⌘B from any app)".
+    static func shortcutHelp(_ title: String, key: String, global: String?) -> String {
+        "\(title) (\(key)" + (global.map { ", or \($0) from any app" } ?? "") + ")"
+    }
+
     // MARK: Side button
 
     @ViewBuilder
     private func sideButton(
         icon: String,
         label: String,
+        help: String? = nil,
         enabled: Bool,
         disabledHelp: String? = nil,
         id: String,
@@ -73,7 +83,7 @@ struct RecordingControlsPill: View {
         }
         .buttonStyle(.plain)
         .disabled(!enabled)
-        .help(enabled ? label : (disabledHelp ?? label))
+        .help(enabled ? (help ?? label) : (disabledHelp ?? label))
         .accessibilityLabel(label)
         .accessibilityIdentifier(id)
     }
@@ -121,7 +131,8 @@ struct RecordingControlsPill: View {
         }
         .buttonStyle(.plain)
         .disabled(!canRecord && !isRecording)
-        .help(isRecording ? "Stop Recording" : "Start Recording")
+        .help(Self.shortcutHelp(isRecording ? "Stop Recording" : "Start Recording",
+                                key: "⌘R", global: recordKey))
         .accessibilityLabel(isRecording ? "Stop Recording" : "Start Recording")
         .accessibilityIdentifier("recordButton")
     }

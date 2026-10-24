@@ -10,6 +10,7 @@ struct RecaptrApp: App {
 
     @StateObject private var vm = MainViewModel()
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+    @AppStorage(MenuBarContent.alwaysKey, store: TestHooks.preferences) private var menuBarAlways = false
     #if DEBUG
     @AppStorage(GlassTest.key) private var glassTest = GlassTest.standard
     @AppStorage(GlassTest.keepChromeKey) private var keepChromeVisible = false
@@ -28,6 +29,9 @@ struct RecaptrApp: App {
         // The preview runs under the traffic lights; keep that corner free of chrome.
         .windowStyle(.hiddenTitleBar)
         .commands {
+            CommandGroup(after: .newItem) {
+                RecentRecordingsMenu(vm: vm, recent: vm.recentTakes)
+            }
             CommandMenu("Recording") {
                 RecordingCommands(vm: vm)
             }
@@ -67,15 +71,15 @@ struct RecaptrApp: App {
                 .environmentObject(vm)
         }
 
-        // Shown only while recording. The setter is ignored so hiding the
-        // menu bar item can't stop the recording.
+        // Shown while recording, or always when that's turned on. The
+        // setter is ignored so hiding the item can't stop a recording.
         MenuBarExtra(isInserted: Binding(
-            get: { vm.isRecording },
+            get: { vm.isRecording || menuBarAlways },
             set: { _ in }
         )) {
             MenuBarContent().environmentObject(vm)
         } label: {
-            MenuBarLabel(clock: vm.clock)
+            MenuBarLabel(clock: vm.clock, isRecording: vm.isRecording)
         }
         .menuBarExtraStyle(.menu)
     }

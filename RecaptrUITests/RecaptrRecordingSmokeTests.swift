@@ -51,7 +51,8 @@ final class RecaptrRecordingSmokeTests: XCTestCase {
         XCTAssertTrue(waitUntil(timeout: 5, { !monitor.isEnabled }), "Monitor should be disabled for screen without a mic")
     }
 
-    /// Rename in Settings renames the take and its Final Cut file.
+    /// Edit Names in the after-take card renames the take, and a new
+    /// series moves it into that series' folder.
     @MainActor
     func testRenameLastTake() throws {
         let probe = try record(modeKey: "3", seconds: 5, markers: 1,
@@ -60,21 +61,19 @@ final class RecaptrRecordingSmokeTests: XCTestCase {
                                waitForFiling: true)
         XCTAssertTrue(probe.status.contains("UITest Series – Before"), probe.status)
         let app = XCUIApplication()
-        app.typeKey(",", modifierFlags: .command)
-        // Settings reopens on the last tab used.
-        let recordingTab = app.toolbars.buttons["Recording"].firstMatch
-        if recordingTab.waitForExistence(timeout: 5) { recordingTab.click() }
-        let rename = app.buttons["renameTakeButton"]
-        XCTAssertTrue(rename.waitForExistence(timeout: 5), "No Rename button in Settings")
-        rename.click()
-        let field = app.textFields["renameEpisodeField"]
-        XCTAssertTrue(field.waitForExistence(timeout: 5))
-        field.doubleClick()
-        field.typeKey("a", modifierFlags: .command)
-        field.typeText("After")
-        app.buttons["Rename"].firstMatch.click()
+        let edit = app.buttons["afterTakeEdit"]
+        XCTAssertTrue(edit.waitForExistence(timeout: 10), "No after-take card")
+        edit.click()
+        for (id, text) in [("afterTakeSeriesField", "UITest Moved"), ("afterTakeEpisodeField", "After")] {
+            let field = app.textFields[id]
+            XCTAssertTrue(field.waitForExistence(timeout: 5), "No \(id)")
+            field.click()
+            field.typeKey("a", modifierFlags: .command)
+            field.typeText(text)
+        }
+        app.buttons["afterTakeSave"].click()
         let status = app.staticTexts["statusLine"]
-        XCTAssertTrue(waitUntil(timeout: 10, { self.text(of: status).contains("Renamed to UITest Series – After") }),
+        XCTAssertTrue(waitUntil(timeout: 10, { self.text(of: status).contains("Renamed to UITest Moved – After") }),
                       "Rename didn't happen: \(text(of: status))")
     }
 
@@ -268,6 +267,40 @@ final class RecaptrRecordingSmokeTests: XCTestCase {
         XCTAssertEqual(Int(number(in: raw, after: "video tracks=", until: " ") ?? 0), 1)
         XCTAssertGreaterThan(number(in: raw, after: "Probe → ", until: "s") ?? 0, 4,
                              "Replay should hold several seconds: \(raw)")
+    }
+
+    /// Mid-take, once the controls hide, the pill shows; clicking it
+    /// brings the controls back. Dragging it to an edge is checked by hand:
+    /// XCUITest's synthesized drags don't reach SwiftUI drag gestures here.
+    @MainActor
+    func testPillBringsBackTheControls() throws {
+        let app = XCUIApplication()
+        // No KeepChromeVisible: the pill only shows once the controls hide.
+        app.launchArguments += ["-ApplePersistenceIgnoreState", "YES", "-RecaptrUITesting", "YES",
+                                "-RecaptrVideoQuality", "standard"]
+        app.launch()
+        let window = app.windows.firstMatch
+        XCTAssertTrue(window.waitForExistence(timeout: 10))
+        window.typeKey("3", modifierFlags: .command)
+        let record = app.buttons["recordButton"]
+        guard waitUntil(timeout: 8, { record.isEnabled }) else { throw XCTSkip("No capture card") }
+        Thread.sleep(forTimeInterval: 3)
+        window.typeKey("r", modifierFlags: .command)
+
+        let pill = app.descendants(matching: .any)["telemetryPill"].firstMatch
+        XCTAssertTrue(pill.waitForExistence(timeout: 12), "No recording pill once the controls hid")
+        attachScreenshot(app, "Pill")
+        XCTAssertFalse(record.isHittable, "Controls still showing with the pill")
+        pill.click()
+        XCTAssertTrue(waitUntil(timeout: 5, { record.isHittable }), "Clicking the pill didn't bring the controls back")
+        window.typeKey("r", modifierFlags: .command)
+    }
+
+    private func attachScreenshot(_ app: XCUIApplication, _ name: String) {
+        let shot = XCTAttachment(screenshot: app.windows.firstMatch.screenshot())
+        shot.name = name
+        shot.lifetime = .keepAlways
+        add(shot)
     }
 
     // MARK: - Helpers
