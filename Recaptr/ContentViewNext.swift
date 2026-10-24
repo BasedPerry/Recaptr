@@ -24,6 +24,13 @@ struct ContentViewNext: View {
     @State private var fadeTask: Task<Void, Never>? = nil
     private let fadeDelay: TimeInterval = 3.0
 
+    @AppStorage(PillTuck.key) private var tuck = PillTuck.center
+    @AppStorage(PillTuck.yKey) private var tuckY = 0.5
+    @State private var pillDrag: CGSize = .zero
+    @State private var tabDragY: CGFloat? = nil
+    @State private var windowSize: CGSize = .zero
+    private static let windowSpace = "recaptrWindow"
+
     @State private var screenshotFlashOpacity: Double = 0
     @State private var markerFlashOpacity: Double = 0
 
@@ -53,6 +60,9 @@ struct ContentViewNext: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .background(Color.black)
                     .ignoresSafeArea()
+                    // Mid-take the mouse alone doesn't bring the controls back.
+                    .contentShape(Rectangle())
+                    .onTapGesture { wakeChrome() }
             }
 
             if vm.selectedMainSource == nil {
@@ -86,9 +96,15 @@ struct ContentViewNext: View {
             if new > old { triggerMarkerFlash() }
         }
         .frame(minWidth: 980, minHeight: 620)
+        .coordinateSpace(.named(Self.windowSpace))
+        .onGeometryChange(for: CGSize.self) { $0.size } action: { windowSize = $0 }
         .onContinuousHover { phase in
             switch phase {
             case .active:
+                // Mid-take, once the controls hide, moving over the game
+                // leaves them hidden. A click on the pill or the picture
+                // brings them back.
+                if vm.isRecording, !chromeShown { break }
                 wakeChrome()
             case .ended:
                 break
@@ -175,6 +191,9 @@ struct ContentViewNext: View {
                     .padding(.horizontal, 16)
                     .padding(.bottom, 16)
             }
+            .overlay(alignment: tuck == .left ? .topLeading : .topTrailing) {
+                tuckedTab
+            }
             // Notices stay visible when the rest of the chrome hides.
             .overlay(alignment: .top) {
                 if let notice = vm.notice {
@@ -214,10 +233,77 @@ struct ContentViewNext: View {
                       onMark: handleMark,
                       glassNamespace: glassSpace)
                 .environmentObject(vm)
-        } else if vm.isRecording {
+        } else if vm.isRecording, tuck == .center {
             RecordingPill(clock: vm.clock, markerCount: vm.markers.count, glassNamespace: glassSpace)
-                .allowsHitTesting(false)
+                .offset(pillDrag)
+                .onTapGesture { wakeChrome() }
+                .gesture(pillDragGesture)
+                .accessibilityAddTraits(.isButton)
+                .accessibilityAction { wakeChrome() }
+                .accessibilityAction(named: "Tuck to Left Edge") { setTuck(.left) }
+                .accessibilityAction(named: "Tuck to Right Edge") { setTuck(.right) }
         }
+    }
+
+    // MARK: - Tucking the pill
+
+    /// The tucked tab, on its edge at its remembered height.
+    @ViewBuilder
+    private var tuckedTab: some View {
+        if !chromeShown, vm.isRecording, tuck != .center {
+            let y = tabDragY ?? PillTuck.tabY(fraction: tuckY, height: windowSize.height)
+            TuckedTab(clock: vm.clock, edge: tuck, glassNamespace: glassSpace)
+                // Centered on `y`, flush with the edge.
+                .alignmentGuide(.top) { $0[VerticalAlignment.center] }
+                .offset(y: y)
+                .onTapGesture { setTuck(.center) }
+                .gesture(tabDragGesture)
+                .accessibilityAddTraits(.isButton)
+                .accessibilityLabel("Recording. Show the recording pill")
+                .accessibilityAction { setTuck(.center) }
+                .transition(reduceMotion ? .opacity
+                                         : .move(edge: tuck == .left ? .leading : .trailing))
+        }
+    }
+
+    private var pillDragGesture: some Gesture {
+        DragGesture(minimumDistance: 4, coordinateSpace: .named(Self.windowSpace))
+            .onChanged { pillDrag = $0.translation }
+            .onEnded { value in
+                // A flick toward an edge counts where it was headed.
+                let fling = value.predictedEndTranslation.width - value.translation.width
+                let side = PillTuck.landing(x: value.location.x + fling, width: windowSize.width)
+                withAnimation(chromeAnimation) {
+                    if side != .center {
+                        tuckY = PillTuck.fraction(y: value.location.y, height: windowSize.height)
+                        tuck = side
+                    }
+                    pillDrag = .zero
+                }
+            }
+    }
+
+    private var tabDragGesture: some Gesture {
+        DragGesture(minimumDistance: 4, coordinateSpace: .named(Self.windowSpace))
+            .onChanged { value in
+                tabDragY = PillTuck.tabY(fraction: Double(value.location.y / max(windowSize.height, 1)),
+                                         height: windowSize.height)
+            }
+            .onEnded { value in
+                let inward = tuck == .left ? value.translation.width : -value.translation.width
+                withAnimation(chromeAnimation) {
+                    if inward > PillTuck.pullOut {
+                        tuck = .center
+                    } else {
+                        tuckY = PillTuck.fraction(y: value.location.y, height: windowSize.height)
+                    }
+                    tabDragY = nil
+                }
+            }
+    }
+
+    private func setTuck(_ side: PillTuck) {
+        withAnimation(chromeAnimation) { tuck = side }
     }
 
     private var chromeAnimation: Animation {
@@ -591,52 +677,4 @@ struct RecaptrRootView: View {
 extension EnvironmentValues {
     /// Whether the floating chrome is showing. Live meters pause when it isn't.
     @Entry var chromeVisible: Bool = true
-}
-
-/// Red dot, elapsed time, file size, marker count. Observes only the
-/// clock so its once-a-second tick doesn't redraw the window.
-private struct RecordingPill: View {
-    @ObservedObject var clock: RecordingClock
-    let markerCount: Int
-    var glassNamespace: Namespace.ID? = nil
-
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    var body: some View {
-        HStack(spacing: 10) {
-            Circle()
-                .fill(.red)
-                .frame(width: 8, height: 8)
-                .opacity(clock.anchored ? 1.0 : 0.45)
-            Text(clock.formattedElapsed)
-                .font(BrandFont.mono(weight: .medium, size: 13).swiftUI)
-                .foregroundStyle(.primary)
-                .monospacedDigit()
-                .contentTransition(.numericText(countsDown: false))
-                .animation(reduceMotion ? nil : Motion.snappy, value: clock.formattedElapsed)
-            if clock.bytes > 0 {
-                Text(ByteCountFormatter.string(fromByteCount: clock.bytes, countStyle: .file))
-                    .font(BrandFont.mono(weight: .regular, size: 11).swiftUI)
-                    .foregroundStyle(.secondary)
-            }
-            if markerCount > 0 {
-                HStack(spacing: 3) {
-                    Image(systemName: "bookmark.fill")
-                        .font(.system(size: 10))
-                        .foregroundStyle(Color.signal)
-                    Text("\(markerCount)")
-                        .font(BrandFont.mono(weight: .medium, size: 11).swiftUI)
-                        .foregroundStyle(.primary)
-                }
-                .transition(reduceMotion ? .opacity : .opacity.combined(with: .scale))
-            }
-        }
-        .animation(Motion.pick(Motion.pop, reduceMotion: reduceMotion), value: markerCount)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .recaptrGlass()
-        .recaptrGlassID(BottomBar.glassID, in: glassNamespace)
-        .accessibilityElement(children: .combine)
-        .accessibilityIdentifier("telemetryPill")
-    }
 }
