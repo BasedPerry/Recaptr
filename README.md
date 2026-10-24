@@ -46,7 +46,7 @@ Each source gets its own AAC track (no mix track). A linked limiter at -1 dBFS k
 - **Health.** Won't start under 2 GB free. While recording: a warning under 5 GB, auto-stop under 1 GB, a one-time thermal warning, and idle system and display sleep are blocked (capture cards stall when the display sleeps).
 - **After stop.** The file is probed for its tracks, markers and a blank episode are named, the file moves to `<Series>/Series – Ep N – Title.mov`, and the .fcpxml is written beside it. Edit Names on the after-take card can redo this for any recent take, including moving it to another series.
 - **Save folder.** Stored as a security-scoped bookmark. Recaptr asks for a folder before the first recording.
-- **First launch.** A welcome sheet (`WelcomeSheet`) sets the save folder, the start source (capture card or main display), and naming. It shows once; Help → Welcome to Recaptr reopens it. Screen Recording is only requested when Screen is picked.
+- **First launch.** `WelcomeSheet` walks through four steps: source, permissions (each explained before macOS asks; no preview or prompt until then), save folder with time left, and marker keys plus naming (nothing pre-picked). Skippable; Help → Welcome to Recaptr reopens it. People coming from 1.0 get `WhatsNewSheet` instead, with naming pre-filled from their 1.0 setting.
 
 ## Naming
 
@@ -78,6 +78,7 @@ Launch arguments (all need `-RecaptrUITesting YES`, which also keeps test names 
 | `-RecaptrUITestMeasureMonitorLag YES` | Log monitor ring stats and lag (Debug) |
 | `-RecaptrUITestStopBelowGB <n>`, `-RecaptrUITestDiskCheckSeconds <n>` | Test the low-disk stop |
 | `-RecaptrUITestStartBelowGB <n>` | Test the not-enough-space banner (Debug) |
+| `-RecaptrUITestShowWelcome YES`, `-RecaptrUITestShowWhatsNew YES` | Show the onboarding or What's new sheet (never marks them seen) |
 | `-RecaptrUITestNoDriftCorrection YES` | Measure drift without correcting |
 | `-RecaptrUITestMonitorTapPath YES` | Force the fallback monitor path |
 | `-RecaptrUITestStallMixer <s>` | Stall the mixer 6 s in |

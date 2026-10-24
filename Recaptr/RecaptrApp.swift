@@ -32,6 +32,9 @@ struct RecaptrApp: App {
             CommandGroup(after: .newItem) {
                 RecentRecordingsMenu(vm: vm, recent: vm.recentTakes)
             }
+            CommandGroup(replacing: .appInfo) {
+                AboutCommand()
+            }
             CommandMenu("Recording") {
                 RecordingCommands(vm: vm)
             }
@@ -65,6 +68,12 @@ struct RecaptrApp: App {
             }
             #endif
         }
+
+        Window("About Recaptr", id: AboutView.windowID) {
+            AboutView()
+        }
+        .windowResizability(.contentSize)
+        .windowStyle(.hiddenTitleBar)
 
         Settings {
             SettingsView()

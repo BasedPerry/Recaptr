@@ -122,8 +122,14 @@ final class MainViewModel: ObservableObject {
     static var isUITesting: Bool { TestHooks.isOn }
     /// How markers and blank episodes are named. Nil until the user picks.
     @Published var markerNaming: MarkerNaming? = MarkerNaming.stored() {
-        didSet { UserDefaults.standard.set(markerNaming?.rawValue, forKey: MarkerNaming.storageKey) }
+        didSet {
+            guard !Self.isUITesting else { return }
+            UserDefaults.standard.set(markerNaming?.rawValue, forKey: MarkerNaming.storageKey)
+        }
     }
+    /// First launch: no preview and no permission prompts until the
+    /// onboarding has explained them.
+    @Published var holdsForOnboarding = !UserDefaults.standard.bool(forKey: WelcomeSheet.seenKey) && !TestHooks.isOn
     /// The 1.0 on/off view of `markerNaming`, for the existing toggles.
     var aiNamingEnabled: Bool {
         get { (markerNaming ?? .appleIntelligence) == .appleIntelligence }
@@ -559,7 +565,7 @@ final class MainViewModel: ObservableObject {
                 }
             }
         }
-        Task { await self.requestAudioPermissionIfNeeded() }
+        if !holdsForOnboarding { Task { await self.requestAudioPermissionIfNeeded() } }
         globalHotKeys.onPress = { [weak self] action in self?.perform(action) }
         Self.current = self
         refreshGlobalHotKeys()
@@ -631,7 +637,7 @@ final class MainViewModel: ObservableObject {
         case .denied, .restricted:
             status = "Microphone permission denied — recordings will be silent. Open System Settings → Privacy & Security → Microphone to enable."
         case .notDetermined:
-            Task { await self.requestAudioPermissionIfNeeded() }
+            if !holdsForOnboarding { Task { await self.requestAudioPermissionIfNeeded() } }
         @unknown default:
             break
         }
@@ -1118,6 +1124,7 @@ final class MainViewModel: ObservableObject {
     // MARK: - Preview
 
     func startPreview() async {
+        guard !holdsForOnboarding else { return }
         isStartingPreview = true
         defer { isStartingPreview = false }
         stopPreview()

@@ -66,6 +66,15 @@ extension MainViewModel {
         selectedMainSource = catalog.videoSources.first(where: { $0.kind == mode.sourceKind })
     }
 
+    /// Onboarding is done: start the chosen source.
+    func finishOnboarding() {
+        holdsForOnboarding = false
+        let before = selectedMainSource
+        selectSource(startSource == .screen ? .screen : .camera)
+        // A new source starts its own preview through the window.
+        if selectedMainSource == before { Task { await startPreview() } }
+    }
+
     func toggleWindow() {
         let window = NSApp.windows.first { $0.canBecomeMain }
         if NSApp.isActive, window?.isVisible == true, window?.isMiniaturized == false {

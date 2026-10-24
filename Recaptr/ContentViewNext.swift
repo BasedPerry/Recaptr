@@ -422,9 +422,9 @@ struct ContentViewNext: View {
 
     private var noSourceHint: some View {
         VStack(spacing: 10) {
-            Image(systemName: "video.fill.badge.plus")
-                .font(.system(size: 36, weight: .regular))
-                .foregroundStyle(.tertiary)
+            Wordmark(height: 26)
+                .foregroundStyle(.secondary)
+                .padding(.bottom, 8)
             Text("Select a source to begin")
                 .font(BrandFont.body(weight: .medium, size: 15).swiftUI)
                 .foregroundStyle(.secondary)
@@ -706,6 +706,13 @@ struct RecaptrRootView: View {
     @EnvironmentObject var vm: MainViewModel
     @AppStorage("RecaptrSidebarVisible") private var sidebarVisible = false
     @AppStorage(WelcomeSheet.seenKey) private var welcomeSeen = false
+    @AppStorage(WhatsNewSheet.seenKey) private var whatsNewSeen = ""
+    /// `-RecaptrUITestShowWelcome YES` / `-RecaptrUITestShowWhatsNew YES` show
+    /// the sheets in UI tests, which otherwise skip them.
+    @State private var testSheet = TestHooks.isOn
+        ? (UserDefaults.standard.bool(forKey: "RecaptrUITestShowWelcome") ? "welcome"
+           : UserDefaults.standard.bool(forKey: "RecaptrUITestShowWhatsNew") ? "whatsNew" : "")
+        : ""
 
     var body: some View {
         NavigationSplitView(columnVisibility: Binding(
@@ -719,11 +726,21 @@ struct RecaptrRootView: View {
         }
         .navigationSplitViewStyle(.prominentDetail)
         .sheet(isPresented: Binding(
-            get: { !welcomeSeen && !TestHooks.isOn },
-            set: { if !$0 { welcomeSeen = true } }
+            get: { TestHooks.isOn ? testSheet == "welcome" : !welcomeSeen },
+            set: { if !$0 { if TestHooks.isOn { testSheet = "" } else { welcomeSeen = true } } }
         )) {
             WelcomeSheet()
                 .environmentObject(vm)
+        }
+        // Coming from 1.0: what changed, instead of the whole onboarding.
+        .background {
+            Color.clear.sheet(isPresented: Binding(
+                get: { TestHooks.isOn ? testSheet == "whatsNew" : (welcomeSeen && whatsNewSeen != WhatsNewSheet.version) },
+                set: { if !$0 { if TestHooks.isOn { testSheet = "" } else { whatsNewSeen = WhatsNewSheet.version } } }
+            )) {
+                WhatsNewSheet()
+                    .environmentObject(vm)
+            }
         }
         .onAppear {
             // UI tests start with the sidebar closed. Not a launch

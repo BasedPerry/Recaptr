@@ -28,7 +28,7 @@ nonisolated enum MarkerNaming: String, CaseIterable, Identifiable, Sendable {
     var detail: String {
         switch self {
         case .appleIntelligence: return "Named from the picture and what you said, after you stop. Runs on your Mac."
-        case .manual:            return "Numbered while you record. Type names when the take ends."
+        case .manual:            return "Type a name as you drop a marker with ⌘B, or when the take ends."
         case .numbered:          return "Marker 1, Marker 2, and so on. No AI runs."
         }
     }
