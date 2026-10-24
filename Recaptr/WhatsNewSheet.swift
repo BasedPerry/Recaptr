@@ -57,6 +57,7 @@ struct WhatsNewSheet: View {
                 vm.markerNaming = MarkerNamer.isAvailable ? .appleIntelligence : .numbered
             }
         }
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("whatsNewSheet")
     }
 

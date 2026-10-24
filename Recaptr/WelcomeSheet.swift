@@ -48,6 +48,7 @@ struct WelcomeSheet: View {
         .frame(width: 520)
         .fixedSize(horizontal: false, vertical: true)
         .animation(Motion.pick(Motion.snappy, reduceMotion: reduceMotion), value: step)
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("welcomeSheet")
     }
 
