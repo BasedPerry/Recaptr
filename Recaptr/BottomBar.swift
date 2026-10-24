@@ -300,7 +300,8 @@ private struct BarStatus: View {
         }
         .animation(Motion.pick(Motion.pop, reduceMotion: reduceMotion), value: markerCount)
         .padding(.trailing, 14)
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(accessibilityText)
         .accessibilityIdentifier("barStatus")
         .task(id: isRecording) {
             // Free space changes slowly; every 30 s is plenty.
@@ -311,5 +312,15 @@ private struct BarStatus: View {
         }
         .onChange(of: vm.videoQuality) { _, _ in diskTime = vm.diskTimeLeft() }
         .onChange(of: vm.activeCaptureSize?.width) { _, _ in diskTime = vm.diskTimeLeft() }
+    }
+
+    /// "Recording, 12 minutes 4 seconds, 1.6 GB, 3 markers" or the time left.
+    private var accessibilityText: String {
+        guard isRecording else { return diskTime?.label ?? "" }
+        let t = Int(clock.elapsed)
+        var parts = ["Recording", Duration.seconds(t).formatted(.units(allowed: [.hours, .minutes, .seconds], width: .wide))]
+        if clock.bytes > 0 { parts.append(ByteCountFormatter.string(fromByteCount: clock.bytes, countStyle: .file)) }
+        if markerCount > 0 { parts.append(markerCount == 1 ? "1 marker" : "\(markerCount) markers") }
+        return parts.joined(separator: ", ")
     }
 }
