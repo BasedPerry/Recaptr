@@ -13,7 +13,7 @@ Requires macOS 27 and Apple silicon. Open `Recaptr.xcodeproj` and run the `Recap
 | Audio | `AudioMixer`, `MonitorRing`, `PeakLimiter`, `LevelTracker` |
 | Writing | `Recorder`, `FinalCutMarkers`, `SessionNaming` |
 | Naming | `MarkerNamer`, `BrandVoice` |
-| UI | `ContentViewNext`, `SourceSidebar`, `SettingsView`, pills, `Glass`, `Brand`, `LevelMeter`, `CaptureOutline`, `GlobalHotKey` |
+| UI | `ContentViewNext`, `BottomBar`, `RecordingPill` (pill and edge tab), `AfterTakeCard`, `SourceSidebar`, `SettingsView`, `SelfCaptureHint`, `Glass`, `Brand`, `LevelMeter`, `CaptureOutline`, `GlobalHotKey` |
 
 ## Video
 
