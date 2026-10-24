@@ -30,6 +30,8 @@ struct ContentViewNext: View {
     @State private var tabDragY: CGFloat? = nil
     @State private var windowSize: CGSize = .zero
     @State private var windowDisplay: CGDirectDisplayID?
+    /// The marker whose title is being typed ("I'll name them").
+    @State private var titlingMarker: Int?
 
     @State private var screenshotFlashOpacity: Double = 0
     @State private var markerFlashOpacity: Double = 0
@@ -93,7 +95,10 @@ struct ContentViewNext: View {
         }
         .animation(Motion.pick(Motion.fade, reduceMotion: reduceMotion), value: vm.isRecording)
         .onChange(of: vm.markers.count) { old, new in
-            if new > old { triggerMarkerFlash() }
+            if new > old {
+                triggerMarkerFlash()
+                askForMarkerTitle(new - 1)
+            }
         }
         .frame(minWidth: 980, minHeight: 620)
         .onGeometryChange(for: CGSize.self) { $0.size } action: { windowSize = $0 }
@@ -115,6 +120,7 @@ struct ContentViewNext: View {
             windowDisplay = SelfCapture.windowDisplay
         }
         .onChange(of: vm.isRecording) { _, recording in
+            if !recording { titlingMarker = nil }
             SelfCapture.follow(isRecording: recording, source: vm.selectedMainSource)
         }
         .onChange(of: vm.requestedMode) { _, request in
@@ -219,6 +225,16 @@ struct ContentViewNext: View {
     /// glass flows into the recording pill.
     private var bottomGlass: some View {
         VStack(spacing: 12) {
+            if vm.isRecording, let index = titlingMarker {
+                MarkerTitleField(number: index + 1, title: markerTitleBinding(index),
+                                 onDone: { withAnimation(chromeAnimation) { titlingMarker = nil } },
+                                 onSkip: {
+                                     vm.markerTitles[index] = nil
+                                     withAnimation(chromeAnimation) { titlingMarker = nil }
+                                 })
+                    .id(index)
+                    .transition(reduceMotion ? .opacity : .move(edge: .bottom).combined(with: .opacity))
+            }
             if chromeShown, !vm.isRecording, vm.presentedTake == nil, capturesOwnScreen {
                 SelfCaptureHint()
                     .transition(.opacity)
@@ -329,6 +345,20 @@ struct ContentViewNext: View {
 
     private func setTuck(_ side: PillTuck) {
         withAnimation(chromeAnimation) { tuck = side }
+    }
+
+    /// In "I'll name them", a marker dropped while Recaptr is the active
+    /// app opens a title field. Never from inside another app.
+    private func askForMarkerTitle(_ index: Int) {
+        guard vm.markerNaming == .manual, NSApp.isActive,
+              SelfCapture.mainWindow?.isKeyWindow == true else { return }
+        withAnimation(chromeAnimation) { titlingMarker = index }
+    }
+
+    /// Typed straight into the view model, so stopping mid-word keeps it.
+    private func markerTitleBinding(_ index: Int) -> Binding<String> {
+        Binding(get: { vm.markerTitles[index] ?? "" },
+                set: { vm.markerTitles[index] = $0 })
     }
 
     /// Capturing the display this window is on.

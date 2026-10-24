@@ -296,6 +296,65 @@ final class RecaptrRecordingSmokeTests: XCTestCase {
         window.typeKey("r", modifierFlags: .command)
     }
 
+    /// "I'll name them": ⌘B in the window opens a title field; the typed
+    /// title becomes the marker's name in the saved take.
+    @MainActor
+    func testTitleMarkerAsItDrops() throws {
+        let app = XCUIApplication()
+        app.launchArguments += ["-ApplePersistenceIgnoreState", "YES", "-RecaptrUITesting", "YES",
+                                "-RecaptrKeepChromeVisible", "YES", "-RecaptrVideoQuality", "standard",
+                                "-RecaptrMarkerNaming", "manual",
+                                "-RecaptrUITestSeries", "UITest Series", "-RecaptrUITestEpisode", "Titled"]
+        app.launch()
+        let window = app.windows.firstMatch
+        XCTAssertTrue(window.waitForExistence(timeout: 10))
+        window.typeKey("3", modifierFlags: .command)
+        let record = app.buttons["recordButton"]
+        guard waitUntil(timeout: 8, { record.isEnabled }) else { throw XCTSkip("No capture card") }
+        Thread.sleep(forTimeInterval: 3)
+        window.typeKey("r", modifierFlags: .command)
+        Thread.sleep(forTimeInterval: 2)
+        window.typeKey("b", modifierFlags: .command)
+
+        let field = app.textFields["markerTitleField"]
+        XCTAssertTrue(field.waitForExistence(timeout: 3), "No title field after ⌘B")
+        field.typeText("Boss fight\r")
+        XCTAssertTrue(waitUntil(timeout: 3, { !field.exists }), "Return didn't close the field")
+        Thread.sleep(forTimeInterval: 2)
+        window.typeKey("r", modifierFlags: .command)
+
+        // The card opens ready to edit in this mode, with the title filled in.
+        let first = app.textFields["afterTakeMarker0"]
+        XCTAssertTrue(first.waitForExistence(timeout: 20), "No after-take card with the marker")
+        XCTAssertEqual(first.value as? String, "Boss fight")
+    }
+
+    /// A take that can't start shows a banner with what to do and a fix
+    /// button, and records nothing.
+    @MainActor
+    func testNotEnoughSpaceBanner() throws {
+        let app = XCUIApplication()
+        app.launchArguments += ["-ApplePersistenceIgnoreState", "YES", "-RecaptrUITesting", "YES",
+                                "-RecaptrKeepChromeVisible", "YES", "-RecaptrUITestStartBelowGB", "1000000"]
+        app.launch()
+        let window = app.windows.firstMatch
+        XCTAssertTrue(window.waitForExistence(timeout: 10))
+        window.typeKey("3", modifierFlags: .command)
+        let record = app.buttons["recordButton"]
+        guard waitUntil(timeout: 8, { record.isEnabled }) else { throw XCTSkip("No capture card") }
+        window.typeKey("r", modifierFlags: .command)
+
+        let banner = app.descendants(matching: .any)["noticeBanner"].firstMatch
+        XCTAssertTrue(banner.waitForExistence(timeout: 5), "No banner when the take can't start")
+        let message = app.staticTexts.containing(NSPredicate(format: "value CONTAINS %@ OR label CONTAINS %@",
+                                                             "isn't enough space", "isn't enough space")).firstMatch
+        XCTAssertTrue(message.exists, "Banner doesn't say why")
+        XCTAssertEqual(app.buttons["noticeFix"].label, "Choose Folder")
+        XCTAssertEqual(record.label, "Start Recording", "A take started anyway")
+        app.buttons["noticeClose"].click()
+        XCTAssertTrue(waitUntil(timeout: 3, { !banner.exists }), "Close didn't dismiss the banner")
+    }
+
     private func attachScreenshot(_ app: XCUIApplication, _ name: String) {
         let shot = XCTAttachment(screenshot: app.windows.firstMatch.screenshot())
         shot.name = name

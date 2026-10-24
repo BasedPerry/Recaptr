@@ -77,6 +77,7 @@ Launch arguments (all need `-RecaptrUITesting YES`, which also keeps test names 
 | `-RecaptrUITestProbeLatest YES` | Probe the newest .mov and quit (Debug) |
 | `-RecaptrUITestMeasureMonitorLag YES` | Log monitor ring stats and lag (Debug) |
 | `-RecaptrUITestStopBelowGB <n>`, `-RecaptrUITestDiskCheckSeconds <n>` | Test the low-disk stop |
+| `-RecaptrUITestStartBelowGB <n>` | Test the not-enough-space banner (Debug) |
 | `-RecaptrUITestNoDriftCorrection YES` | Measure drift without correcting |
 | `-RecaptrUITestMonitorTapPath YES` | Force the fallback monitor path |
 | `-RecaptrUITestStallMixer <s>` | Stall the mixer 6 s in |

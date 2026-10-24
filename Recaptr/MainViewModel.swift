@@ -339,6 +339,8 @@ final class MainViewModel: ObservableObject {
 
     /// Marker times in seconds. Cleared when a recording starts.
     @Published var markers: [TimeInterval] = []
+    /// Titles typed as markers dropped ("I'll name them"), by marker index.
+    @Published var markerTitles: [Int: String] = [:]
     static let markerDebounce: TimeInterval = 1
     private static let markerSound: NSSound? = {
         let sound = NSSound(named: "Tink")
@@ -1409,6 +1411,7 @@ final class MainViewModel: ObservableObject {
         }
 
         markers = []
+        markerTitles = [:]
 
         // Screen sources record the SCStream audio; cameras use the mixer,
         // already running from preview.
@@ -1427,7 +1430,7 @@ final class MainViewModel: ObservableObject {
 
         // Refuse to start under 2 GB free (4K60 runs about 400 MB/min) rather
         // than fail minutes in.
-        let minFreeBytes: Int64 = 2_000_000_000
+        let minFreeBytes = Self.startBelowBytes
         do {
             let values = try saveDir.resourceValues(
                 forKeys: [.volumeAvailableCapacityForImportantUsageKey]
@@ -1535,12 +1538,15 @@ final class MainViewModel: ObservableObject {
         // name and file it.
         if let url {
             let markerSeconds = recorder.lastMarkerSeconds
+            // Typed titles follow marker order; only trusted when every marker made it to the file.
+            let titles = markerSeconds.count == markers.count ? markerTitles : [:]
             let series = SessionNaming.sanitize(seriesName)
             let episode = episodeName
             episodeName = ""
             queueFinalize {
                 await self.probeRecordedFile(url)
-                await self.finalizeRecording(url, markerSeconds: markerSeconds, series: series, typedEpisode: episode)
+                await self.finalizeRecording(url, markerSeconds: markerSeconds, series: series, typedEpisode: episode,
+                                             typedTitles: titles)
             }
         } else if let takeURL, let takeJournal {
             // The writer failed mid-take. What was written is readable (the
@@ -1572,7 +1578,8 @@ final class MainViewModel: ObservableObject {
     /// the file into its series folder as "Series – Episode", and write
     /// the Final Cut file with the marker names and the series as its
     /// event.
-    private func finalizeRecording(_ url: URL, markerSeconds: [Double], series typedSeries: String, typedEpisode: String) async {
+    private func finalizeRecording(_ url: URL, markerSeconds: [Double], series typedSeries: String, typedEpisode: String,
+                                   typedTitles: [Int: String] = [:]) async {
         let series = typedSeries.isEmpty ? typedSeries : Self.existingSeriesSpelling(typedSeries, in: url.deletingLastPathComponent())
         let useAI = MarkerNaming.usesAI(markerNaming, available: MarkerNamer.isAvailable)
         var labels: [String?] = markerSeconds.map { _ in nil }
@@ -1580,6 +1587,12 @@ final class MainViewModel: ObservableObject {
             status += "\nNaming \(markerSeconds.count) marker\(markerSeconds.count == 1 ? "" : "s")…"
             labels = await MarkerNamer.labels(for: url, markerSeconds: markerSeconds,
                                               series: series.isEmpty ? nil : series)
+        }
+
+        // A title typed as the marker dropped wins over a generated one.
+        for (index, title) in typedTitles where index < labels.count {
+            let clean = title.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !clean.isEmpty { labels[index] = clean }
         }
 
         var finalURL = url
@@ -2084,6 +2097,15 @@ final class MainViewModel: ObservableObject {
         if isUITesting, override > 0 { return Int64(override * 1e9) }
         #endif
         return 1_000_000_000
+    }
+    /// Free space needed to start a take.
+    static var startBelowBytes: Int64 {
+        // -RecaptrUITestStartBelowGB <n>: raise the threshold so tests can see the banner.
+        #if DEBUG
+        let override = UserDefaults.standard.double(forKey: "RecaptrUITestStartBelowGB")
+        if isUITesting, override > 0 { return Int64(override * 1e9) }
+        #endif
+        return 2_000_000_000
     }
     static let warnBelowBytes: Int64 = 5_000_000_000
     private var lastDiskCheck = Date.distantPast
