@@ -1600,11 +1600,18 @@ final class MainViewModel: ObservableObject {
     /// filed one at a time and quitting waits for all of it.
     private func queueFinalize(_ work: @escaping @MainActor () async -> Void) {
         let previous = finalizeTask
+        pendingFinalizes += 1
         finalizeTask = Task {
             await previous?.value
             await work()
+            pendingFinalizes -= 1
         }
     }
+
+    /// Takes still being named and filed. Quit only waits while this is
+    /// above zero: waiting on a finished task from inside a quit that was
+    /// itself started on the main actor never returns.
+    private var pendingFinalizes = 0
 
     /// Name markers (and a blank episode) with Apple Intelligence, move
     /// the file into its series folder as "Series – Episode", and write
@@ -1708,7 +1715,7 @@ final class MainViewModel: ObservableObject {
             }
             return .terminateLater
         }
-        if stopTask != nil || finalizeTask != nil {
+        if stopTask != nil || pendingFinalizes > 0 {
             Task {
                 await stopRecording()
                 await finalizeTask?.value
