@@ -1651,7 +1651,8 @@ final class MainViewModel: ObservableObject {
         }
         await writeFinalCutMarkers(for: finalURL, markers: markers, eventName: series.isEmpty ? nil : series)
         lastTake = Take(url: finalURL, series: series, markers: markers.map { .init(title: $0.title, seconds: $0.seconds) })
-        if let lastTake { recentTakes.add(lastTake.url) }
+        // `url` is still the raw take in the save folder it was recorded into.
+        if let lastTake { recentTakes.add(lastTake.url, root: url.deletingLastPathComponent()) }
         // The after-take card, unless the next take already started.
         if !isRecording { presentedTake = lastTake }
         TakeJournal.remove(for: url)
