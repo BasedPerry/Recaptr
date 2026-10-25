@@ -355,6 +355,56 @@ final class RecaptrRecordingSmokeTests: XCTestCase {
         XCTAssertTrue(waitUntil(timeout: 3, { !banner.exists }), "Close didn't dismiss the banner")
     }
 
+    /// Switching the after-take card from a take with markers to one with
+    /// fewer, while its name fields are showing ("I'll name them"), used to
+    /// crash on an out-of-range marker title.
+    @MainActor
+    func testSwitchingCardToTakeWithFewerMarkers() throws {
+        let app = XCUIApplication()
+        app.launchArguments += ["-ApplePersistenceIgnoreState", "YES", "-RecaptrUITesting", "YES",
+                                "-RecaptrKeepChromeVisible", "YES", "-RecaptrVideoQuality", "standard",
+                                "-RecaptrCaptureResolution", "fhd", "-RecaptrMarkerNaming", "manual",
+                                "-RecaptrUITestSeries", "UITest Cards"]
+        app.launch()
+        let window = app.windows.firstMatch
+        XCTAssertTrue(window.waitForExistence(timeout: 10))
+        window.typeKey("3", modifierFlags: .command)
+        let record = app.buttons["recordButton"]
+        guard waitUntil(timeout: 8, { record.isEnabled }) else { throw XCTSkip("No capture card") }
+        Thread.sleep(forTimeInterval: 3)
+
+        // Older take: no markers.
+        window.typeKey("r", modifierFlags: .command)
+        Thread.sleep(forTimeInterval: 3)
+        window.typeKey("r", modifierFlags: .command)
+        let card = app.descendants(matching: .any)["afterTakeCard"].firstMatch
+        XCTAssertTrue(card.waitForExistence(timeout: 20), "No card for the older take")
+
+        // Newest take: two markers, dropped from the menu so no title field
+        // opens mid-take. Its card opens with a name field per marker.
+        window.typeKey("r", modifierFlags: .command)
+        for _ in 0..<2 {
+            Thread.sleep(forTimeInterval: 2)
+            app.menuBars.menuBarItems["Recording"].click()
+            app.menuBars.menuItems["Drop Marker"].click()
+        }
+        Thread.sleep(forTimeInterval: 2)
+        window.typeKey("r", modifierFlags: .command)
+        XCTAssertTrue(app.textFields["afterTakeMarker1"].waitForExistence(timeout: 20),
+                      "The newest take's card didn't open with its name fields")
+
+        // With those fields showing, open the older take (second in the list).
+        app.menuBars.menuBarItems["File"].click()
+        app.menuBars.menuItems["Recent Recordings"].click()
+        let entries = app.menuBars.menuItems.matching(NSPredicate(format: "title BEGINSWITH %@", "UITest Cards"))
+        XCTAssertGreaterThan(entries.count, 1, "Recent Recordings is missing the older take")
+        entries.element(boundBy: 1).click()
+        Thread.sleep(forTimeInterval: 1.5)
+        XCTAssertEqual(app.state, .runningForeground, "Recaptr quit opening the older take")
+        XCTAssertTrue(card.exists, "Card gone after switching takes")
+        XCTAssertFalse(app.textFields["afterTakeMarker1"].exists, "Take A's second field is still showing on take B")
+    }
+
     private func attachScreenshot(_ app: XCUIApplication, _ name: String) {
         let shot = XCTAttachment(screenshot: app.windows.firstMatch.screenshot())
         shot.name = name

@@ -170,7 +170,7 @@ struct AfterTakeCard: View {
             }
 
             if isEditing, index < titles.count {
-                TextField("Marker \(index + 1)", text: $titles[index])
+                TextField("Marker \(index + 1)", text: title(at: index))
                     .textFieldStyle(.roundedBorder)
                     .focused($focusedMarker, equals: index)
                     .onSubmit {
@@ -251,6 +251,13 @@ struct AfterTakeCard: View {
             // After the fields exist.
             DispatchQueue.main.async { focusedMarker = focus }
         }
+    }
+
+    /// Bounds-checked, because a field can outlive a shorter titles array
+    /// for one update when the card switches takes.
+    private func title(at index: Int) -> Binding<String> {
+        Binding(get: { index < titles.count ? titles[index] : "" },
+                set: { if index < titles.count { titles[index] = $0 } })
     }
 
     private func resetFields() {
