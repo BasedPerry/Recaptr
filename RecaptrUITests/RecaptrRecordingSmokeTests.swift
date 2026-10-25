@@ -487,9 +487,13 @@ final class RecaptrRecordingSmokeTests: XCTestCase {
         if let extra = ProcessInfo.processInfo.environment["RECAPTR_EXTRA_ARGS"] {
             app.launchArguments += extra.split(separator: " ").map(String.init)
         }
-        // Don't inherit the user's saved quality.
+        // Don't inherit the user's saved quality or marker naming (in "I'll
+        // name them" the card opens ready to edit, without its buttons).
         if !app.launchArguments.contains("-RecaptrVideoQuality") {
             app.launchArguments += ["-RecaptrVideoQuality", "standard"]
+        }
+        if !app.launchArguments.contains("-RecaptrMarkerNaming") {
+            app.launchArguments += ["-RecaptrMarkerNaming", "numbered"]
         }
         app.launch()
         let window = app.windows.firstMatch
