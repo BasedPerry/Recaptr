@@ -716,6 +716,7 @@ struct ContentViewNext: View {
 /// capture surface.
 struct RecaptrRootView: View {
     @EnvironmentObject var vm: MainViewModel
+    @Environment(\.openWindow) private var openWindow
     @AppStorage("RecaptrSidebarVisible") private var sidebarVisible = false
     @AppStorage(WelcomeSheet.seenKey) private var welcomeSeen = false
     @AppStorage(WhatsNewSheet.seenKey) private var whatsNewSeen = ""
@@ -769,6 +770,8 @@ struct RecaptrRootView: View {
             if TestHooks.isOn {
                 sidebarVisible = false
             }
+            let open = openWindow
+            vm.openMainWindow = { open(id: MainViewModel.mainWindowID) }
         }
     }
 }

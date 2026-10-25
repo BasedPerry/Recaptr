@@ -129,6 +129,10 @@ final class MainViewModel: ObservableObject {
     }
     /// First launch: no preview and no permission prompts until the
     /// onboarding has explained them.
+    /// Opens the capture window. Set by the window's root view, which has
+    /// SwiftUI's openWindow; used when the window was closed mid-take.
+    var openMainWindow: (() -> Void)?
+
     @Published var holdsForOnboarding = !UserDefaults.standard.bool(forKey: WelcomeSheet.seenKey) && !TestHooks.isOn
     /// The 1.0 on/off view of `markerNaming`, for the existing toggles.
     var aiNamingEnabled: Bool {
@@ -1534,6 +1538,8 @@ final class MainViewModel: ObservableObject {
         let url = await recorder.stop()
         isRecording = false
         refreshGlobalHotKeys()
+        // The window was closed mid-take: bring it back for the after-take card.
+        if Self.mainWindow == nil { bringForward() }
         captureOutline.setRecording(false)
         if let activity = recordingActivity {
             ProcessInfo.processInfo.endActivity(activity)

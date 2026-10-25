@@ -15,7 +15,7 @@ enum SelfCapture {
     static let hideKey = "RecaptrHideWhileRecording"
 
     static var mainWindow: NSWindow? {
-        NSApp.windows.first { $0.canBecomeMain }
+        MainViewModel.mainWindow
     }
 
     /// The display Recaptr's main window is on.

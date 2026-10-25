@@ -78,7 +78,7 @@ extension MainViewModel {
     }
 
     func toggleWindow() {
-        let window = NSApp.windows.first { $0.canBecomeMain }
+        let window = Self.mainWindow
         if NSApp.isActive, window?.isVisible == true, window?.isMiniaturized == false {
             NSApp.hide(nil)
         } else {
@@ -106,10 +106,20 @@ extension MainViewModel {
     func bringForward() {
         NSApp.unhide(nil)
         NSApp.activate()
-        if let window = NSApp.windows.first(where: { $0.canBecomeMain }) {
+        if let window = Self.mainWindow {
             if window.isMiniaturized { window.deminiaturize(nil) }
             window.makeKeyAndOrderFront(nil)
+        } else {
+            // Closed mid-take: open it again.
+            openMainWindow?()
         }
+    }
+
+    static let mainWindowID = "main"
+
+    /// The capture window, not About or Settings.
+    static var mainWindow: NSWindow? {
+        NSApp.windows.first { $0.identifier?.rawValue.hasPrefix(mainWindowID) == true }
     }
 
     // MARK: - Global keys

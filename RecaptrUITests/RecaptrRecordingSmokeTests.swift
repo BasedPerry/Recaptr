@@ -405,6 +405,54 @@ final class RecaptrRecordingSmokeTests: XCTestCase {
         XCTAssertFalse(app.textFields["afterTakeMarker1"].exists, "Take A's second field is still showing on take B")
     }
 
+    /// Closing the window when not recording quits, so the capture card
+    /// isn't held with nothing on screen.
+    @MainActor
+    func testClosingWindowQuits() throws {
+        let app = XCUIApplication()
+        app.launchArguments += ["-ApplePersistenceIgnoreState", "YES", "-RecaptrUITesting", "YES",
+                                "-RecaptrKeepChromeVisible", "YES"]
+        app.launch()
+        let window = app.windows.firstMatch
+        XCTAssertTrue(window.waitForExistence(timeout: 10))
+        Thread.sleep(forTimeInterval: 3)
+        window.buttons[XCUIIdentifierCloseWindow].click()
+        XCTAssertTrue(app.wait(for: .notRunning, timeout: 15), "Recaptr kept running after its window closed")
+    }
+
+    /// Closing the window mid-take keeps the take going; stopping it brings
+    /// the window back with the after-take card.
+    @MainActor
+    func testClosingWindowMidTakeKeepsRecording() throws {
+        let app = XCUIApplication()
+        app.launchArguments += ["-ApplePersistenceIgnoreState", "YES", "-RecaptrUITesting", "YES",
+                                "-RecaptrKeepChromeVisible", "YES", "-RecaptrVideoQuality", "standard",
+                                "-RecaptrCaptureResolution", "fhd"]
+        app.launch()
+        let window = app.windows.firstMatch
+        XCTAssertTrue(window.waitForExistence(timeout: 10))
+        window.typeKey("3", modifierFlags: .command)
+        let record = app.buttons["recordButton"]
+        guard waitUntil(timeout: 8, { record.isEnabled }) else { throw XCTSkip("No capture card") }
+        Thread.sleep(forTimeInterval: 3)
+        window.typeKey("r", modifierFlags: .command)
+        Thread.sleep(forTimeInterval: 3)
+
+        window.buttons[XCUIIdentifierCloseWindow].click()
+        Thread.sleep(forTimeInterval: 4)
+        XCTAssertEqual(app.state, .runningForeground, "Closing the window mid-take quit Recaptr")
+        XCTAssertEqual(app.menuBars.menuItems["Stop Recording"].exists, true, "The take didn't keep going")
+
+        app.menuBars.menuBarItems["Recording"].click()
+        app.menuBars.menuItems["Stop Recording"].click()
+        let card = app.descendants(matching: .any)["afterTakeCard"].firstMatch
+        XCTAssertTrue(card.waitForExistence(timeout: 20), "The window didn't come back with the card")
+        let probe = app.staticTexts["lastProbe"]
+        XCTAssertTrue(waitUntil(timeout: 20, { self.text(of: probe).hasPrefix("Probe →") }))
+        let seconds = number(in: text(of: probe), after: "Probe → ", until: "s") ?? 0
+        XCTAssertGreaterThan(seconds, 6, "The take stopped when the window closed: \(text(of: probe))")
+    }
+
     private func attachScreenshot(_ app: XCUIApplication, _ name: String) {
         let shot = XCTAttachment(screenshot: app.windows.firstMatch.screenshot())
         shot.name = name

@@ -17,7 +17,7 @@ struct RecaptrApp: App {
     #endif
 
     var body: some Scene {
-        WindowGroup {
+        WindowGroup(id: MainViewModel.mainWindowID) {
             RecaptrRootView()
                 .environmentObject(vm)
                 .onAppear { appDelegate.viewModel = vm }
@@ -99,6 +99,13 @@ struct RecaptrApp: App {
 /// Lets the view model stop and save a take before the app quits.
 final class AppDelegate: NSObject, NSApplicationDelegate {
     weak var viewModel: MainViewModel?
+
+    /// Closing the window quits, so the capture card isn't held with
+    /// nothing on screen. Mid-take the take keeps going; stopping it brings
+    /// the window back.
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        !(viewModel?.isRecording ?? false)
+    }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         viewModel?.replyToQuit() ?? .terminateNow
