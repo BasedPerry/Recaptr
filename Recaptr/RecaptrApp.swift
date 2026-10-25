@@ -99,15 +99,43 @@ struct RecaptrApp: App {
 /// Lets the view model stop and save a take before the app quits.
 final class AppDelegate: NSObject, NSApplicationDelegate {
     weak var viewModel: MainViewModel?
+    private var windowCloseObserver: NSObjectProtocol?
+    /// A quit is under way; windows closing during it don't start another.
+    private var quitStarted = false
 
-    /// Closing the window quits, so the capture card isn't held with
-    /// nothing on screen. Mid-take the take keeps going; stopping it brings
-    /// the window back.
+    /// Closing the capture window quits, even with Settings or About open,
+    /// so the capture card isn't held with nothing on screen. Mid-take the
+    /// take keeps going; stopping it brings the window back.
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        windowCloseObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification, object: nil, queue: .main
+        ) { [weak self] note in
+            guard let self, let window = note.object as? NSWindow,
+                  window.identifier?.rawValue.hasPrefix(MainViewModel.mainWindowID) == true else { return }
+            MainActor.assumeIsolated {
+                guard !self.quitStarted, !(self.viewModel?.isRecording ?? false) else { return }
+                // After the close finishes.
+                DispatchQueue.main.async { NSApp.terminate(nil) }
+            }
+        }
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         !(viewModel?.isRecording ?? false)
     }
 
+    /// A Dock click brings the capture window back if it was closed mid-take.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if MainViewModel.mainWindow == nil {
+            viewModel?.openMainWindow?()
+            return false
+        }
+        return true
+    }
+
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        viewModel?.replyToQuit() ?? .terminateNow
+        let reply = viewModel?.replyToQuit() ?? .terminateNow
+        quitStarted = reply != .terminateCancel
+        return reply
     }
 }

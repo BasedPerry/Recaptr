@@ -420,6 +420,22 @@ final class RecaptrRecordingSmokeTests: XCTestCase {
         XCTAssertTrue(app.wait(for: .notRunning, timeout: 15), "Recaptr kept running after its window closed")
     }
 
+    /// Closing the capture window quits even with Settings still open.
+    @MainActor
+    func testClosingWindowWithSettingsOpenQuits() throws {
+        let app = XCUIApplication()
+        app.launchArguments += ["-ApplePersistenceIgnoreState", "YES", "-RecaptrUITesting", "YES",
+                                "-RecaptrKeepChromeVisible", "YES"]
+        app.launch()
+        let window = app.windows.matching(NSPredicate(format: "identifier BEGINSWITH 'main'")).firstMatch
+        XCTAssertTrue(window.waitForExistence(timeout: 10))
+        Thread.sleep(forTimeInterval: 2)
+        app.typeKey(",", modifierFlags: .command)
+        XCTAssertTrue(waitUntil(timeout: 5, { app.windows.count >= 2 }), "Settings didn't open")
+        window.buttons[XCUIIdentifierCloseWindow].click()
+        XCTAssertTrue(app.wait(for: .notRunning, timeout: 15), "Recaptr kept running with only Settings open")
+    }
+
     /// Closing the window mid-take keeps the take going; stopping it brings
     /// the window back with the after-take card.
     @MainActor

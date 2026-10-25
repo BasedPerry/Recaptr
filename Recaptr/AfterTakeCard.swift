@@ -23,6 +23,7 @@ struct AfterTakeCard: View {
     @State private var thumbnails: [Int: CGImage] = [:]
 
     @State private var isEditing = false
+    @State private var renaming = false
     @State private var series = ""
     @State private var episode = ""
     @State private var titles: [String] = []
@@ -65,7 +66,21 @@ struct AfterTakeCard: View {
                 startEditing(focus: 0)
             }
         }
-        .onChange(of: take) { _, _ in resetFields() }
+        .onChange(of: take) { _, _ in
+            // A rename from this card keeps its state; a different take
+            // (Recent Recordings, Open Last Take) starts clean like a new card.
+            guard !renaming else { resetFields(); return }
+            isEditing = false
+            error = nil
+            focusedMarker = nil
+            thumbnails = [:]
+            duration = nil
+            fileSize = nil
+            resetFields()
+            if vm.markerNaming == .manual, !take.markers.isEmpty {
+                startEditing(focus: 0)
+            }
+        }
     }
 
     // MARK: Header
@@ -268,7 +283,9 @@ struct AfterTakeCard: View {
 
     private func save() {
         guard isEditing else { return }
+        renaming = true
         Task {
+            defer { renaming = false }
             do {
                 let saved = try await vm.renameTake(take, series: series, episode: episode, markerTitles: titles)
                 vm.presentedTake = saved

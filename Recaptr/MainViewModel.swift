@@ -1538,8 +1538,10 @@ final class MainViewModel: ObservableObject {
         let url = await recorder.stop()
         isRecording = false
         refreshGlobalHotKeys()
-        // The window was closed mid-take: bring it back for the after-take card.
-        if Self.mainWindow == nil { bringForward() }
+        // The window was closed mid-take: bring it back for the after-take
+        // card, without pulling Recaptr in front of the game, and not when
+        // the take ended because Recaptr is quitting.
+        if Self.mainWindow == nil, !isQuitting { openMainWindow?() }
         captureOutline.setRecording(false)
         if let activity = recordingActivity {
             ProcessInfo.processInfo.endActivity(activity)
@@ -1705,23 +1707,18 @@ final class MainViewModel: ObservableObject {
     /// Quitting mid-take asks first, then stops and saves the take the
     /// normal way. Quitting while a take is still being named waits for it.
     func replyToQuit() -> NSApplication.TerminateReply {
-        if isRecording {
-            if !Self.isUITesting {
-                let alert = NSAlert()
-                alert.messageText = "Recaptr is still recording."
-                alert.informativeText = "Stop and save the take, then quit?"
-                alert.addButton(withTitle: "Stop and Quit")
-                alert.addButton(withTitle: "Keep Recording")
-                guard alert.runModal() == .alertFirstButtonReturn else { return .terminateCancel }
-            }
-            Task {
-                await stopRecording()
-                await finalizeTask?.value
-                NSApp.reply(toApplicationShouldTerminate: true)
-            }
-            return .terminateLater
+        // A stop already under way just gets waited for: asking "still
+        // recording?" then would offer a Keep Recording that can't keep it.
+        if isRecording, stopTask == nil, !Self.isUITesting {
+            let alert = NSAlert()
+            alert.messageText = "Recaptr is still recording."
+            alert.informativeText = "Stop and save the take, then quit?"
+            alert.addButton(withTitle: "Stop and Quit")
+            alert.addButton(withTitle: "Keep Recording")
+            guard alert.runModal() == .alertFirstButtonReturn else { return .terminateCancel }
         }
-        if stopTask != nil || pendingFinalizes > 0 {
+        if isRecording || stopTask != nil || pendingFinalizes > 0 {
+            isQuitting = true
             Task {
                 await stopRecording()
                 await finalizeTask?.value
@@ -1731,6 +1728,10 @@ final class MainViewModel: ObservableObject {
         }
         return .terminateNow
     }
+
+    /// Set once a quit is confirmed, so a take ending on the way out doesn't
+    /// open the window again.
+    private(set) var isQuitting = false
 
     /// Rename any take's series, episode and markers: moves the .mov (and
     /// replaces its .fcpxml) to the new name, in its series folder when the

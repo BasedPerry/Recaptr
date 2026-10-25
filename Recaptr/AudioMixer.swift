@@ -1063,6 +1063,7 @@ final class AudioMixer: @unchecked Sendable {
         var anyStarted = false
         for ch in channels where ch.isArmed {
             do {
+                lastStartedAt[ObjectIdentifier(ch)] = Date()
                 try ch.start()
                 anyStarted = true
                 ch.startMonitorIfNeeded()
@@ -1210,6 +1211,7 @@ final class AudioMixer: @unchecked Sendable {
             onChannelEvent?("\(ch.label) audio keeps dropping out. Recaptr will keep retrying; check the device.")
         }
         print("AudioMixer: recovering '\(ch.label)' (\(reason), attempt \(failures))")
+        lastStartedAt[id] = Date()
         ch.stop()
         do {
             try ch.start()
@@ -1232,6 +1234,13 @@ final class AudioMixer: @unchecked Sendable {
     /// the runtime watchdog. Main queue.
     private let outputSettleCheck: TimeInterval = 0.35
     private var pendingOutputCheck = false
+    /// When each channel last started or restarted. A channel within
+    /// `restartGrace` of that is still coming up: checking it would restart
+    /// it again, and its own restart notices would loop.
+    private var lastStartedAt: [ObjectIdentifier: Date] = [:]
+    private let restartGrace: TimeInterval = 1.0
+    /// Bumped on stop() so a check from an earlier session never runs.
+    private var outputCheckSession = 0
     private var defaultOutputListener: AudioObjectPropertyListenerBlock?
     private var outputRateListener: AudioObjectPropertyListenerBlock?
     private var outputRateDevice: AudioObjectID = 0
@@ -1239,13 +1248,20 @@ final class AudioMixer: @unchecked Sendable {
     func outputDidChange() {
         guard running, !pendingOutputCheck else { return }
         pendingOutputCheck = true
-        let before = channels.filter { $0.isArmed && !$0.isExternal && $0.running }
+        let session = outputCheckSession
+        let now = Date()
+        let settled = { (ch: AudioInputChannel) -> Bool in
+            now.timeIntervalSince(self.lastStartedAt[ObjectIdentifier(ch)] ?? .distantPast) >= self.restartGrace
+        }
+        let before = channels.filter { $0.isArmed && !$0.isExternal && $0.running && settled($0) }
             .map { (channel: $0, frames: $0.pushedFrameCount) }
         DispatchQueue.main.asyncAfter(deadline: .now() + outputSettleCheck) { [weak self] in
-            guard let self else { return }
+            guard let self, session == self.outputCheckSession else { return }
             self.pendingOutputCheck = false
             guard self.running else { return }
             for item in before where item.channel.pushedFrameCount == item.frames {
+                // Restarted while this check waited (a hardware-change notice).
+                if (self.lastStartedAt[ObjectIdentifier(item.channel)] ?? .distantPast) > now { continue }
                 // The watchdog would otherwise count this stall again.
                 self.lastPushed[ObjectIdentifier(item.channel)] = nil
                 self.recover(item.channel, reason: "output changed")
@@ -1332,6 +1348,7 @@ final class AudioMixer: @unchecked Sendable {
                 continue
             }
             print("AudioMixer: watchdog restarting silent channel '\(ch.label)' (attempt \(attempt))")
+            lastStartedAt[ObjectIdentifier(ch)] = Date()
             ch.stop()
             do {
                 try ch.start()
@@ -1352,6 +1369,8 @@ final class AudioMixer: @unchecked Sendable {
         runtimeWatchdog?.cancel()
         runtimeWatchdog = nil
         stopListeningForOutputChanges()
+        outputCheckSession += 1
+        pendingOutputCheck = false
         for ch in channels { ch.stop() }
         running = false
         startClockTime = .invalid  // reset for the next start()
