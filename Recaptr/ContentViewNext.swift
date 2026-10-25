@@ -144,7 +144,8 @@ struct ContentViewNext: View {
             vm.autoSelectAudioForCurrentSource()
             // Restart unconditionally. Guarding on `isPreviewing` leaves
             // the old source on screen; startPreview() stops first itself.
-            if new != nil {
+            // Never mid-take: a restart would end the recording.
+            if new != nil, !vm.isRecording {
                 Task { await vm.startPreview() }
             }
         }
@@ -182,6 +183,9 @@ struct ContentViewNext: View {
                         sourcesForActiveMode: pickableSources(for: activeMode),
                         selectedSourceID: selectedSourceIDBinding
                     )
+                    // Changing source restarts capture, which would end the take.
+                    .disabled(vm.isRecording)
+                    .help(vm.isRecording ? "Stop recording to change the source" : "")
                     .padding(.top, 14)
                 }
             }
@@ -474,6 +478,7 @@ struct ContentViewNext: View {
         Binding(
             get: { activeMode },
             set: { newMode in
+                guard !vm.isRecording else { return }
                 activeMode = newMode
                 if newMode != .camera { vm.screenModeSelected() }
                 let candidates = vm.catalog.videoSources.filter {
@@ -488,6 +493,7 @@ struct ContentViewNext: View {
         Binding(
             get: { vm.selectedMainSource?.id },
             set: { newID in
+                guard !vm.isRecording else { return }
                 if let newID,
                    let match = vm.catalog.videoSources.first(where: { $0.id == newID }) {
                     vm.selectedMainSource = match
@@ -727,10 +733,19 @@ struct RecaptrRootView: View {
         .navigationSplitViewStyle(.prominentDetail)
         .sheet(isPresented: Binding(
             get: { TestHooks.isOn ? testSheet == "welcome" : !welcomeSeen },
-            set: { if !$0 { if TestHooks.isOn { testSheet = "" } else { welcomeSeen = true } } }
+            set: { shown in
+                guard !shown else { return }
+                // However it closed, finish like Skip so the preview never stays held.
+                if TestHooks.isOn { testSheet = "" } else {
+                    UserDefaults.standard.set(WhatsNewSheet.version, forKey: WhatsNewSheet.seenKey)
+                    welcomeSeen = true
+                }
+                vm.finishOnboarding()
+            }
         )) {
             WelcomeSheet()
                 .environmentObject(vm)
+                .interactiveDismissDisabled()
         }
         // Coming from 1.0: what changed, instead of the whole onboarding.
         .background {

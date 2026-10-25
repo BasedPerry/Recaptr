@@ -17,7 +17,8 @@ struct SourceSidebar: View {
         Binding(
             get: { vm.selectedMainSource?.id },
             set: { id in
-                guard let id, let match = vm.catalog.videoSources.first(where: { $0.id == id }) else { return }
+                guard !vm.isRecording,
+                      let id, let match = vm.catalog.videoSources.first(where: { $0.id == id }) else { return }
                 vm.selectedMainSource = match
             }
         )
@@ -29,7 +30,9 @@ struct SourceSidebar: View {
     var body: some View {
         // One scrolling form, so tuning can't be pushed off the bottom.
         VStack(spacing: 0) {
+            // The source is locked mid-take: changing it restarts capture.
             SourceModeSegments(activeMode: modeBinding, compact: true)
+                .disabled(vm.isRecording)
                 .padding(4)
                 .background(.quaternary.opacity(0.5), in: Capsule())
                 .padding(.horizontal, 12)
@@ -40,6 +43,7 @@ struct SourceSidebar: View {
                 Section("Source") {
                     sourceRows
                 }
+                .disabled(vm.isRecording)
                 NamingSection()
                 OutputSection(storage: vm.recordingStorage)
                 TuningSections()
@@ -60,6 +64,7 @@ struct SourceSidebar: View {
         Binding(
             get: { mode },
             set: { newMode in
+                guard !vm.isRecording else { return }
                 mode = newMode
                 if newMode != .camera { vm.screenModeSelected() }
                 vm.selectedMainSource = vm.catalog.videoSources.first { $0.kind == newMode.sourceKind }
@@ -102,6 +107,7 @@ struct SourceSidebar: View {
     private func sourceRow(_ source: VideoSource) -> some View {
         let isSelected = vm.selectedMainSource?.id == source.id
         return Button {
+            guard !vm.isRecording else { return }
             vm.selectedMainSource = source
         } label: {
             HStack {

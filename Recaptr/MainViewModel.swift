@@ -371,6 +371,9 @@ final class MainViewModel: ObservableObject {
     /// True while `startPreview` builds the session, so audio changes made
     /// during startup don't trigger a second restart.
     private var isStartingPreview = false
+    /// Bumped by every startPreview. A start that was overtaken while it
+    /// waited on its device stops what it opened instead of keeping it.
+    private var previewGeneration = 0
 
     private var recordingStartedAt: Date?
     /// Global keys for actions, from any app.
@@ -1125,6 +1128,8 @@ final class MainViewModel: ObservableObject {
 
     func startPreview() async {
         guard !holdsForOnboarding else { return }
+        previewGeneration += 1
+        let generation = previewGeneration
         isStartingPreview = true
         defer { isStartingPreview = false }
         stopPreview()
@@ -1169,11 +1174,14 @@ final class MainViewModel: ObservableObject {
                 svc.preferredResolution = captureResolution
                 dims = try await svc.start(cameraUniqueID: cameraID,
                                            previewSink: previewSinkLayer)
+                guard generation == previewGeneration else { svc.stop(); return }
                 lowLightNoiseReductionSupported = svc.lowLightNoiseReductionSupported
                 cameraService = svc
 
             case .screenDisplay, .screenWindow:
-                guard let target = try await screenFilter(for: src) else {
+                let found = try await screenFilter(for: src)
+                guard generation == previewGeneration else { return }
+                guard let target = found else {
                     status = src.kind == .screenDisplay
                         ? "Display \(src.displayID.map(String.init) ?? "?") no longer available — hit Refresh and reselect."
                         : "Window \(src.windowID.map(String.init) ?? "?") no longer available — hit Refresh and reselect."
@@ -1183,6 +1191,7 @@ final class MainViewModel: ObservableObject {
                 let size = screenResolution.fit(target.pixelSize)
                 dims = try await svc.start(filter: target.filter, previewSink: previewSinkLayer, size: size,
                                            frameRate: screenFrameRate, showsCursor: screenShowsCursor)
+                guard generation == previewGeneration else { await svc.stop(); return }
                 screenService = svc
             }
 
@@ -1503,8 +1512,20 @@ final class MainViewModel: ObservableObject {
         }
     }
 
+    /// The stop in progress. A second Stop (button, key, menu bar, quit,
+    /// disk-full) waits for it instead of filing the take again.
+    private var stopTask: Task<Void, Never>?
+
     func stopRecording() async {
+        if let stopTask { await stopTask.value; return }
         guard isRecording else { return }
+        let task = Task { await self.performStop() }
+        stopTask = task
+        await task.value
+        stopTask = nil
+    }
+
+    private func performStop() async {
         // Only the recorder stops; the mixer and stats timer keep running.
         let url = await recorder.stop()
         isRecording = false
@@ -1682,9 +1703,10 @@ final class MainViewModel: ObservableObject {
             }
             return .terminateLater
         }
-        if let finalizeTask {
+        if stopTask != nil || finalizeTask != nil {
             Task {
-                await finalizeTask.value
+                await stopRecording()
+                await finalizeTask?.value
                 NSApp.reply(toApplicationShouldTerminate: true)
             }
             return .terminateLater

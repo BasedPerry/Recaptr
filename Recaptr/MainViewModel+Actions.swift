@@ -66,8 +66,10 @@ extension MainViewModel {
         selectedMainSource = catalog.videoSources.first(where: { $0.kind == mode.sourceKind })
     }
 
-    /// Onboarding is done: start the chosen source.
+    /// Onboarding is done: start the chosen source. Only on a first run;
+    /// reopened from Help it changes nothing, so a take keeps going.
     func finishOnboarding() {
+        guard holdsForOnboarding else { return }
         holdsForOnboarding = false
         let before = selectedMainSource
         selectSource(startSource == .screen ? .screen : .camera)

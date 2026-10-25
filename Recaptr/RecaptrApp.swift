@@ -43,6 +43,7 @@ struct RecaptrApp: App {
                 Button("Welcome to Recaptr") {
                     UserDefaults.standard.set(false, forKey: WelcomeSheet.seenKey)
                 }
+                .disabled(vm.isRecording)
             }
             #if DEBUG
             CommandMenu("Debug") {
