@@ -1481,6 +1481,8 @@ final class MainViewModel: ObservableObject {
             )
             isRecording = true
             recordingStartedAt = Date()
+            lastVideoAccepted = 0
+            videoStalledSince = nil
             notice = nil
             captureEvents = []
             screenRestarts = 0
@@ -2192,6 +2194,28 @@ final class MainViewModel: ObservableObject {
         recorderStatsTimer = nil
     }
 
+    /// A capture card or camera that stops delivering frames mid-take would
+    /// otherwise leave a frozen take that looks like it's recording. Screen
+    /// sources restart themselves instead.
+    private var lastVideoAccepted = 0
+    private var videoStalledSince: Date?
+    private static let videoStallLimit: TimeInterval = 5
+
+    private func checkVideoStall(_ accepted: Int) {
+        guard let src = selectedMainSource, src.kind == .camera, accepted > 0 else { return }
+        if accepted != lastVideoAccepted {
+            lastVideoAccepted = accepted
+            videoStalledSince = nil
+            return
+        }
+        let since = videoStalledSince ?? Date()
+        videoStalledSince = since
+        guard Date().timeIntervalSince(since) >= Self.videoStallLimit, stopReason == nil else { return }
+        stopReason = "\(src.name) sent no video for \(Int(Self.videoStallLimit)) s"
+        show(.videoStopped(src.name))
+        Task { await self.stopRecording() }
+    }
+
     private func tickStats() {
         // Mixer stats update during preview and recording; recorder stats and
         // the timer only while recording.
@@ -2210,6 +2234,7 @@ final class MainViewModel: ObservableObject {
         let snapshot = recorder.stats()
         liveStats = snapshot
         checkRecordingHealth()
+        checkVideoStall(snapshot.videoAccepted)
 
         // Stop on a writer failure so a long take doesn't record nothing.
         if snapshot.writerStatus == .failed {

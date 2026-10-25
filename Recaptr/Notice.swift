@@ -63,6 +63,12 @@ nonisolated struct Notice: Equatable, Identifiable, Sendable {
                fix: .pickSource, endedTake: wasRecording)
     }
 
+    static func videoStopped(_ name: String) -> Notice {
+        Notice(message: "\(name) stopped sending video, so recording stopped. Your recording is saved.",
+               next: "Unplug it and plug it back in, or pick another source.",
+               fix: .pickSource, endedTake: true)
+    }
+
     static func screenStopped(wasRecording: Bool) -> Notice {
         Notice(message: wasRecording ? "Screen capture stopped, so recording stopped. Your recording is saved."
                                      : "Screen capture stopped.",

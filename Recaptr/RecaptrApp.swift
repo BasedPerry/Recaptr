@@ -29,7 +29,8 @@ struct RecaptrApp: App {
         // The preview runs under the traffic lights; keep that corner free of chrome.
         .windowStyle(.hiddenTitleBar)
         .commands {
-            CommandGroup(after: .newItem) {
+            // One window only: a second would take over the single preview.
+            CommandGroup(replacing: .newItem) {
                 RecentRecordingsMenu(vm: vm, recent: vm.recentTakes)
             }
             CommandGroup(replacing: .appInfo) {

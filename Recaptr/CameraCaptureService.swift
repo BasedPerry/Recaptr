@@ -72,6 +72,8 @@ final class CameraCaptureService: NSObject, @unchecked Sendable, AVCaptureVideoD
 
     var onRecordBuffer: ((CMSampleBuffer) -> Void)?
 
+    private var runtimeErrorObserver: NSObjectProtocol?
+
     /// Starts a video-only session and returns the capture size.
     func start(cameraUniqueID: String,
                previewSink: SampleBufferPreviewLayer) async throws -> CMVideoDimensions {
@@ -80,6 +82,7 @@ final class CameraCaptureService: NSObject, @unchecked Sendable, AVCaptureVideoD
             sessionQueue.async {
                 do {
                     try self.configureSession(cameraUniqueID: cameraUniqueID)
+                    self.observeRuntimeErrors()
                     self.session.startRunning()
                     cont.resume(returning: self.activeDimensions)
                 } catch {
@@ -90,6 +93,8 @@ final class CameraCaptureService: NSObject, @unchecked Sendable, AVCaptureVideoD
     }
 
     func stop() {
+        if let runtimeErrorObserver { NotificationCenter.default.removeObserver(runtimeErrorObserver) }
+        runtimeErrorObserver = nil
         sessionQueue.async {
             if self.session.isRunning {
                 self.session.stopRunning()
@@ -98,6 +103,23 @@ final class CameraCaptureService: NSObject, @unchecked Sendable, AVCaptureVideoD
             if let dev = self.lockedDevice {
                 dev.unlockForConfiguration()
                 self.lockedDevice = nil
+            }
+        }
+    }
+
+    /// A runtime error (a USB hiccup, the media server restarting) stops the
+    /// session without disconnecting the device. Start it again; if frames
+    /// still don't come, the view model's stall check ends the take.
+    private func observeRuntimeErrors() {
+        guard runtimeErrorObserver == nil else { return }
+        runtimeErrorObserver = NotificationCenter.default.addObserver(
+            forName: AVCaptureSession.runtimeErrorNotification, object: session, queue: nil
+        ) { [weak self] note in
+            guard let self else { return }
+            let error = note.userInfo?[AVCaptureSessionErrorKey] as? Error
+            print("Recaptr: camera session runtime error: \(error?.localizedDescription ?? "unknown"); restarting")
+            self.sessionQueue.async {
+                if !self.session.isRunning { self.session.startRunning() }
             }
         }
     }
