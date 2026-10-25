@@ -120,10 +120,12 @@ struct SaveFolderRow: View {
 
     var body: some View {
         LabeledContent("Folder") {
-            Text(storage.hasUserLocation ? storage.displayPath : "Recaptr's app container (default)")
+            Text(storage.isMissing ? "\(storage.displayPath) (not connected)"
+                 : storage.hasUserLocation ? storage.displayPath : "Recaptr's app container (default)")
                 .lineLimit(1)
                 .truncationMode(.middle)
-                .foregroundStyle(storage.hasUserLocation ? .primary : .secondary)
+                .foregroundStyle(storage.isMissing ? AnyShapeStyle(Color.orange)
+                                 : storage.hasUserLocation ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
                 .help(storage.displayPath)
         }
         HStack {

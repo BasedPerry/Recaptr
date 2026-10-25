@@ -2,8 +2,8 @@
 //  RecordingStorage.swift
 //  Recaptr
 //
-//  Remembers the save folder with a security-scoped bookmark. Falls
-//  back to the sandbox container when the folder isn't available.
+//  Remembers the save folder with a security-scoped bookmark. The
+//  sandbox container is used only when no folder was chosen.
 //
 
 import Foundation
@@ -20,6 +20,9 @@ final class RecordingStorage: ObservableObject {
 
     /// False when on the sandbox fallback.
     @Published private(set) var hasUserLocation: Bool = false
+
+    /// A folder was chosen but its drive isn't connected right now.
+    @Published private(set) var isMissing: Bool = false
 
     private let bookmarkKey = "com.OvertonForge.Recaptr.saveLocation.bookmark"
     private let usesDefaultKey = "com.OvertonForge.Recaptr.saveLocation.usesDefault"
@@ -51,7 +54,7 @@ final class RecordingStorage: ObservableObject {
         panel.canCreateDirectories = true
         panel.title = "Choose Recaptr Save Location"
         panel.prompt = "Use This Folder"
-        panel.message = "Choose where Recaptr saves recordings. You can change this in Settings."
+        panel.message = "Choose where Recaptr saves recordings. You can change this in the sidebar, under Output."
         panel.directoryURL = Self.userMoviesFolder
 
         let response = panel.runModal()
@@ -68,19 +71,34 @@ final class RecordingStorage: ObservableObject {
         securityScopedURL?.stopAccessingSecurityScopedResource()
         securityScopedURL = nil
         hasUserLocation = false
+        isMissing = false
         displayLabel = "Default (sandbox)"
         displayPath = ""
     }
 
-    /// The chosen folder if it's writable, otherwise the sandbox folder.
+    enum StorageError: LocalizedError {
+        case folderUnavailable
+        var errorDescription: String? { "The chosen save folder isn't available." }
+    }
+
+    /// The chosen folder, or the sandbox folder when none was chosen.
+    /// Throws when a chosen folder is missing (drive unplugged or not
+    /// mounted), so the take isn't recorded somewhere the user can't see.
     func resolveSaveDirectory() throws -> URL {
         // UI tests always record into the sandbox container.
         if TestHooks.isOn {
             return try Self.sandboxDefault()
         }
+        // A drive mounted after launch: try the bookmark again.
+        if securityScopedURL == nil { resolveStoredBookmark() }
         if let url = securityScopedURL,
            FileManager.default.isWritableFile(atPath: url.path) {
+            if isMissing { isMissing = false }
             return url
+        }
+        if UserDefaults.standard.data(forKey: bookmarkKey) != nil {
+            if !isMissing { isMissing = true }
+            throw StorageError.folderUnavailable
         }
         return try Self.sandboxDefault()
     }
@@ -101,6 +119,7 @@ final class RecordingStorage: ObservableObject {
             if url.startAccessingSecurityScopedResource() {
                 securityScopedURL = url
                 hasUserLocation = true
+                isMissing = false
                 displayLabel = url.lastPathComponent
                 displayPath = url.path
             } else {
@@ -126,6 +145,7 @@ final class RecordingStorage: ObservableObject {
             if url.startAccessingSecurityScopedResource() {
                 securityScopedURL = url
                 hasUserLocation = true
+                isMissing = false
                 displayLabel = url.lastPathComponent
                 displayPath = url.path
                 if isStale {
@@ -134,7 +154,18 @@ final class RecordingStorage: ObservableObject {
                 }
             }
         } catch {
-            // Folder gone or volume unmounted. Use the sandbox.
+            // Folder gone or volume unmounted. Show where it was.
+            markMissing(bookmarkData)
+        }
+    }
+
+    private func markMissing(_ bookmarkData: Data) {
+        let values = URL.resourceValues(forKeys: [.pathKey], fromBookmarkData: bookmarkData)
+        isMissing = true
+        hasUserLocation = false
+        if let path = values?.path {
+            displayPath = path
+            displayLabel = (path as NSString).lastPathComponent
         }
     }
 
