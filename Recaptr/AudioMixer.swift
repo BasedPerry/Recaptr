@@ -279,6 +279,8 @@ nonisolated final class AudioInputChannel: @unchecked Sendable {
                 // a stopped engine needs recovering.
                 guard !self.engine.isRunning else {
                     print("AudioInputChannel[\(self.label)]: audio configuration changed, engine still running")
+                    // Running isn't the same as delivering; have it checked.
+                    self.onOutputChange?()
                     return
                 }
                 print("AudioInputChannel[\(self.label)]: audio hardware configuration changed, engine stopped")
@@ -296,6 +298,10 @@ nonisolated final class AudioInputChannel: @unchecked Sendable {
     /// an audio hardware change for this channel's engine.
     var onConfigurationChange: ((AudioInputChannel) -> Void)?
     private var configObserver: NSObjectProtocol?
+
+    /// Set by the mixer. Called on the main queue when the output (or this
+    /// engine's configuration) changed in a way that can silence capture.
+    var onOutputChange: (() -> Void)?
 
     /// Frames captured so far (monotonic). The runtime watchdog
     /// compares successive readings to spot a stalled channel.
@@ -376,6 +382,7 @@ nonisolated final class AudioInputChannel: @unchecked Sendable {
             print("AudioInputChannel[\(self.label)]: output changed, rebuilding monitor")
             self.stopMonitor()
             self.startMonitorIfNeeded()
+            self.onOutputChange?()
         }
     }
     private var monitorConfigObserver: NSObjectProtocol?
@@ -1018,6 +1025,7 @@ final class AudioMixer: @unchecked Sendable {
             ch.onConfigurationChange = { [weak self] ch in
                 self?.recover(ch, reason: "audio hardware changed")
             }
+            ch.onOutputChange = { [weak self] in self?.outputDidChange() }
         }
     }
 
@@ -1093,6 +1101,7 @@ final class AudioMixer: @unchecked Sendable {
 
         scheduleStartWatchdog(attempt: 1)
         startRuntimeWatchdog()
+        listenForOutputChanges()
 
         // UI tests: `-RecaptrUITestStallMixer <seconds>` blocks the
         // emission queue 6 s after start, like a heavily loaded system
@@ -1115,6 +1124,13 @@ final class AudioMixer: @unchecked Sendable {
             DispatchQueue.main.asyncAfter(deadline: .now() + 6) { [weak self] in
                 guard let self, self.running else { return }
                 print("AudioMixer: TEST simulating audio reset (\(mode))")
+                if mode == "output" {
+                    // Inputs go quiet the way an AirPods mode switch leaves
+                    // them, then the output change is reported.
+                    for ch in self.channels where ch.running { ch.simulateEngineStopForTesting(notify: false) }
+                    self.outputDidChange()
+                    return
+                }
                 if mode == "down", let ch = self.channels.first(where: { $0.running && !$0.isExternal }) {
                     // Source device gone for 3 s, then back.
                     ch.unavailableUntilForTesting = Date().addingTimeInterval(3)
@@ -1207,6 +1223,86 @@ final class AudioMixer: @unchecked Sendable {
         }
     }
 
+    // MARK: - Output changes
+
+    /// Switching the Mac's output (AirPods moving into call mode and back
+    /// changes their sample rate) can leave an input engine "running" but
+    /// delivering nothing, with no notice. Shortly after any output change,
+    /// restart inputs that went quiet, instead of leaving a 1.5 s hole for
+    /// the runtime watchdog. Main queue.
+    private let outputSettleCheck: TimeInterval = 0.35
+    private var pendingOutputCheck = false
+    private var defaultOutputListener: AudioObjectPropertyListenerBlock?
+    private var outputRateListener: AudioObjectPropertyListenerBlock?
+    private var outputRateDevice: AudioObjectID = 0
+
+    func outputDidChange() {
+        guard running, !pendingOutputCheck else { return }
+        pendingOutputCheck = true
+        let before = channels.filter { $0.isArmed && !$0.isExternal && $0.running }
+            .map { (channel: $0, frames: $0.pushedFrameCount) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + outputSettleCheck) { [weak self] in
+            guard let self else { return }
+            self.pendingOutputCheck = false
+            guard self.running else { return }
+            for item in before where item.channel.pushedFrameCount == item.frames {
+                // The watchdog would otherwise count this stall again.
+                self.lastPushed[ObjectIdentifier(item.channel)] = nil
+                self.recover(item.channel, reason: "output changed")
+            }
+        }
+    }
+
+    private static func address(_ selector: AudioObjectPropertySelector) -> AudioObjectPropertyAddress {
+        AudioObjectPropertyAddress(mSelector: selector, mScope: kAudioObjectPropertyScopeGlobal,
+                                   mElement: kAudioObjectPropertyElementMain)
+    }
+
+    private func listenForOutputChanges() {
+        guard defaultOutputListener == nil else { return }
+        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            self?.watchDefaultOutputRate()
+            self?.outputDidChange()
+        }
+        var address = Self.address(kAudioHardwarePropertyDefaultOutputDevice)
+        if AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &address, .main, block) == noErr {
+            defaultOutputListener = block
+        }
+        watchDefaultOutputRate()
+    }
+
+    /// The same device changing rate (AirPods 48 to 24 kHz) isn't a
+    /// default-device change, so follow the current output's rate too.
+    private func watchDefaultOutputRate() {
+        removeOutputRateListener()
+        var device = AudioObjectID(0)
+        var size = UInt32(MemoryLayout<AudioObjectID>.size)
+        var address = Self.address(kAudioHardwarePropertyDefaultOutputDevice)
+        guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &device) == noErr,
+              device != 0 else { return }
+        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in self?.outputDidChange() }
+        var rate = Self.address(kAudioDevicePropertyNominalSampleRate)
+        if AudioObjectAddPropertyListenerBlock(device, &rate, .main, block) == noErr {
+            outputRateListener = block
+            outputRateDevice = device
+        }
+    }
+
+    private func removeOutputRateListener() {
+        guard let block = outputRateListener else { return }
+        var rate = Self.address(kAudioDevicePropertyNominalSampleRate)
+        AudioObjectRemovePropertyListenerBlock(outputRateDevice, &rate, .main, block)
+        outputRateListener = nil
+    }
+
+    private func stopListeningForOutputChanges() {
+        removeOutputRateListener()
+        guard let block = defaultOutputListener else { return }
+        var address = Self.address(kAudioHardwarePropertyDefaultOutputDevice)
+        AudioObjectRemovePropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &address, .main, block)
+        defaultOutputListener = nil
+    }
+
     // MARK: - Start watchdog
 
     /// With two input engines, macOS sometimes leaves one started but silent
@@ -1255,6 +1351,7 @@ final class AudioMixer: @unchecked Sendable {
         timer = nil
         runtimeWatchdog?.cancel()
         runtimeWatchdog = nil
+        stopListeningForOutputChanges()
         for ch in channels { ch.stop() }
         running = false
         startClockTime = .invalid  // reset for the next start()

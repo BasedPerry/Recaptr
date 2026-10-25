@@ -37,7 +37,7 @@ Each source gets its own AAC track (no mix track). A linked limiter at -1 dBFS k
 
 **Monitor.** A separate output-only engine. The low-latency path is a sink node writing into a lock-free ring (`MonitorRing`) that the output reads at about 20 ms of fill. Cameras monitor the source; screens monitor the mic only, since system audio already plays.
 
-**Recovery.** A channel that delivers nothing is restarted (0.6 s after start, 1.5 s while running), with back-off, and the UI is told after repeated failures.
+**Recovery.** A channel that delivers nothing is restarted (0.6 s after start, 1.5 s while running), with back-off, and the UI is told after repeated failures. A change of output device or its sample rate (AirPods switching into call mode) can leave an input running but silent with no notice, so inputs are checked 0.35 s after any output change and restarted if quiet: about a 0.7 s hole instead of 1.8 s.
 
 ## Recording
 
@@ -82,7 +82,7 @@ Launch arguments (all need `-RecaptrUITesting YES`, which also keeps test names 
 | `-RecaptrUITestNoDriftCorrection YES` | Measure drift without correcting |
 | `-RecaptrUITestMonitorTapPath YES` | Force the fallback monitor path |
 | `-RecaptrUITestStallMixer <s>` | Stall the mixer 6 s in |
-| `-RecaptrUITestSimulateAudioReset notify\|silent\|down` | Simulate an audio engine reset |
+| `-RecaptrUITestSimulateAudioReset notify\|silent\|down\|output` | Simulate an audio engine reset (`output`: inputs go quiet and an output change is reported) |
 | `-RecaptrUITestNoFragments YES` | Write without fragments (Debug) |
 | `-RecaptrUITestIgnoreFramesFor <s>` | Ignore SCStream frames, to test the seed (Debug) |
 | `-RecaptrUITestHoldMarkerFlash YES` | Hold the marker glow for screenshots |
