@@ -37,9 +37,25 @@ nonisolated struct Notice: Equatable, Identifiable, Sendable {
     /// True when a recording ended early (worth a notification if Recaptr
     /// is in the background).
     var endedTake = false
+    /// A plain confirmation that closes itself after a few seconds.
+    var autoCloses = false
 
     static func == (a: Notice, b: Notice) -> Bool {
         a.message == b.message && a.next == b.next && a.fix == b.fix && a.endedTake == b.endedTake
+    }
+
+    // MARK: - Instant Replay (⇧⌘R)
+
+    static func replaySaved(_ fileName: String) -> Notice {
+        Notice(message: "Saved the last 15 seconds as \(fileName).", autoCloses: true)
+    }
+
+    static func replayUnavailable(isOn: Bool) -> Notice {
+        isOn
+            ? Notice(message: "Instant Replay works with Screen and Window sources.",
+                     next: "Switch to Screen or Window to keep the last 15 seconds.")
+            : Notice(message: "Instant Replay is off.",
+                     next: "Turn it on in the sidebar under Instant Replay, with a Screen or Window source.")
     }
 
     // MARK: - Takes that ended early

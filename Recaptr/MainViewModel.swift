@@ -873,9 +873,9 @@ final class MainViewModel: ObservableObject {
     /// replay), whether or not a recording is running.
     func saveReplay() async {
         guard let svc = screenService, svc.isReplayBuffering else {
-            status = instantReplay
-                ? "Instant replay works with Screen and Window sources."
-                : "Turn on Instant replay in Settings to save the last 15 seconds."
+            let notice = Notice.replayUnavailable(isOn: instantReplay)
+            status = notice.message
+            show(notice)
             return
         }
         do {
@@ -887,9 +887,11 @@ final class MainViewModel: ObservableObject {
             // The status line should describe this clip, not the last recording.
             lastRecordingSummary = nil
             status = "Replay saved → \(url.lastPathComponent)"
+            show(.replaySaved(url.lastPathComponent))
             await probeRecordedFile(url)
         } catch {
             status = "Replay failed: \(error.localizedDescription)"
+            show(Notice(message: "Couldn't save the replay.", next: error.localizedDescription))
         }
     }
 

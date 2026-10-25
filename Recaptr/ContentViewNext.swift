@@ -220,6 +220,12 @@ struct ContentViewNext: View {
                     .padding(.top, 70)
                     .padding(.horizontal, 16)
                     .transition(reduceMotion ? .opacity : .move(edge: .top).combined(with: .opacity))
+                    // Plain confirmations close themselves; problems stay until closed.
+                    .task(id: notice.id) {
+                        guard notice.autoCloses else { return }
+                        try? await Task.sleep(for: .seconds(4))
+                        if vm.notice?.id == notice.id { withAnimation(chromeAnimation) { vm.notice = nil } }
+                    }
                 }
             }
             .animation(chromeAnimation, value: vm.notice)
