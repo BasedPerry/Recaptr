@@ -124,7 +124,9 @@ struct TuckedTab: View {
         .padding(.leading, edge == .right ? 8 : 10)
         .padding(.trailing, edge == .right ? 10 : 8)
         .contentShape(shape)
-        .recaptrGlass(in: shape)
+        // Tinted REC red (U1): the tab is small enough that plain glass is
+        // hard to read over gameplay. Same tint as the full recording pill.
+        .recaptrGlass(in: shape, tint: Color.red.opacity(0.12))
         .recaptrGlassID(BottomBar.glassID, in: glassNamespace)
         .help("Click or pull out to bring the recording pill back. Drag up or down to move it.")
         .accessibilityElement(children: .combine)

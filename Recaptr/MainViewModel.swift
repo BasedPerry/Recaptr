@@ -1539,9 +1539,13 @@ final class MainViewModel: ObservableObject {
         isRecording = false
         refreshGlobalHotKeys()
         // The window was closed mid-take: bring it back for the after-take
-        // card, without pulling Recaptr in front of the game, and not when
-        // the take ended because Recaptr is quitting.
-        if Self.mainWindow == nil, !isQuitting { openMainWindow?() }
+        // card, and not when the take ended because Recaptr is quitting.
+        // With a console on the capture card, Recaptr's preview is the game,
+        // so the window comes to the front; a full-screen game on this Mac
+        // stays in front and the window opens behind it.
+        if Self.mainWindow == nil, !isQuitting {
+            if Self.frontAppIsFullScreen() { openMainWindow?() } else { bringForward() }
+        }
         captureOutline.setRecording(false)
         if let activity = recordingActivity {
             ProcessInfo.processInfo.endActivity(activity)

@@ -115,6 +115,25 @@ extension MainViewModel {
         }
     }
 
+    /// True when another app is in front with a window covering a whole
+    /// screen, e.g. a game played on this Mac. Window bounds need no
+    /// Screen Recording permission.
+    static func frontAppIsFullScreen() -> Bool {
+        guard let front = NSWorkspace.shared.frontmostApplication,
+              front.processIdentifier != ProcessInfo.processInfo.processIdentifier,
+              let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
+                                                    kCGNullWindowID) as? [[String: Any]]
+        else { return false }
+        let screens = NSScreen.screens.map(\.frame.size)
+        return list.contains { info in
+            guard (info[kCGWindowOwnerPID as String] as? pid_t) == front.processIdentifier,
+                  (info[kCGWindowLayer as String] as? Int) == 0,
+                  let dict = info[kCGWindowBounds as String] as? NSDictionary,
+                  let bounds = CGRect(dictionaryRepresentation: dict) else { return false }
+            return screens.contains { $0 == bounds.size }
+        }
+    }
+
     static let mainWindowID = "main"
 
     /// The capture window, not About or Settings.
